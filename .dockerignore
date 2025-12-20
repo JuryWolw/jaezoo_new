@@ -1,8 +1,13 @@
 **/bin/
 **/obj/
 **/.vs/
-**/.vscode/
+**/.idea/
+**/.git/
 **/*.user
 **/*.suo
-**/*.csproj.user
+**/*.log
 **/*.db
+**/*.db-shm
+**/*.db-wal
+Dockerfile
+README*
