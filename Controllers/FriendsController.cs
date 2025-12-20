@@ -1,8 +1,10 @@
 ﻿using System.Security.Claims;
 using JaeZoo.Server.Data;
+using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Controllers;
@@ -13,7 +15,13 @@ namespace JaeZoo.Server.Controllers;
 public class FriendsController : ControllerBase
 {
     private readonly AppDbContext _db;
-    public FriendsController(AppDbContext db) => _db = db;
+    private readonly IHubContext<ChatHub> _hub;
+
+    public FriendsController(AppDbContext db, IHubContext<ChatHub> hub)
+    {
+        _db = db;
+        _hub = hub;
+    }
 
     // --------------------------------------------------
     // Helpers
@@ -30,79 +38,160 @@ public class FriendsController : ControllerBase
         }
     }
 
+    private Task NotifyFriendRequestsChanged(Guid a, Guid b) =>
+        _hub.Clients.Users(a.ToString(), b.ToString()).SendAsync("FriendRequestsChanged");
+
+    private Task NotifyFriendsChanged(Guid a, Guid b) =>
+        _hub.Clients.Users(a.ToString(), b.ToString()).SendAsync("FriendsChanged");
+
     // --------------------------------------------------
-    // Список принятых друзей (как раньше)
+    // Список принятых друзей
     // GET /api/friends/list
     // --------------------------------------------------
     [HttpGet("list")]
-    public async Task<ActionResult<IEnumerable<FriendDto>>> List()
+    public async Task<ActionResult<IEnumerable<FriendDto>>> List(CancellationToken ct)
     {
         var me = MeId;
 
         var friendIds = await _db.Friendships
+            .AsNoTracking()
             .Where(f => f.Status == FriendshipStatus.Accepted &&
                         (f.RequesterId == me || f.AddresseeId == me))
             .Select(f => f.RequesterId == me ? f.AddresseeId : f.RequesterId)
             .Distinct()
-            .ToListAsync();
+            .ToListAsync(ct);
 
         var friends = await _db.Users
+            .AsNoTracking()
             .Where(u => friendIds.Contains(u.Id))
             .OrderBy(u => u.UserName)
             .Select(u => new FriendDto(u.Id, u.UserName, u.Email))
-            .ToListAsync();
+            .ToListAsync(ct);
 
         return Ok(friends);
     }
 
     // --------------------------------------------------
-    // Отправить заявку (idempotent). Встречная — автопринятие (как было)
+    // Отправить заявку (идемпотентно)
     // POST /api/friends/request/{userId}
+    // Поведение:
+    // - если встречная Pending (от userId ко мне) => авто-принятие
+    // - если Declined => переоткрываем как Pending (обновляем запись)
     // --------------------------------------------------
     [HttpPost("request/{userId:guid}")]
-    public async Task<IActionResult> SendRequest(Guid userId)
+    public async Task<IActionResult> SendRequest(Guid userId, CancellationToken ct)
     {
         var me = MeId;
         if (me == userId) return BadRequest(new { error = "Cannot befriend yourself." });
 
-        var userExists = await _db.Users.AnyAsync(u => u.Id == userId);
+        var userExists = await _db.Users.AsNoTracking().AnyAsync(u => u.Id == userId, ct);
         if (!userExists) return NotFound(new { error = "User not found." });
 
         var existing = await _db.Friendships
-            .Where(f => (f.RequesterId == me && f.AddresseeId == userId) ||
-                        (f.RequesterId == userId && f.AddresseeId == me))
-            .OrderBy(f => f.CreatedAt)
-            .FirstOrDefaultAsync();
+            .Where(f =>
+                (f.RequesterId == me && f.AddresseeId == userId) ||
+                (f.RequesterId == userId && f.AddresseeId == me))
+            .OrderByDescending(f => f.CreatedAt)
+            .FirstOrDefaultAsync(ct);
 
+        // 1) Нет записи => создаём Pending (me -> userId)
         if (existing is null)
         {
-            _db.Friendships.Add(new Friendship
+            var entity = new Friendship
             {
                 Id = Guid.NewGuid(),
                 RequesterId = me,
                 AddresseeId = userId,
                 Status = FriendshipStatus.Pending,
                 CreatedAt = DateTime.UtcNow
+            };
+            _db.Friendships.Add(entity);
+            await _db.SaveChangesAsync(ct);
+
+            await NotifyFriendRequestsChanged(me, userId);
+
+            return Ok(new
+            {
+                state = "pending",
+                created = true,
+                accepted = false,
+                requestId = entity.Id
             });
-            await _db.SaveChangesAsync();
-            return Ok(new { created = true, accepted = false });
         }
 
-        // встречная ожидала — принимаем
+        // 2) Уже друзья
+        if (existing.Status == FriendshipStatus.Accepted)
+        {
+            return Ok(new
+            {
+                state = "friends",
+                created = false,
+                accepted = true,
+                requestId = existing.Id
+            });
+        }
+
+        // 3) Встречная pending (userId -> me) => авто-принятие
         if (existing.Status == FriendshipStatus.Pending &&
             existing.RequesterId == userId && existing.AddresseeId == me)
         {
             existing.Status = FriendshipStatus.Accepted;
-            await _db.SaveChangesAsync();
-            return Ok(new { created = false, accepted = true });
+            await _db.SaveChangesAsync(ct);
+
+            await NotifyFriendRequestsChanged(me, userId);
+            await NotifyFriendsChanged(me, userId);
+
+            return Ok(new
+            {
+                state = "friends",
+                created = false,
+                accepted = true,
+                autoAccepted = true,
+                requestId = existing.Id
+            });
         }
 
-        // уже друзья или уже моя pending
+        // 4) Я уже отправлял pending (me -> userId)
+        if (existing.Status == FriendshipStatus.Pending &&
+            existing.RequesterId == me && existing.AddresseeId == userId)
+        {
+            return Ok(new
+            {
+                state = "pending",
+                created = false,
+                accepted = false,
+                requestId = existing.Id
+            });
+        }
+
+        // 5) Declined (в любом направлении) => переоткрываем как Pending (me -> userId)
+        if (existing.Status == FriendshipStatus.Declined)
+        {
+            existing.RequesterId = me;
+            existing.AddresseeId = userId;
+            existing.Status = FriendshipStatus.Pending;
+            existing.CreatedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync(ct);
+
+            await NotifyFriendRequestsChanged(me, userId);
+
+            return Ok(new
+            {
+                state = "pending",
+                created = false,
+                reopened = true,
+                accepted = false,
+                requestId = existing.Id
+            });
+        }
+
+        // На всякий случай
         return Ok(new
         {
+            state = "unknown",
             created = false,
-            accepted = existing.Status == FriendshipStatus.Accepted,
-            pending = existing.Status == FriendshipStatus.Pending && existing.RequesterId == me
+            accepted = false,
+            requestId = existing.Id
         });
     }
 
@@ -111,7 +200,7 @@ public class FriendsController : ControllerBase
     // GET /api/friends/requests/incoming
     // --------------------------------------------------
     [HttpGet("requests/incoming")]
-    public async Task<ActionResult<IEnumerable<FriendRequestDto>>> IncomingRequests()
+    public async Task<ActionResult<IEnumerable<FriendRequestDto>>> IncomingRequests(CancellationToken ct)
     {
         var me = MeId;
 
@@ -129,7 +218,7 @@ public class FriendsController : ControllerBase
                       u.Email,
                       f.CreatedAt,
                       "incoming"))
-            .ToListAsync();
+            .ToListAsync(ct);
 
         return Ok(list);
     }
@@ -139,7 +228,7 @@ public class FriendsController : ControllerBase
     // GET /api/friends/requests/outgoing
     // --------------------------------------------------
     [HttpGet("requests/outgoing")]
-    public async Task<ActionResult<IEnumerable<FriendRequestDto>>> OutgoingRequests()
+    public async Task<ActionResult<IEnumerable<FriendRequestDto>>> OutgoingRequests(CancellationToken ct)
     {
         var me = MeId;
 
@@ -157,7 +246,7 @@ public class FriendsController : ControllerBase
                       u.Email,
                       f.CreatedAt,
                       "outgoing"))
-            .ToListAsync();
+            .ToListAsync(ct);
 
         return Ok(list);
     }
@@ -167,19 +256,23 @@ public class FriendsController : ControllerBase
     // POST /api/friends/requests/{requestId}/accept
     // --------------------------------------------------
     [HttpPost("requests/{requestId:guid}/accept")]
-    public async Task<IActionResult> Accept(Guid requestId)
+    public async Task<IActionResult> Accept(Guid requestId, CancellationToken ct)
     {
         var me = MeId;
 
         var req = await _db.Friendships.FirstOrDefaultAsync(f =>
             f.Id == requestId &&
             f.Status == FriendshipStatus.Pending &&
-            f.AddresseeId == me);
+            f.AddresseeId == me, ct);
 
         if (req is null) return NotFound(new { error = "Request not found." });
 
         req.Status = FriendshipStatus.Accepted;
-        await _db.SaveChangesAsync();
+        await _db.SaveChangesAsync(ct);
+
+        await NotifyFriendRequestsChanged(me, req.RequesterId);
+        await NotifyFriendsChanged(me, req.RequesterId);
+
         return Ok(new { ok = true });
     }
 
@@ -188,19 +281,22 @@ public class FriendsController : ControllerBase
     // POST /api/friends/requests/{requestId}/decline
     // --------------------------------------------------
     [HttpPost("requests/{requestId:guid}/decline")]
-    public async Task<IActionResult> Decline(Guid requestId)
+    public async Task<IActionResult> Decline(Guid requestId, CancellationToken ct)
     {
         var me = MeId;
 
         var req = await _db.Friendships.FirstOrDefaultAsync(f =>
             f.Id == requestId &&
             f.Status == FriendshipStatus.Pending &&
-            f.AddresseeId == me);
+            f.AddresseeId == me, ct);
 
         if (req is null) return NotFound(new { error = "Request not found." });
 
         req.Status = FriendshipStatus.Declined;
-        await _db.SaveChangesAsync();
+        await _db.SaveChangesAsync(ct);
+
+        await NotifyFriendRequestsChanged(me, req.RequesterId);
+
         return Ok(new { ok = true });
     }
 
@@ -209,19 +305,24 @@ public class FriendsController : ControllerBase
     // DELETE /api/friends/requests/{requestId}
     // --------------------------------------------------
     [HttpDelete("requests/{requestId:guid}")]
-    public async Task<IActionResult> Cancel(Guid requestId)
+    public async Task<IActionResult> Cancel(Guid requestId, CancellationToken ct)
     {
         var me = MeId;
 
         var req = await _db.Friendships.FirstOrDefaultAsync(f =>
             f.Id == requestId &&
             f.Status == FriendshipStatus.Pending &&
-            f.RequesterId == me);
+            f.RequesterId == me, ct);
 
         if (req is null) return NotFound(new { error = "Request not found." });
 
+        var otherId = req.AddresseeId;
+
         _db.Friendships.Remove(req);
-        await _db.SaveChangesAsync();
+        await _db.SaveChangesAsync(ct);
+
+        await NotifyFriendRequestsChanged(me, otherId);
+
         return Ok(new { ok = true });
     }
 }
