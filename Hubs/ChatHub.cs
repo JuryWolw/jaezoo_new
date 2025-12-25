@@ -19,7 +19,21 @@ public class ChatHub : Hub
         _presence = presence;
     }
 
-    private Guid MeId => Guid.Parse(Context.User!.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+    private Guid MeId
+    {
+        get
+        {
+            var s = Context.User?.FindFirst("sub")?.Value
+                    ?? Context.User?.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                    ?? Context.User?.FindFirst("uid")?.Value;
+
+            if (!Guid.TryParse(s, out var id))
+                throw new HubException("No user id claim.");
+
+            return id;
+        }
+    }
+
     private static (Guid a, Guid b) OrderPair(Guid x, Guid y) => x < y ? (x, y) : (y, x);
 
     private async Task<bool> AreFriends(Guid me, Guid other) =>
@@ -28,15 +42,32 @@ public class ChatHub : Hub
             ((f.RequesterId == me && f.AddresseeId == other) ||
              (f.RequesterId == other && f.AddresseeId == me)));
 
+    /// <summary>
+    /// Безопасно "get or create" диалога: если два потока создали одновременно,
+    /// уникальный индекс сработает — мы просто перечитаем существующий диалог.
+    /// </summary>
     private async Task<DirectDialog> GetOrCreateDialog(Guid aId, Guid bId)
     {
         var (u1, u2) = OrderPair(aId, bId);
+
         var dlg = await _db.DirectDialogs.FirstOrDefaultAsync(d => d.User1Id == u1 && d.User2Id == u2);
         if (dlg is not null) return dlg;
+
         dlg = new DirectDialog { User1Id = u1, User2Id = u2 };
         _db.DirectDialogs.Add(dlg);
-        await _db.SaveChangesAsync();
-        return dlg;
+
+        try
+        {
+            await _db.SaveChangesAsync();
+            return dlg;
+        }
+        catch (DbUpdateException)
+        {
+            // гонка: кто-то создал диалог раньше
+            var existing = await _db.DirectDialogs.FirstOrDefaultAsync(d => d.User1Id == u1 && d.User2Id == u2);
+            if (existing is not null) return existing;
+            throw;
+        }
     }
 
     // ===== Presence (с учётом ShowOnline) =====
@@ -48,7 +79,6 @@ public class ChatHub : Hub
 
         if (first)
         {
-            // Проверяем приватность
             var canShow = await _db.Users
                 .Where(u => u.Id == MeId)
                 .Select(u => u.ShowOnline)
@@ -83,7 +113,7 @@ public class ChatHub : Hub
     /// <summary>Список userId, которые и подключены, и не скрывают присутствие.</summary>
     public async Task<List<string>> GetOnlineUsers()
     {
-        var online = await _presence.GetOnlineUsers(); // все подключённые id (string)
+        var online = await _presence.GetOnlineUsers();
         if (online.Count == 0) return online;
 
         var onlineGuids = online.Select(Guid.Parse).ToList();
@@ -92,7 +122,6 @@ public class ChatHub : Hub
             .Select(u => u.Id.ToString())
             .ToListAsync();
 
-        // упорядочим, чтобы клиент получал стабильный список
         visible.Sort(StringComparer.Ordinal);
         return visible;
     }
@@ -118,10 +147,10 @@ public class ChatHub : Hub
             Text = text,
             SentAt = DateTime.UtcNow
         };
+
         _db.DirectMessages.Add(msg);
         await _db.SaveChangesAsync();
 
-        // Отправляем обоим юзерам
         var payload = new { senderId = msg.SenderId, text = msg.Text, sentAt = msg.SentAt };
         await Clients.Users(me.ToString(), targetUserId.ToString())
             .SendAsync("ReceiveDirectMessage", payload);
