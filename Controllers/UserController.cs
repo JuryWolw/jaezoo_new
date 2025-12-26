@@ -1,9 +1,12 @@
 ﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Linq;
 using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Hubs;
+using Microsoft.AspNetCore.SignalR;
 
 namespace JaeZoo.Server.Controllers
 {
@@ -15,12 +18,43 @@ namespace JaeZoo.Server.Controllers
         private readonly AppDbContext _db;
         private readonly ILogger<UsersController> _log;
         private readonly IWebHostEnvironment _env;
+        private readonly IHubContext<ChatHub> _hub;
 
-        public UsersController(AppDbContext db, ILogger<UsersController> log, IWebHostEnvironment env)
+        public UsersController(AppDbContext db, ILogger<UsersController> log, IWebHostEnvironment env, IHubContext<ChatHub> hub)
         {
             _db = db;
             _log = log;
             _env = env;
+            _hub = hub;
+        }
+
+        private async Task NotifyAvatarChangedAsync(Guid userId, string? avatarUrl, CancellationToken ct)
+        {
+            try
+            {
+                // все принятые друзья + сам юзер (чтобы обновились остальные его клиенты)
+                var friendIds = await _db.Friendships
+                    .AsNoTracking()
+                    .Where(f => f.Status == FriendshipStatus.Accepted &&
+                                (f.RequesterId == userId || f.AddresseeId == userId))
+                    .Select(f => f.RequesterId == userId ? f.AddresseeId : f.RequesterId)
+                    .Distinct()
+                    .ToListAsync(ct);
+
+                var targets = friendIds
+                    .Select(x => x.ToString())
+                    .Append(userId.ToString())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                // payload минимальный: кто поменял и на что
+                await _hub.Clients.Users(targets)
+                    .SendAsync("UserAvatarChanged", new { userId = userId.ToString(), avatarUrl }, ct);
+            }
+            catch
+            {
+                // не валим запрос из-за уведомлений
+            }
         }
 
         private Guid MeId
@@ -127,6 +161,8 @@ namespace JaeZoo.Server.Controllers
             var me = await _db.Users.FirstAsync(u => u.Id == MeId, ct);
             me.AvatarUrl = string.IsNullOrWhiteSpace(body.AvatarUrl) ? null : body.AvatarUrl.Trim();
             await _db.SaveChangesAsync(ct);
+
+            await NotifyAvatarChangedAsync(me.Id, string.IsNullOrWhiteSpace(me.AvatarUrl) ? $"/avatars/{me.Id}" : me.AvatarUrl, ct);
             return Ok(ToProfileDto(me));
         }
 
@@ -172,6 +208,8 @@ namespace JaeZoo.Server.Controllers
             var me = await _db.Users.FirstAsync(u => u.Id == uid, ct);
             me.AvatarUrl = url;
             await _db.SaveChangesAsync(ct);
+
+            await NotifyAvatarChangedAsync(uid, url, ct);
 
             return Ok(new { url });
         }
