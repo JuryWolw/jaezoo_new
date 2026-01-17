@@ -13,14 +13,14 @@ namespace JaeZoo.Server.Controllers
     [ApiController]
     [Route("api/[controller]")]
     [Authorize]
-    public class UserController : ControllerBase
+    public class UsersController : ControllerBase
     {
         private readonly AppDbContext _db;
-        private readonly ILogger<UserController> _log;
+        private readonly ILogger<UsersController> _log;
         private readonly IWebHostEnvironment _env;
         private readonly IHubContext<ChatHub> _hub;
 
-        public UserController(AppDbContext db, ILogger<UserController> log, IWebHostEnvironment env, IHubContext<ChatHub> hub)
+        public UsersController(AppDbContext db, ILogger<UsersController> log, IWebHostEnvironment env, IHubContext<ChatHub> hub)
         {
             _db = db;
             _log = log;
@@ -94,7 +94,7 @@ namespace JaeZoo.Server.Controllers
             var res = await baseQuery
                 .AsNoTracking()
                 .OrderBy(u => u.UserName)
-                .Select(u => new UserSearchDto(u.Id, u.UserName, u.Email))
+                .Select(u => new UserSearchDto(u.Id, u.UserName, u.Email, u.AvatarUrl))
                 .Take(25)
                 .ToListAsync(ct);
 
@@ -191,9 +191,6 @@ namespace JaeZoo.Server.Controllers
                 return BadRequest("Пустой файл.");
 
             var uid = MeId;
-
-            // Загружаем пользователя заранее, чтобы одним SaveChanges сохранить и Avatar, и AvatarUrl.
-            var me = await _db.Users.FirstAsync(u => u.Id == uid, ct);
             var entity = new Avatar
             {
                 UserId = uid,
@@ -206,14 +203,13 @@ namespace JaeZoo.Server.Controllers
             var version = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var url = $"/avatars/{uid}?v={version}";
 
+            var me = await _db.Users.FirstAsync(u => u.Id == uid, ct);
             me.AvatarUrl = url;
 
+            // Один SaveChanges: и аватар, и ссылка в профиле
             await _db.SaveChangesAsync(ct);
 
             await NotifyAvatarChangedAsync(uid, url, ct);
-
-            // ВАЖНО: возвращаем тот же контракт, что и остальные методы профиля (UserProfileDto),
-            // чтобы клиент (UserProfileService.UploadAvatar) работал без костылей.
             return Ok(ToProfileDto(me));
         }
 

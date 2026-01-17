@@ -4,8 +4,12 @@ public record RegisterRequest(string UserName, string Email, string Password, st
 public record LoginRequest(string LoginOrEmail, string Password);
 public record UserDto(Guid Id, string UserName, string Email, DateTime CreatedAt);
 public record TokenResponse(string Token, UserDto User);
-public record UserSearchDto(Guid Id, string UserName, string Email);
-public record FriendDto(Guid Id, string UserName, string Email);
+
+// Для списков/поиска на клиенте важно иметь AvatarUrl (иначе приходится делать лишние запросы).
+// AvatarUrl может быть null — тогда клиент использует fallback /avatars/{id}.
+public record UserSearchDto(Guid Id, string UserName, string Email, string? AvatarUrl);
+public record FriendDto(Guid Id, string UserName, string Email, string? AvatarUrl);
+
 public record MessageDto(Guid SenderId, string Text, DateTime SentAt);
 
 // Заявки в друзья (входящие/исходящие)

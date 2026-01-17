@@ -65,7 +65,7 @@ public class FriendsController : ControllerBase
             .AsNoTracking()
             .Where(u => friendIds.Contains(u.Id))
             .OrderBy(u => u.UserName)
-            .Select(u => new FriendDto(u.Id, u.UserName, u.Email))
+            .Select(u => new FriendDto(u.Id, u.UserName, u.Email, u.AvatarUrl))
             .ToListAsync(ct);
 
         return Ok(friends);
