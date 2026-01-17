@@ -13,14 +13,14 @@ namespace JaeZoo.Server.Controllers
     [ApiController]
     [Route("api/[controller]")]
     [Authorize]
-    public class UsersController : ControllerBase
+    public class UserController : ControllerBase
     {
         private readonly AppDbContext _db;
-        private readonly ILogger<UsersController> _log;
+        private readonly ILogger<UserController> _log;
         private readonly IWebHostEnvironment _env;
         private readonly IHubContext<ChatHub> _hub;
 
-        public UsersController(AppDbContext db, ILogger<UsersController> log, IWebHostEnvironment env, IHubContext<ChatHub> hub)
+        public UserController(AppDbContext db, ILogger<UserController> log, IWebHostEnvironment env, IHubContext<ChatHub> hub)
         {
             _db = db;
             _log = log;
@@ -170,7 +170,7 @@ namespace JaeZoo.Server.Controllers
         [Authorize]
         [RequestSizeLimit(5 * 1024 * 1024)] // 5MB
         [HttpPost("avatar/upload")]
-        public async Task<IActionResult> UploadAvatar(IFormFile file, CancellationToken ct)
+        public async Task<ActionResult<UserProfileDto>> UploadAvatar([FromForm] IFormFile file, CancellationToken ct)
         {
             if (file == null || file.Length == 0)
                 return BadRequest("Файл не найден.");
@@ -191,6 +191,9 @@ namespace JaeZoo.Server.Controllers
                 return BadRequest("Пустой файл.");
 
             var uid = MeId;
+
+            // Загружаем пользователя заранее, чтобы одним SaveChanges сохранить и Avatar, и AvatarUrl.
+            var me = await _db.Users.FirstAsync(u => u.Id == uid, ct);
             var entity = new Avatar
             {
                 UserId = uid,
@@ -200,18 +203,18 @@ namespace JaeZoo.Server.Controllers
             };
 
             _db.Avatars.Add(entity);
-            await _db.SaveChangesAsync(ct);
-
             var version = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var url = $"/avatars/{uid}?v={version}";
 
-            var me = await _db.Users.FirstAsync(u => u.Id == uid, ct);
             me.AvatarUrl = url;
+
             await _db.SaveChangesAsync(ct);
 
             await NotifyAvatarChangedAsync(uid, url, ct);
 
-            return Ok(new { url });
+            // ВАЖНО: возвращаем тот же контракт, что и остальные методы профиля (UserProfileDto),
+            // чтобы клиент (UserProfileService.UploadAvatar) работал без костылей.
+            return Ok(ToProfileDto(me));
         }
 
         // ===== Выдача аватара =====
