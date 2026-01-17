@@ -1,31 +1,47 @@
-# ---------- build ---------- 
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build 
-WORKDIR /src 
+# ---------- build ----------
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
 
-# 1) Сначала только файлы проекта для кешируемого restore COPY *.csproj ./ 
-RUN dotnet restore 
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    NUGET_XMLDOC_MODE=skip \
+    DOTNET_NOLOGO=1
 
-# 2) Потом остальной код 
-COPY . ./ 
+# Копируем весь репозиторий сразу (надёжно для любой структуры)
+COPY . .
 
-# 3) Publish без restore 
-RUN dotnet publish -c Release -o /app/publish --no-restore 
-/p:UseAppHost=false 
+# Если есть .sln — используем его, иначе восстанавливаем и публикуем первый найденный csproj
+RUN if ls *.sln >/dev/null 2>&1; then \
+      dotnet restore; \
+    else \
+      dotnet restore $(find . -maxdepth 3 -name "*.csproj" | head -n 1); \
+    fi
 
-# ---------- runtime ---------- 
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime 
-WORKDIR /app 
+# Публикуем сервер:
+# 1) если есть .sln — пытаемся опубликовать проект, который содержит "Server"
+# 2) иначе публикуем первый найденный csproj
+RUN if ls *.sln >/dev/null 2>&1; then \
+      dotnet publish $(find . -maxdepth 4 -name "*.csproj" | grep -i "server" | head -n 1) \
+        -c Release -o /app/publish --no-restore /p:UseAppHost=false; \
+    else \
+      dotnet publish $(find . -maxdepth 4 -name "*.csproj" | head -n 1) \
+        -c Release -o /app/publish --no-restore /p:UseAppHost=false; \
+    fi
 
-ARG APP_UID=10001 
+# ---------- runtime ----------
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+WORKDIR /app
 
-RUN set -eux; \ 
-	if ! getent group app >/dev/null; then groupadd -g ${APP_UID} app; fi; \ 
-	if ! id -u app >/dev/null 2>&1; then useradd -u ${APP_UID} -g app -m -s /usr/sbin/nologin app; fi 
-	
-# Копируем сразу с владельцем — быстрее и можно убрать отдельный chown 
-COPY --from=build --chown=app:app /app/publish ./ 
-USER app 
+ARG APP_UID=10001
+RUN set -eux; \
+    if ! getent group app >/dev/null; then groupadd -g ${APP_UID} app; fi; \
+    if ! id -u app >/dev/null 2>&1; then useradd -u ${APP_UID} -g app -m -s /usr/sbin/nologin app; fi
 
-ENV ASPNETCORE_URLS=http://0.0.0.0:${PORT} 
-EXPOSE 8080 
+COPY --from=build --chown=app:app /app/publish ./
+
+USER app
+
+# Render задаёт PORT — слушаем его. Локально будет 8080.
+ENV ASPNETCORE_URLS=http://0.0.0.0:${PORT:-8080}
+EXPOSE 8080
+
 ENTRYPOINT ["dotnet", "JaeZoo.Server.dll"]
