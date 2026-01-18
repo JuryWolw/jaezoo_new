@@ -3,6 +3,7 @@ using JaeZoo.Server.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using System.Security.Claims;
 
 namespace JaeZoo.Server.Hubs;
@@ -12,11 +13,14 @@ public class ChatHub : Hub
 {
     private readonly AppDbContext _db;
     private readonly IPresenceTracker _presence;
+    private readonly ILogger<ChatHub> _log;
 
-    public ChatHub(AppDbContext db, IPresenceTracker presence)
+
+    public ChatHub(AppDbContext db, IPresenceTracker presence, ILogger<ChatHub> log)
     {
         _db = db;
         _presence = presence;
+        _log = log;
     }
 
     private Guid MeId
@@ -166,66 +170,81 @@ public class ChatHub : Hub
 
     public async Task SendDirectMessage(Guid targetUserId, string text)
     {
-        text = (text ?? "").Trim();
-        if (string.IsNullOrWhiteSpace(text)) return;
-
-        var me = MeId;
-
-        if (!await AreFriends(me, targetUserId))
-            throw new HubException("Вы не друзья.");
-
-        var dlg = await GetOrCreateDialog(me, targetUserId);
-
-        var msg = new DirectMessage
-        {
-            DialogId = dlg.Id,
-            SenderId = me,
-            Text = text,
-            SentAt = DateTime.UtcNow
-        };
-
-        _db.DirectMessages.Add(msg);
-        await _db.SaveChangesAsync();
-
-        // сообщение получат оба (и sender, и receiver). Важно: peerId различается для каждого получателя
-        var payloadForSender = new
-        {
-            peerId = targetUserId,
-            messageId = msg.Id,
-            senderId = msg.SenderId,
-            text = msg.Text,
-            sentAt = msg.SentAt
-        };
-
-        var payloadForReceiver = new
-        {
-            peerId = me,
-            messageId = msg.Id,
-            senderId = msg.SenderId,
-            text = msg.Text,
-            sentAt = msg.SentAt
-        };
-
-        await Clients.User(me.ToString()).SendAsync("ReceiveDirectMessage", payloadForSender);
-        await Clients.User(targetUserId.ToString()).SendAsync("ReceiveDirectMessage", payloadForReceiver);
-
-        // обновляем счётчик непрочитанных для получателя (лампочка + "Новое")
         try
         {
-            var ct = Context.ConnectionAborted;
-            var (count, firstId, firstAt) = await GetUnreadForUserAsync(dlg, targetUserId, ct);
+            text = (text ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(text)) return;
 
-            await Clients.User(targetUserId.ToString()).SendAsync("UnreadChanged", new
+            var me = MeId;
+
+            if (!await AreFriends(me, targetUserId))
+                throw new HubException("Вы не друзья.");
+
+            var dlg = await GetOrCreateDialog(me, targetUserId);
+
+            var msg = new DirectMessage
             {
-                friendId = me,
-                unreadCount = count,
-                firstUnreadId = firstId,
-                firstUnreadAt = firstAt
-            }, ct);
+                DialogId = dlg.Id,
+                SenderId = me,
+                Text = text,
+                SentAt = DateTime.UtcNow
+            };
+
+            _db.DirectMessages.Add(msg);
+            await _db.SaveChangesAsync();
+
+            // сообщение получат оба (и sender, и receiver). Важно: peerId различается для каждого получателя
+            var payloadForSender = new
+            {
+                peerId = targetUserId,
+                messageId = msg.Id,
+                senderId = msg.SenderId,
+                text = msg.Text,
+                sentAt = msg.SentAt
+            };
+
+            var payloadForReceiver = new
+            {
+                peerId = me,
+                messageId = msg.Id,
+                senderId = msg.SenderId,
+                text = msg.Text,
+                sentAt = msg.SentAt
+            };
+
+            await Clients.User(me.ToString()).SendAsync("ReceiveDirectMessage", payloadForSender);
+            await Clients.User(targetUserId.ToString()).SendAsync("ReceiveDirectMessage", payloadForReceiver);
+
+            // обновляем счётчик непрочитанных для получателя (лампочка + "Новое")
+            try
+            {
+                var ct = Context.ConnectionAborted;
+                var (count, firstId, firstAt) = await GetUnreadForUserAsync(dlg, targetUserId, ct);
+
+                await Clients.User(targetUserId.ToString()).SendAsync("UnreadChanged", new
+                {
+                    friendId = me,
+                    unreadCount = count,
+                    firstUnreadId = firstId,
+                    firstUnreadAt = firstAt
+                }, ct);
+            }
+            catch (Exception ex)
+            {
+                // не валим отправку сообщения из-за уведомлений
+                _log.LogWarning(ex, "UnreadChanged failed. me={Me} target={Target} dialog={Dialog}", me, targetUserId, dlg.Id);
+            }
         }
-        catch
+        catch (HubException)
         {
-            // не валим отправку сообщения из-за уведомлений
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Это и есть причина твоего "unexpected error invoking SendDirectMessage".
+            // Временно отдаём текст ошибки клиенту + логируем, чтобы быстро починить Render.
+            _log.LogError(ex, "SendDirectMessage failed. target={Target}", targetUserId);
+            throw new HubException($"SendDirectMessage failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 }

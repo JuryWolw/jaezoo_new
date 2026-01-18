@@ -72,12 +72,18 @@ builder.Services.AddControllers()
 var redis = Environment.GetEnvironmentVariable("REDIS_URL");
 if (!string.IsNullOrWhiteSpace(redis))
 {
-    builder.Services.AddSignalR()
-        .AddStackExchangeRedis(redis);
+    builder.Services.AddSignalR(o =>
+    {
+        o.EnableDetailedErrors = true;
+    })
+    .AddStackExchangeRedis(redis);
 }
 else
 {
-    builder.Services.AddSignalR();
+    builder.Services.AddSignalR(o =>
+    {
+        o.EnableDetailedErrors = true;
+    });
 }
 
 // presence-трекер в памяти
