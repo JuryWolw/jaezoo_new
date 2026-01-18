@@ -70,13 +70,15 @@ builder.Services.AddControllers()
 
 // Optional: Redis backplane для масштабирования SignalR (включается, если REDIS_URL задан)
 var redis = Environment.GetEnvironmentVariable("REDIS_URL");
+
 if (!string.IsNullOrWhiteSpace(redis))
 {
     builder.Services.AddSignalR(o =>
     {
+        // полезно для отладки на проде (можно оставить true)
         o.EnableDetailedErrors = true;
     })
-    .AddStackExchangeRedis(redis);
+        .AddStackExchangeRedis(redis);
 }
 else
 {
@@ -128,11 +130,36 @@ builder.Services.AddSwaggerGen(c =>
 
 var app = builder.Build();
 
-// ---------- Миграция БД ----------
+// ---------- Миграция БД + самовосстановление схемы ----------
 using (var scope = app.Services.CreateScope())
 {
+    var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DbInit");
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
     await db.Database.MigrateAsync();
+
+    // ЖЕЛЕЗОБЕТОН: если Render DB старая и миграция почему-то не добавила колонки — добавим сами.
+    if (db.Database.IsNpgsql())
+    {
+        try
+        {
+            // Важно: IF NOT EXISTS есть в Postgres и безопасен при повторных стартах.
+            await db.Database.ExecuteSqlRawAsync("""
+                ALTER TABLE "DirectDialogs"
+                    ADD COLUMN IF NOT EXISTS "LastReadAtUser1" timestamptz NOT NULL DEFAULT TIMESTAMPTZ '0001-01-01 00:00:00+00',
+                    ADD COLUMN IF NOT EXISTS "LastReadMessageIdUser1" uuid NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+                    ADD COLUMN IF NOT EXISTS "LastReadAtUser2" timestamptz NOT NULL DEFAULT TIMESTAMPTZ '0001-01-01 00:00:00+00',
+                    ADD COLUMN IF NOT EXISTS "LastReadMessageIdUser2" uuid NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000';
+                """);
+
+            logger.LogInformation("DirectDialogs read-state columns ensured.");
+        }
+        catch (Exception ex)
+        {
+            // Не валим весь сервер — но логируем, чтобы было видно причину.
+            logger.LogError(ex, "Failed to ensure DirectDialogs read-state columns.");
+        }
+    }
 }
 
 // ---------- wwwroot/avatars ----------
