@@ -53,7 +53,15 @@ public class ChatHub : Hub
         var dlg = await _db.DirectDialogs.FirstOrDefaultAsync(d => d.User1Id == u1 && d.User2Id == u2);
         if (dlg is not null) return dlg;
 
-        dlg = new DirectDialog { User1Id = u1, User2Id = u2 };
+        dlg = new DirectDialog
+        {
+            User1Id = u1,
+            User2Id = u2,
+            LastReadAtUser1 = DateTime.MinValue,
+            LastReadMessageIdUser1 = Guid.Empty,
+            LastReadAtUser2 = DateTime.MinValue,
+            LastReadMessageIdUser2 = Guid.Empty
+        };
         _db.DirectDialogs.Add(dlg);
 
         try
@@ -68,6 +76,34 @@ public class ChatHub : Hub
             if (existing is not null) return existing;
             throw;
         }
+    }
+
+    private static (DateTime at, Guid id) GetReadCursor(DirectDialog dlg, Guid userId)
+    {
+        if (userId == dlg.User1Id) return (dlg.LastReadAtUser1, dlg.LastReadMessageIdUser1);
+        if (userId == dlg.User2Id) return (dlg.LastReadAtUser2, dlg.LastReadMessageIdUser2);
+        return (DateTime.MinValue, Guid.Empty);
+    }
+
+    private async Task<(int count, Guid? firstId, DateTime? firstAt)> GetUnreadForUserAsync(DirectDialog dlg, Guid userId, CancellationToken ct)
+    {
+        var (at, id) = GetReadCursor(dlg, userId);
+
+        var q = _db.DirectMessages
+            .AsNoTracking()
+            .Where(m => m.DialogId == dlg.Id && m.SenderId != userId)
+            .Where(m => m.SentAt > at || (m.SentAt == at && m.Id.CompareTo(id) > 0));
+
+        var count = await q.CountAsync(ct);
+        if (count == 0) return (0, null, null);
+
+        var first = await q
+            .OrderBy(m => m.SentAt)
+            .ThenBy(m => m.Id)
+            .Select(m => new { m.Id, m.SentAt })
+            .FirstOrDefaultAsync(ct);
+
+        return (count, first?.Id, first?.SentAt);
     }
 
     // ===== Presence (с учётом ShowOnline) =====
@@ -151,8 +187,45 @@ public class ChatHub : Hub
         _db.DirectMessages.Add(msg);
         await _db.SaveChangesAsync();
 
-        var payload = new { senderId = msg.SenderId, text = msg.Text, sentAt = msg.SentAt };
-        await Clients.Users(me.ToString(), targetUserId.ToString())
-            .SendAsync("ReceiveDirectMessage", payload);
+        // сообщение получат оба (и sender, и receiver). Важно: peerId различается для каждого получателя
+        var payloadForSender = new
+        {
+            peerId = targetUserId,
+            messageId = msg.Id,
+            senderId = msg.SenderId,
+            text = msg.Text,
+            sentAt = msg.SentAt
+        };
+
+        var payloadForReceiver = new
+        {
+            peerId = me,
+            messageId = msg.Id,
+            senderId = msg.SenderId,
+            text = msg.Text,
+            sentAt = msg.SentAt
+        };
+
+        await Clients.User(me.ToString()).SendAsync("ReceiveDirectMessage", payloadForSender);
+        await Clients.User(targetUserId.ToString()).SendAsync("ReceiveDirectMessage", payloadForReceiver);
+
+        // обновляем счётчик непрочитанных для получателя (лампочка + "Новое")
+        try
+        {
+            var ct = Context.ConnectionAborted;
+            var (count, firstId, firstAt) = await GetUnreadForUserAsync(dlg, targetUserId, ct);
+
+            await Clients.User(targetUserId.ToString()).SendAsync("UnreadChanged", new
+            {
+                friendId = me,
+                unreadCount = count,
+                firstUnreadId = firstId,
+                firstUnreadAt = firstAt
+            }, ct);
+        }
+        catch
+        {
+            // не валим отправку сообщения из-за уведомлений
+        }
     }
 }

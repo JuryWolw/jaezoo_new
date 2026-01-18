@@ -36,7 +36,15 @@ public class ChatController(AppDbContext db) : ControllerBase
         var dlg = await db.DirectDialogs.FirstOrDefaultAsync(d => d.User1Id == u1 && d.User2Id == u2);
         if (dlg is not null) return dlg;
 
-        dlg = new DirectDialog { User1Id = u1, User2Id = u2 };
+        dlg = new DirectDialog
+        {
+            User1Id = u1,
+            User2Id = u2,
+            LastReadAtUser1 = DateTime.MinValue,
+            LastReadMessageIdUser1 = Guid.Empty,
+            LastReadAtUser2 = DateTime.MinValue,
+            LastReadMessageIdUser2 = Guid.Empty
+        };
         db.DirectDialogs.Add(dlg);
 
         try
@@ -58,6 +66,28 @@ public class ChatController(AppDbContext db) : ControllerBase
             f.Status == FriendshipStatus.Accepted &&
             ((f.RequesterId == me && f.AddresseeId == other) ||
              (f.RequesterId == other && f.AddresseeId == me)));
+
+    private static (DateTime at, Guid id) GetReadCursor(DirectDialog dlg, Guid me)
+    {
+        if (me == dlg.User1Id) return (dlg.LastReadAtUser1, dlg.LastReadMessageIdUser1);
+        if (me == dlg.User2Id) return (dlg.LastReadAtUser2, dlg.LastReadMessageIdUser2);
+        // теоретически не должно происходить
+        return (DateTime.MinValue, Guid.Empty);
+    }
+
+    private static void SetReadCursor(DirectDialog dlg, Guid me, DateTime atUtc, Guid msgId)
+    {
+        if (me == dlg.User1Id)
+        {
+            dlg.LastReadAtUser1 = atUtc;
+            dlg.LastReadMessageIdUser1 = msgId;
+        }
+        else
+        {
+            dlg.LastReadAtUser2 = atUtc;
+            dlg.LastReadMessageIdUser2 = msgId;
+        }
+    }
 
     /// <summary>
     /// История сообщений с другом.
@@ -122,7 +152,7 @@ public class ChatController(AppDbContext db) : ControllerBase
                 .OrderByDescending(m => m.SentAt)
                 .ThenByDescending(m => m.Id)
                 .Take(Math.Clamp(take, 1, 200))
-                .Select(m => new MessageDto(m.SenderId, m.Text, m.SentAt))
+                .Select(m => new MessageDto(m.Id, m.SenderId, m.Text, m.SentAt))
                 .ToListAsync();
 
             return Ok(itemsCursor);
@@ -134,9 +164,84 @@ public class ChatController(AppDbContext db) : ControllerBase
             .ThenBy(m => m.Id)
             .Skip(Math.Max(0, skip))
             .Take(Math.Clamp(take, 1, 200))
-            .Select(m => new MessageDto(m.SenderId, m.Text, m.SentAt))
+            .Select(m => new MessageDto(m.Id, m.SenderId, m.Text, m.SentAt))
             .ToListAsync();
 
         return Ok(items);
+    }
+
+    /// <summary>
+    /// Сводка непрочитанных по всем диалогам текущего пользователя.
+    /// Нужна для "лампочки" в списке друзей и для плашки "Новое".
+    /// </summary>
+    [HttpGet("unread")]
+    public async Task<ActionResult<IEnumerable<UnreadDialogDto>>> UnreadSummary(CancellationToken ct)
+    {
+        var me = MeId;
+
+        // берём только принятых друзей
+        var friendIds = await db.Friendships
+            .AsNoTracking()
+            .Where(f => f.Status == FriendshipStatus.Accepted && (f.RequesterId == me || f.AddresseeId == me))
+            .Select(f => f.RequesterId == me ? f.AddresseeId : f.RequesterId)
+            .Distinct()
+            .ToListAsync(ct);
+
+        var result = new List<UnreadDialogDto>(friendIds.Count);
+
+        foreach (var friendId in friendIds)
+        {
+            var dlg = await GetOrCreateDialog(me, friendId);
+            var (at, id) = GetReadCursor(dlg, me);
+
+            var q = db.DirectMessages
+                .AsNoTracking()
+                .Where(m => m.DialogId == dlg.Id && m.SenderId != me)
+                .Where(m => m.SentAt > at || (m.SentAt == at && m.Id.CompareTo(id) > 0));
+
+            var count = await q.CountAsync(ct);
+            if (count == 0)
+            {
+                result.Add(new UnreadDialogDto(friendId, 0, null, null));
+                continue;
+            }
+
+            var first = await q
+                .OrderBy(m => m.SentAt)
+                .ThenBy(m => m.Id)
+                .Select(m => new { m.Id, m.SentAt })
+                .FirstOrDefaultAsync(ct);
+
+            result.Add(new UnreadDialogDto(friendId, count, first?.Id, first?.SentAt));
+        }
+
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Отметить диалог прочитанным до заданного курсора.
+    /// Клиент передаёт (LastReadAt, LastReadMessageId) последнего видимого сообщения.
+    /// </summary>
+    [HttpPost("mark-read/{friendId:guid}")]
+    public async Task<IActionResult> MarkRead(Guid friendId, [FromBody] MarkReadRequest body, CancellationToken ct)
+    {
+        var me = MeId;
+        if (!await AreFriends(me, friendId)) return Forbid();
+
+        var dlg = await GetOrCreateDialog(me, friendId);
+
+        var at = DateTime.SpecifyKind(body.LastReadAt, DateTimeKind.Utc);
+        var mid = body.LastReadMessageId;
+
+        var (curAt, curId) = GetReadCursor(dlg, me);
+
+        // обновляем только если курсор двигается вперёд
+        if (at > curAt || (at == curAt && mid.CompareTo(curId) > 0))
+        {
+            SetReadCursor(dlg, me, at, mid);
+            await db.SaveChangesAsync(ct);
+        }
+
+        return Ok(new { ok = true });
     }
 }

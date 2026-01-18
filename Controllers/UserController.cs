@@ -170,7 +170,7 @@ namespace JaeZoo.Server.Controllers
         [Authorize]
         [RequestSizeLimit(5 * 1024 * 1024)] // 5MB
         [HttpPost("avatar/upload")]
-        public async Task<ActionResult<UserProfileDto>> UploadAvatar([FromForm] IFormFile file, CancellationToken ct)
+        public async Task<IActionResult> UploadAvatar(IFormFile file, CancellationToken ct)
         {
             if (file == null || file.Length == 0)
                 return BadRequest("Файл не найден.");
@@ -200,17 +200,18 @@ namespace JaeZoo.Server.Controllers
             };
 
             _db.Avatars.Add(entity);
+            await _db.SaveChangesAsync(ct);
+
             var version = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var url = $"/avatars/{uid}?v={version}";
 
             var me = await _db.Users.FirstAsync(u => u.Id == uid, ct);
             me.AvatarUrl = url;
-
-            // Один SaveChanges: и аватар, и ссылка в профиле
             await _db.SaveChangesAsync(ct);
 
             await NotifyAvatarChangedAsync(uid, url, ct);
-            return Ok(ToProfileDto(me));
+
+            return Ok(new { url });
         }
 
         // ===== Выдача аватара =====

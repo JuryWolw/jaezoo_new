@@ -65,6 +65,18 @@ namespace JaeZoo.Server.Migrations
                     b.Property<Guid>("User2Id")
                         .HasColumnType("uuid");
 
+                    b.Property<DateTime>("LastReadAtUser1")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("LastReadMessageIdUser1")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("LastReadAtUser2")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("LastReadMessageIdUser2")
+                        .HasColumnType("uuid");
+
                     b.HasKey("Id");
 
                     b.HasIndex("User1Id", "User2Id")
