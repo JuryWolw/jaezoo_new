@@ -30,10 +30,14 @@ public class FriendsController : ControllerBase
     {
         get
         {
-            var id = User.FindFirstValue(ClaimTypes.NameIdentifier)
-                  ?? User.FindFirstValue("sub");
+            // Keep consistent with ChatHub claim resolution: sub -> NameIdentifier -> uid
+            var id = User.FindFirstValue("sub")
+                  ?? User.FindFirstValue(ClaimTypes.NameIdentifier)
+                  ?? User.FindFirstValue("uid");
+
             if (string.IsNullOrWhiteSpace(id))
                 throw new InvalidOperationException("No user id in claims.");
+
             return Guid.Parse(id);
         }
     }
