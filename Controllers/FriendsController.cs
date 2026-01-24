@@ -38,6 +38,8 @@ public class FriendsController : ControllerBase
         }
     }
 
+    private static (Guid a, Guid b) OrderPair(Guid x, Guid y) => x < y ? (x, y) : (y, x);
+
     private Task NotifyFriendRequestsChanged(Guid a, Guid b) =>
         _hub.Clients.Users(a.ToString(), b.ToString()).SendAsync("FriendRequestsChanged");
 
@@ -74,9 +76,6 @@ public class FriendsController : ControllerBase
     // --------------------------------------------------
     // Отправить заявку (идемпотентно)
     // POST /api/friends/request/{userId}
-    // Поведение:
-    // - если встречная Pending (от userId ко мне) => авто-принятие
-    // - если Declined => переоткрываем как Pending (обновляем запись)
     // --------------------------------------------------
     [HttpPost("request/{userId:guid}")]
     public async Task<IActionResult> SendRequest(Guid userId, CancellationToken ct)
@@ -94,7 +93,6 @@ public class FriendsController : ControllerBase
             .OrderByDescending(f => f.CreatedAt)
             .FirstOrDefaultAsync(ct);
 
-        // 1) Нет записи => создаём Pending (me -> userId)
         if (existing is null)
         {
             var entity = new Friendship
@@ -119,7 +117,6 @@ public class FriendsController : ControllerBase
             });
         }
 
-        // 2) Уже друзья
         if (existing.Status == FriendshipStatus.Accepted)
         {
             return Ok(new
@@ -131,7 +128,6 @@ public class FriendsController : ControllerBase
             });
         }
 
-        // 3) Встречная pending (userId -> me) => авто-принятие
         if (existing.Status == FriendshipStatus.Pending &&
             existing.RequesterId == userId && existing.AddresseeId == me)
         {
@@ -151,7 +147,6 @@ public class FriendsController : ControllerBase
             });
         }
 
-        // 4) Я уже отправлял pending (me -> userId)
         if (existing.Status == FriendshipStatus.Pending &&
             existing.RequesterId == me && existing.AddresseeId == userId)
         {
@@ -164,7 +159,6 @@ public class FriendsController : ControllerBase
             });
         }
 
-        // 5) Declined (в любом направлении) => переоткрываем как Pending (me -> userId)
         if (existing.Status == FriendshipStatus.Declined)
         {
             existing.RequesterId = me;
@@ -185,7 +179,6 @@ public class FriendsController : ControllerBase
             });
         }
 
-        // На всякий случай
         return Ok(new
         {
             state = "unknown",
@@ -196,7 +189,7 @@ public class FriendsController : ControllerBase
     }
 
     // --------------------------------------------------
-    // Входящие заявки (я адресат)
+    // Входящие заявки
     // GET /api/friends/requests/incoming
     // --------------------------------------------------
     [HttpGet("requests/incoming")]
@@ -224,7 +217,7 @@ public class FriendsController : ControllerBase
     }
 
     // --------------------------------------------------
-    // Исходящие заявки (я отправитель)
+    // Исходящие заявки
     // GET /api/friends/requests/outgoing
     // --------------------------------------------------
     [HttpGet("requests/outgoing")]
@@ -252,7 +245,7 @@ public class FriendsController : ControllerBase
     }
 
     // --------------------------------------------------
-    // Принять заявку (только адресат)
+    // Принять заявку
     // POST /api/friends/requests/{requestId}/accept
     // --------------------------------------------------
     [HttpPost("requests/{requestId:guid}/accept")]
@@ -277,7 +270,7 @@ public class FriendsController : ControllerBase
     }
 
     // --------------------------------------------------
-    // Отклонить заявку (только адресат)
+    // Отклонить заявку
     // POST /api/friends/requests/{requestId}/decline
     // --------------------------------------------------
     [HttpPost("requests/{requestId:guid}/decline")]
@@ -301,7 +294,7 @@ public class FriendsController : ControllerBase
     }
 
     // --------------------------------------------------
-    // Отменить свою исходящую (только отправитель)
+    // Отменить свою исходящую
     // DELETE /api/friends/requests/{requestId}
     // --------------------------------------------------
     [HttpDelete("requests/{requestId:guid}")]
@@ -324,5 +317,70 @@ public class FriendsController : ControllerBase
         await NotifyFriendRequestsChanged(me, otherId);
 
         return Ok(new { ok = true });
+    }
+
+    // --------------------------------------------------
+    // Удалить друга (+ опционально очистить историю)
+    // DELETE /api/friends/{friendId}?clearChatHistory=true|false
+    // --------------------------------------------------
+    [HttpDelete("{friendId:guid}")]
+    public async Task<IActionResult> RemoveFriend(
+        Guid friendId,
+        [FromQuery] bool clearChatHistory = false,
+        CancellationToken ct = default)
+    {
+        var me = MeId;
+        if (friendId == me) return BadRequest(new { error = "Cannot remove yourself." });
+
+        // Должны быть друзья (Accepted) — иначе не даём "удалять друга".
+        var acceptedExists = await _db.Friendships.AnyAsync(f =>
+            f.Status == FriendshipStatus.Accepted &&
+            ((f.RequesterId == me && f.AddresseeId == friendId) ||
+             (f.RequesterId == friendId && f.AddresseeId == me)), ct);
+
+        if (!acceptedExists)
+            return NotFound(new { error = "Friendship not found." });
+
+        // Удаляем все записи дружбы/заявок между парой (чтобы не оставалось хвостов Pending/Declined).
+        var allBetween = await _db.Friendships
+            .Where(f =>
+                (f.RequesterId == me && f.AddresseeId == friendId) ||
+                (f.RequesterId == friendId && f.AddresseeId == me))
+            .ToListAsync(ct);
+
+        _db.Friendships.RemoveRange(allBetween);
+
+        // Опционально чистим историю ЛС: messages + dialog
+        bool chatCleared = false;
+        if (clearChatHistory)
+        {
+            var (u1, u2) = OrderPair(me, friendId);
+
+            var dlg = await _db.DirectDialogs
+                .FirstOrDefaultAsync(d => d.User1Id == u1 && d.User2Id == u2, ct);
+
+            if (dlg is not null)
+            {
+                // EF Core 8: быстрый bulk delete без загрузки всех сообщений в память
+                await _db.DirectMessages
+                    .Where(m => m.DialogId == dlg.Id)
+                    .ExecuteDeleteAsync(ct);
+
+                _db.DirectDialogs.Remove(dlg);
+                chatCleared = true;
+            }
+        }
+
+        await _db.SaveChangesAsync(ct);
+
+        // Синхронизация клиента
+        await NotifyFriendsChanged(me, friendId);
+        await NotifyFriendRequestsChanged(me, friendId);
+
+        return Ok(new
+        {
+            ok = true,
+            clearedChat = chatCleared
+        });
     }
 }
