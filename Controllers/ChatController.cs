@@ -54,7 +54,6 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
         }
         catch (DbUpdateException)
         {
-            // гонка: диалог уже создали
             var existing = await db.DirectDialogs.FirstOrDefaultAsync(d => d.User1Id == u1 && d.User2Id == u2, ct);
             if (existing is not null) return existing;
             throw;
@@ -95,11 +94,22 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
         return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
     }
 
-    /// <summary>
-    /// История сообщений с другом.
-    /// Совместимость: skip/take (старый режим).
-    /// Надёжный курсор: before/after + beforeId/afterId (новый режим).
-    /// </summary>
+    private static bool IsImage(string? ct) =>
+        !string.IsNullOrWhiteSpace(ct) && ct.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsVideo(string? ct) =>
+        !string.IsNullOrWhiteSpace(ct) && ct.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
+
+    private static AttachmentDto ToAttachmentDto(ChatFile f) => new(
+        f.Id,
+        f.OriginalFileName,
+        f.ContentType,
+        f.SizeBytes,
+        $"/api/files/{f.Id}",
+        IsImage(f.ContentType),
+        IsVideo(f.ContentType)
+    );
+
     [HttpGet("history/{friendId:guid}")]
     public async Task<ActionResult<IEnumerable<MessageDto>>> History(
         Guid friendId,
@@ -114,14 +124,11 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
     {
         try
         {
-            // 1) friend должен существовать, иначе возможен FK/DbUpdateException внутри GetOrCreateDialog
             var friendExists = await db.Users.AsNoTracking().AnyAsync(u => u.Id == friendId, ct);
             if (!friendExists) return NotFound(new { error = "Friend not found." });
 
-            // 2) доступ только для друзей
             if (!await AreFriends(MeId, friendId, ct)) return Forbid();
 
-            // 3) диалог может создаваться в гонке / может упасть — history не должен убивать клиента
             DirectDialog dlg;
             try
             {
@@ -137,13 +144,12 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
                 .AsNoTracking()
                 .Where(m => m.DialogId == dlg.Id);
 
-            // ===== КУРСОРНЫЙ РЕЖИМ =====
+            // ===== cursor mode =====
             if (before.HasValue || after.HasValue)
             {
                 if (before.HasValue)
                 {
                     var bt = EnsureUtc(before.Value);
-
                     if (beforeId.HasValue)
                     {
                         var bid = beforeId.Value;
@@ -158,7 +164,6 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
                 if (after.HasValue)
                 {
                     var at = EnsureUtc(after.Value);
-
                     if (afterId.HasValue)
                     {
                         var aid = afterId.Value;
@@ -170,38 +175,82 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
                     }
                 }
 
-                var itemsCursor = await q
+                var rows = await q
                     .OrderByDescending(m => m.SentAt)
                     .ThenByDescending(m => m.Id)
                     .Take(Math.Clamp(take, 1, 200))
-                    .Select(m => new MessageDto(m.Id, m.SenderId, m.Text, m.SentAt))
+                    .Select(m => new { m.Id, m.SenderId, m.Text, m.SentAt })
                     .ToListAsync(ct);
 
-                return Ok(itemsCursor);
+                var msgIds = rows.Select(r => r.Id).ToList();
+                var att = await LoadAttachmentsForMessages(msgIds, ct);
+
+                var items = rows.Select(r =>
+                    new MessageDto(r.Id, r.SenderId, r.Text, r.SentAt,
+                        att.TryGetValue(r.Id, out var list) ? list : null
+                    )
+                ).ToList();
+
+                return Ok(items);
             }
 
-            // ===== СТАРЫЙ РЕЖИМ =====
-            var items = await q
+            // ===== old mode (skip/take) =====
+            var rowsOld = await q
                 .OrderBy(m => m.SentAt)
                 .ThenBy(m => m.Id)
                 .Skip(Math.Max(0, skip))
                 .Take(Math.Clamp(take, 1, 200))
-                .Select(m => new MessageDto(m.Id, m.SenderId, m.Text, m.SentAt))
+                .Select(m => new { m.Id, m.SenderId, m.Text, m.SentAt })
                 .ToListAsync(ct);
 
-            return Ok(items);
+            var msgIdsOld = rowsOld.Select(r => r.Id).ToList();
+            var attOld = await LoadAttachmentsForMessages(msgIdsOld, ct);
+
+            var itemsOld = rowsOld.Select(r =>
+                new MessageDto(r.Id, r.SenderId, r.Text, r.SentAt,
+                    attOld.TryGetValue(r.Id, out var list) ? list : null
+                )
+            ).ToList();
+
+            return Ok(itemsOld);
         }
         catch (Exception ex)
         {
-            // Железно: history не должен отдавать 500, иначе клиент будет падать при открытии чата
             log.LogError(ex, "History failed: me={MeId}, friend={FriendId}", MeId, friendId);
             return Ok(Array.Empty<MessageDto>());
         }
     }
 
-    /// <summary>
-    /// Сводка непрочитанных по всем диалогам текущего пользователя.
-    /// </summary>
+    private async Task<Dictionary<Guid, List<AttachmentDto>>> LoadAttachmentsForMessages(List<Guid> messageIds, CancellationToken ct)
+    {
+        if (messageIds.Count == 0)
+            return new();
+
+        var rows = await (
+            from a in db.DirectMessageAttachments.AsNoTracking()
+            join f in db.ChatFiles.AsNoTracking() on a.FileId equals f.Id
+            where messageIds.Contains(a.MessageId)
+            select new { a.MessageId, File = f }
+        ).ToListAsync(ct);
+
+        var map = new Dictionary<Guid, List<AttachmentDto>>();
+        foreach (var r in rows)
+        {
+            if (!map.TryGetValue(r.MessageId, out var list))
+            {
+                list = new List<AttachmentDto>();
+                map[r.MessageId] = list;
+            }
+            list.Add(ToAttachmentDto(r.File));
+        }
+
+        // стабильный порядок вложений
+        foreach (var kv in map)
+            kv.Value.Sort((x, y) => string.CompareOrdinal(x.FileName, y.FileName));
+
+        return map;
+    }
+
     [HttpGet("unread")]
     public async Task<ActionResult<IEnumerable<UnreadDialogDto>>> UnreadSummary(CancellationToken ct)
     {
@@ -220,7 +269,6 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
 
             foreach (var friendId in friendIds)
             {
-                // friend может быть удалён/битый FK → не валим
                 var friendExists = await db.Users.AsNoTracking().AnyAsync(u => u.Id == friendId, ct);
                 if (!friendExists)
                 {
@@ -272,9 +320,6 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
         }
     }
 
-    /// <summary>
-    /// Отметить диалог прочитанным до заданного курсора.
-    /// </summary>
     [HttpPost("mark-read/{friendId:guid}")]
     public async Task<IActionResult> MarkRead(Guid friendId, [FromBody] MarkReadRequest body, CancellationToken ct)
     {
@@ -286,7 +331,6 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
             if (!friendExists) return NotFound(new { error = "Friend not found." });
 
             if (!await AreFriends(me, friendId, ct)) return Forbid();
-
             if (body is null) return BadRequest(new { error = "Body is required." });
 
             var mid = body.LastReadMessageId;
@@ -302,13 +346,11 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
             catch (Exception ex)
             {
                 log.LogError(ex, "GetOrCreateDialog failed in MarkRead: me={MeId}, friend={FriendId}", me, friendId);
-                // клиенту не надо падать — просто ок
                 return Ok(new { ok = true });
             }
 
             var (curAt, curId) = GetReadCursor(dlg, me);
 
-            // обновляем только если курсор двигается вперёд
             if (at > curAt || (at == curAt && mid.CompareTo(curId) > 0))
             {
                 SetReadCursor(dlg, me, at, mid);
@@ -320,7 +362,6 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
         catch (Exception ex)
         {
             log.LogError(ex, "MarkRead failed: me={MeId}, friend={FriendId}", MeId, friendId);
-            // Не валим клиента
             return Ok(new { ok = true });
         }
     }

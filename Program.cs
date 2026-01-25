@@ -3,6 +3,7 @@ using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Middleware;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -20,6 +21,13 @@ var isPg = conn.Contains("Host=", StringComparison.OrdinalIgnoreCase)
 
 if (isPg) builder.Services.AddDbContext<AppDbContext>(o => o.UseNpgsql(conn));
 else builder.Services.AddDbContext<AppDbContext>(o => o.UseSqlite(conn));
+
+// ---------- Files / multipart limits ----------
+var maxUploadBytes = builder.Configuration.GetValue<long?>("Files:MaxUploadBytes") ?? (50L * 1024 * 1024);
+builder.Services.Configure<FormOptions>(o =>
+{
+    o.MultipartBodyLengthLimit = maxUploadBytes;
+});
 
 // ---------- JWT ----------
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
@@ -43,7 +51,6 @@ builder.Services
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key))
         };
 
-        // Токен для SignalR из query (?access_token=...) на /hubs/chat
         o.Events = new JwtBearerEvents
         {
             OnMessageReceived = context =>
@@ -64,41 +71,30 @@ builder.Services.AddScoped<TokenService>();
 builder.Services.AddControllers()
     .ConfigureApiBehaviorOptions(o =>
     {
-        // 400 с ProblemDetails при невалидной модели
         o.SuppressModelStateInvalidFilter = false;
     });
 
-// Optional: Redis backplane для масштабирования SignalR (включается, если REDIS_URL задан)
+// Optional: Redis backplane
 var redis = Environment.GetEnvironmentVariable("REDIS_URL");
-
 if (!string.IsNullOrWhiteSpace(redis))
 {
-    builder.Services.AddSignalR(o =>
-    {
-        // полезно для отладки на проде (можно оставить true)
-        o.EnableDetailedErrors = true;
-    })
+    builder.Services.AddSignalR(o => { o.EnableDetailedErrors = true; })
         .AddStackExchangeRedis(redis);
 }
 else
 {
-    builder.Services.AddSignalR(o =>
-    {
-        o.EnableDetailedErrors = true;
-    });
+    builder.Services.AddSignalR(o => { o.EnableDetailedErrors = true; });
 }
 
-// presence-трекер в памяти
 builder.Services.AddSingleton<IPresenceTracker, PresenceTracker>();
 
 // ---------- Производительность ----------
-builder.Services.AddResponseCompression(); // Gzip/Brotli
-builder.Services.AddResponseCaching();     // кратковременный кеш для GET
+builder.Services.AddResponseCompression();
+builder.Services.AddResponseCaching();
 
 // ---------- Rate limiting ----------
 builder.Services.AddRateLimiter(options =>
 {
-    // Глобально: не более 100 запросов в минуту с одного IP
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
         RateLimitPartition.GetFixedWindowLimiter(
             partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
@@ -109,7 +105,6 @@ builder.Services.AddRateLimiter(options =>
                 QueueLimit = 0
             }));
 
-    // Отдельная политика для Auth (более строгая)
     options.AddPolicy("auth", httpContext =>
         RateLimitPartition.GetFixedWindowLimiter(
             partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
@@ -138,12 +133,10 @@ using (var scope = app.Services.CreateScope())
 
     await db.Database.MigrateAsync();
 
-    // ЖЕЛЕЗОБЕТОН: если Render DB старая и миграция почему-то не добавила колонки — добавим сами.
     if (db.Database.IsNpgsql())
     {
         try
         {
-            // Важно: IF NOT EXISTS есть в Postgres и безопасен при повторных стартах.
             await db.Database.ExecuteSqlRawAsync("""
                 ALTER TABLE "DirectDialogs"
                     ADD COLUMN IF NOT EXISTS "LastReadAtUser1" timestamptz NOT NULL DEFAULT TIMESTAMPTZ '0001-01-01 00:00:00+00',
@@ -156,16 +149,19 @@ using (var scope = app.Services.CreateScope())
         }
         catch (Exception ex)
         {
-            // Не валим весь сервер — но логируем, чтобы было видно причину.
             logger.LogError(ex, "Failed to ensure DirectDialogs read-state columns.");
         }
     }
 }
 
-// ---------- wwwroot/avatars ----------
+// ---------- wwwroot/avatars + uploads ----------
 var env = app.Services.GetRequiredService<IWebHostEnvironment>();
 var webRoot = env.WebRootPath ?? Path.Combine(env.ContentRootPath, "wwwroot");
 Directory.CreateDirectory(Path.Combine(webRoot, "avatars"));
+
+var uploadsRel = (app.Configuration.GetValue<string>("Files:StoragePath") ?? "uploads")
+    .Trim().TrimStart('/').TrimStart('\\');
+Directory.CreateDirectory(Path.Combine(webRoot, uploadsRel));
 
 // ---------- Проксирование ----------
 var fwd = new ForwardedHeadersOptions
@@ -176,7 +172,7 @@ fwd.KnownNetworks.Clear();
 fwd.KnownProxies.Clear();
 app.UseForwardedHeaders(fwd);
 
-// app.UseHttpsRedirection(); // На Render HTTPS терминируется до контейнера
+// app.UseHttpsRedirection(); // Render TLS до контейнера
 
 // ---------- Пайплайн ----------
 app.UseStaticFiles();
@@ -196,20 +192,17 @@ app.UseAuthorization();
 
 app.UseMiddleware<LastSeenMiddleware>();
 
-// Глобальная обработка 500
 app.UseExceptionHandler("/error");
 app.MapGet("/error", () => Results.Problem(
     title: "Unexpected error",
     statusCode: StatusCodes.Status500InternalServerError
 ));
 
-// Health-check для Render
 app.MapGet("/healthz", () => Results.Ok(new { status = "ok", time = DateTimeOffset.UtcNow }));
 
 app.MapControllers();
 app.MapHub<ChatHub>("/hubs/chat");
 
-// Удобный редирект на Swagger (по желанию)
 app.MapGet("/", () => Results.Redirect("/swagger"));
 
 app.Run();

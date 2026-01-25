@@ -15,7 +15,6 @@ public class ChatHub : Hub
     private readonly IPresenceTracker _presence;
     private readonly ILogger<ChatHub> _log;
 
-
     public ChatHub(AppDbContext db, IPresenceTracker presence, ILogger<ChatHub> log)
     {
         _db = db;
@@ -46,10 +45,6 @@ public class ChatHub : Hub
             ((f.RequesterId == me && f.AddresseeId == other) ||
              (f.RequesterId == other && f.AddresseeId == me)));
 
-    /// <summary>
-    /// Безопасно "get or create" диалога: если два потока создали одновременно,
-    /// уникальный индекс сработает — мы просто перечитаем существующий диалог.
-    /// </summary>
     private async Task<DirectDialog> GetOrCreateDialog(Guid aId, Guid bId)
     {
         var (u1, u2) = OrderPair(aId, bId);
@@ -75,7 +70,6 @@ public class ChatHub : Hub
         }
         catch (DbUpdateException)
         {
-            // гонка: кто-то создал диалог раньше
             var existing = await _db.DirectDialogs.FirstOrDefaultAsync(d => d.User1Id == u1 && d.User2Id == u2);
             if (existing is not null) return existing;
             throw;
@@ -109,6 +103,12 @@ public class ChatHub : Hub
 
         return (count, first?.Id, first?.SentAt);
     }
+
+    private static bool IsImage(string? ct) =>
+        !string.IsNullOrWhiteSpace(ct) && ct.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsVideo(string? ct) =>
+        !string.IsNullOrWhiteSpace(ct) && ct.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
 
     // ===== Presence (с учётом ShowOnline) =====
 
@@ -150,7 +150,6 @@ public class ChatHub : Hub
         await base.OnDisconnectedAsync(exception);
     }
 
-    /// <summary>Список userId, которые и подключены, и не скрывают присутствие.</summary>
     public async Task<List<string>> GetOnlineUsers()
     {
         var online = await _presence.GetOnlineUsers();
@@ -170,37 +169,108 @@ public class ChatHub : Hub
 
     public async Task SendDirectMessage(Guid targetUserId, string text)
     {
+        // Старый метод оставляем как есть: он требует непустой текст.
+        text = (text ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(text)) return;
+
+        await SendDirectMessageWithFiles(targetUserId, text, null);
+    }
+
+    /// <summary>
+    /// NEW: сообщение с вложениями. Текст может быть пустым, если есть fileIds.
+    /// Клиент: сначала POST /api/files/upload -> fileId, потом SendDirectMessageWithFiles(target, text, [ids]).
+    /// </summary>
+    public async Task SendDirectMessageWithFiles(Guid targetUserId, string? text, List<Guid>? fileIds)
+    {
         try
         {
-            text = (text ?? "").Trim();
-            if (string.IsNullOrWhiteSpace(text)) return;
-
             var me = MeId;
+            text = (text ?? "").Trim();
+            var ids = (fileIds ?? new List<Guid>())
+                .Where(x => x != Guid.Empty)
+                .Distinct()
+                .Take(10)
+                .ToList();
+
+            if (string.IsNullOrWhiteSpace(text) && ids.Count == 0)
+                return;
 
             if (!await AreFriends(me, targetUserId))
                 throw new HubException("Вы не друзья.");
 
             var dlg = await GetOrCreateDialog(me, targetUserId);
 
+            // 1) валидируем файлы: должны существовать, принадлежать мне, и быть не прикреплёнными
+            var files = new List<ChatFile>();
+            if (ids.Count > 0)
+            {
+                files = await _db.ChatFiles
+                    .Where(f => ids.Contains(f.Id))
+                    .ToListAsync();
+
+                if (files.Count != ids.Count)
+                    throw new HubException("Один или несколько файлов не найдены.");
+
+                foreach (var f in files)
+                {
+                    if (f.UploaderId != me)
+                        throw new HubException("Нельзя отправить чужой файл.");
+                    if (f.IsAttached)
+                        throw new HubException("Один или несколько файлов уже прикреплены к сообщению.");
+                }
+            }
+
+            // 2) создаём сообщение
             var msg = new DirectMessage
             {
                 DialogId = dlg.Id,
                 SenderId = me,
-                Text = text,
+                Text = text ?? string.Empty,
                 SentAt = DateTime.UtcNow
             };
 
             _db.DirectMessages.Add(msg);
             await _db.SaveChangesAsync();
 
-            // сообщение получат оба (и sender, и receiver). Важно: peerId различается для каждого получателя
+            // 3) создаём привязки
+            if (files.Count > 0)
+            {
+                foreach (var f in files)
+                {
+                    _db.DirectMessageAttachments.Add(new DirectMessageAttachment
+                    {
+                        MessageId = msg.Id,
+                        FileId = f.Id,
+                        CreatedAt = DateTime.UtcNow
+                    });
+
+                    f.IsAttached = true;
+                    f.AttachedAt = DateTime.UtcNow;
+                }
+
+                await _db.SaveChangesAsync();
+            }
+
+            // 4) собираем payload attachments
+            var attachments = files.Select(f => new
+            {
+                id = f.Id,
+                fileName = f.OriginalFileName,
+                contentType = f.ContentType,
+                sizeBytes = f.SizeBytes,
+                url = $"/api/files/{f.Id}",
+                isImage = IsImage(f.ContentType),
+                isVideo = IsVideo(f.ContentType)
+            }).ToList();
+
             var payloadForSender = new
             {
                 peerId = targetUserId,
                 messageId = msg.Id,
                 senderId = msg.SenderId,
                 text = msg.Text,
-                sentAt = msg.SentAt
+                sentAt = msg.SentAt,
+                attachments
             };
 
             var payloadForReceiver = new
@@ -209,13 +279,14 @@ public class ChatHub : Hub
                 messageId = msg.Id,
                 senderId = msg.SenderId,
                 text = msg.Text,
-                sentAt = msg.SentAt
+                sentAt = msg.SentAt,
+                attachments
             };
 
             await Clients.User(me.ToString()).SendAsync("ReceiveDirectMessage", payloadForSender);
             await Clients.User(targetUserId.ToString()).SendAsync("ReceiveDirectMessage", payloadForReceiver);
 
-            // обновляем счётчик непрочитанных для получателя (лампочка + "Новое")
+            // unread update для получателя
             try
             {
                 var ct = Context.ConnectionAborted;
@@ -231,7 +302,6 @@ public class ChatHub : Hub
             }
             catch (Exception ex)
             {
-                // не валим отправку сообщения из-за уведомлений
                 _log.LogWarning(ex, "UnreadChanged failed. me={Me} target={Target} dialog={Dialog}", me, targetUserId, dlg.Id);
             }
         }
@@ -241,10 +311,8 @@ public class ChatHub : Hub
         }
         catch (Exception ex)
         {
-            // Это и есть причина твоего "unexpected error invoking SendDirectMessage".
-            // Временно отдаём текст ошибки клиенту + логируем, чтобы быстро починить Render.
-            _log.LogError(ex, "SendDirectMessage failed. target={Target}", targetUserId);
-            throw new HubException($"SendDirectMessage failed: {ex.GetType().Name}: {ex.Message}");
+            _log.LogError(ex, "SendDirectMessageWithFiles failed. target={Target}", targetUserId);
+            throw new HubException($"SendDirectMessageWithFiles failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 }
