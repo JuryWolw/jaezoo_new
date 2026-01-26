@@ -1,16 +1,25 @@
-﻿using JaeZoo.Server.Data;
+﻿using System.Security.Claims;
+using Amazon.S3;
+using Amazon.S3.Model;
+using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Services.Storage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.Security.Claims;
 
 namespace JaeZoo.Server.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
 [Authorize]
-public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfiguration cfg, ILogger<FilesController> log) : ControllerBase
+public class FilesController(
+    AppDbContext db,
+    IWebHostEnvironment env,
+    IConfiguration cfg,
+    ILogger<FilesController> log,
+    IObjectStorage storage
+) : ControllerBase
 {
     private Guid MeId
     {
@@ -30,7 +39,7 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
     private long MaxUploadBytes =>
         cfg.GetValue<long?>("Files:MaxUploadBytes") ?? (50L * 1024 * 1024);
 
-    // StoragePath может быть относительным (от ContentRootPath) или абсолютным
+    // legacy/local fallback path (можно оставить для dev)
     private string StoragePath =>
         (cfg.GetValue<string>("Files:StoragePath") ?? "data/uploads").Trim();
 
@@ -98,23 +107,16 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
         var ext = Path.GetExtension(safeName);
         if (ext.Length > 12) ext = ext[..12];
 
+        // Ключ объекта в B2: YYYY/MM/<guid><ext>
         var now = DateTime.UtcNow;
-        var relDir = Path.Combine(now.Year.ToString("0000"), now.Month.ToString("00"));
+        var relDir = $"{now:yyyy}/{now:MM}";
         var storedName = $"{Guid.NewGuid():N}{ext}";
-        var storedRelPath = Path.Combine(relDir, storedName);
-
-        var root = GetAbsoluteStorageRoot();
-        var absDir = Path.Combine(root, relDir);
-        Directory.CreateDirectory(absDir);
-
-        var absPath = Path.Combine(root, storedRelPath);
+        var objectKey = $"{relDir}/{storedName}";
 
         try
         {
-            await using (var fs = System.IO.File.Create(absPath))
-            {
-                await file.CopyToAsync(fs, ct);
-            }
+            await using var input = file.OpenReadStream();
+            await storage.PutAsync(objectKey, input, contentType, ct);
 
             var entity = new ChatFile
             {
@@ -122,7 +124,7 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
                 OriginalFileName = safeName,
                 ContentType = contentType,
                 SizeBytes = file.Length,
-                StoredPath = storedRelPath.Replace('\\', '/'),
+                StoredPath = objectKey, // теперь StoredPath = ключ в B2
                 CreatedAt = DateTime.UtcNow,
                 IsAttached = false
             };
@@ -159,10 +161,33 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
         var can = await CanAccessFileAsync(me, id, ct);
         if (!can) return Forbid();
 
+        var safeName = SanitizeFileName(file.OriginalFileName);
+        var disposition = download ? "attachment" : "inline";
+
+        Response.Headers["Content-Disposition"] = $"{disposition}; filename=\"{safeName}\"";
+        Response.Headers.CacheControl = "private,max-age=3600";
+
+        // 1) Пытаемся отдать из B2
+        try
+        {
+            var (stream, ctType, _) = await storage.GetAsync(file.StoredPath, ct);
+            return File(stream, ctType ?? file.ContentType ?? "application/octet-stream", enableRangeProcessing: true);
+        }
+        catch (AmazonS3Exception s3ex) when (s3ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            // ниже попробуем legacy disk fallback
+            log.LogWarning("Object missing in B2: id={FileId}, key={Key}", id, file.StoredPath);
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "B2 get failed: id={FileId}, key={Key}", id, file.StoredPath);
+            // ниже попробуем legacy disk fallback
+        }
+
+        // 2) Legacy fallback: если у тебя остались старые файлы на диске (dev/старые деплои)
         var root = GetAbsoluteStorageRoot();
         var absPath = Path.Combine(root, file.StoredPath.Replace('/', Path.DirectorySeparatorChar));
 
-        // legacy fallback: старые файлы могли лежать в wwwroot/uploads
         if (!System.IO.File.Exists(absPath))
         {
             var webRoot = env.WebRootPath ?? Path.Combine(env.ContentRootPath, "wwwroot");
@@ -170,26 +195,15 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
             if (System.IO.File.Exists(legacyPath))
                 absPath = legacyPath;
             else
-                return NotFound(new { error = "File is missing on disk." });
+                return NotFound(new { error = "File is missing in object storage." });
         }
 
-        var safeName = SanitizeFileName(file.OriginalFileName);
-        var disposition = download ? "attachment" : "inline";
-
-        // ВАЖНО: inline для просмотра, attachment только по download=true
-        Response.Headers["Content-Disposition"] = $"{disposition}; filename=\"{safeName}\"";
-        Response.Headers.CacheControl = "private,max-age=3600";
-
-        // Полезно для вьюверов/кеша
         var lastWriteUtc = System.IO.File.GetLastWriteTimeUtc(absPath);
         Response.Headers["Last-Modified"] = lastWriteUtc.ToString("R");
 
-        // КЛЮЧЕВОЕ: включаем Range, чтобы картинки/видео нормально открывались (и не падали 500)
-        var result = new PhysicalFileResult(absPath, file.ContentType ?? "application/octet-stream")
+        return new PhysicalFileResult(absPath, file.ContentType ?? "application/octet-stream")
         {
             EnableRangeProcessing = true
         };
-
-        return result;
     }
 }

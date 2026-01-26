@@ -10,6 +10,9 @@ using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using System.Text;
 using System.Threading.RateLimiting;
+using Amazon.Runtime;
+using Amazon.S3;
+using JaeZoo.Server.Services.Storage;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -122,6 +125,31 @@ builder.Services.AddSwaggerGen(c =>
 {
     c.SwaggerDoc("v1", new OpenApiInfo { Title = "JaeZoo API", Version = "v1" });
 });
+
+builder.Services.AddSingleton<IAmazonS3>(sp =>
+{
+    var cfg = sp.GetRequiredService<IConfiguration>();
+
+    var endpoint = cfg["ObjectStorage:Endpoint"] ?? throw new InvalidOperationException("ObjectStorage:Endpoint missing");
+    var accessKey = cfg["ObjectStorage:AccessKey"] ?? throw new InvalidOperationException("ObjectStorage:AccessKey missing");
+    var secretKey = cfg["ObjectStorage:SecretKey"] ?? throw new InvalidOperationException("ObjectStorage:SecretKey missing");
+
+    var creds = new BasicAWSCredentials(accessKey, secretKey);
+
+    var s3cfg = new AmazonS3Config
+    {
+        ServiceURL = endpoint,
+        ForcePathStyle = true, // ÂÀÆÍÎ äëÿ Backblaze B2
+    };
+
+    return new AmazonS3Client(creds, s3cfg);
+});
+
+builder.Services.AddSingleton<IObjectStorage, B2S3Storage>();
+
+
+
+
 
 var app = builder.Build();
 
