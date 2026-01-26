@@ -30,9 +30,7 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
     private long MaxUploadBytes =>
         cfg.GetValue<long?>("Files:MaxUploadBytes") ?? (50L * 1024 * 1024);
 
-    // ВАЖНО: StoragePath теперь может быть:
-    // - относительным (например "data/uploads") => относительно ContentRootPath
-    // - абсолютным
+    // StoragePath может быть относительным (от ContentRootPath) или абсолютным
     private string StoragePath =>
         (cfg.GetValue<string>("Files:StoragePath") ?? "data/uploads").Trim();
 
@@ -58,7 +56,6 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
 
     private string GetAbsoluteStorageRoot()
     {
-        // НЕ wwwroot. Если относительный — считаем от ContentRoot.
         return Path.IsPathRooted(StoragePath)
             ? StoragePath
             : Path.Combine(env.ContentRootPath, StoragePath);
@@ -68,14 +65,12 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
 
     private async Task<bool> CanAccessFileAsync(Guid me, Guid fileId, CancellationToken ct)
     {
-        // 1) если файл ещё не прикреплён — доступ только владельцу
         var f = await db.ChatFiles.AsNoTracking().FirstOrDefaultAsync(x => x.Id == fileId, ct);
         if (f is null) return false;
 
         if (!f.IsAttached)
             return f.UploaderId == me;
 
-        // 2) если файл прикреплён — доступ участникам диалога (через связь attachment -> message -> dialog)
         return await (
             from a in db.DirectMessageAttachments.AsNoTracking()
             join m in db.DirectMessages.AsNoTracking() on a.MessageId equals m.Id
@@ -85,12 +80,8 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
         ).AnyAsync(ct);
     }
 
-    /// <summary>
-    /// Загрузка одного файла.
-    /// Клиент делает upload, получает fileId, потом отправляет сообщение через Hub, передавая fileIds.
-    /// </summary>
     [HttpPost("upload")]
-    [RequestSizeLimit(long.MaxValue)] // фактический лимит мы проверяем сами + в Program через FormOptions
+    [RequestSizeLimit(long.MaxValue)]
     public async Task<ActionResult<FileUploadResponse>> Upload(IFormFile file, CancellationToken ct)
     {
         if (file == null || file.Length == 0)
@@ -107,7 +98,6 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
         var ext = Path.GetExtension(safeName);
         if (ext.Length > 12) ext = ext[..12];
 
-        // Путь хранения: <StoragePath>/YYYY/MM/<guid><ext>
         var now = DateTime.UtcNow;
         var relDir = Path.Combine(now.Year.ToString("0000"), now.Month.ToString("00"));
         var storedName = $"{Guid.NewGuid():N}{ext}";
@@ -158,11 +148,6 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
         }
     }
 
-    /// <summary>
-    /// Скачать/посмотреть файл. Доступ:
-    /// - пока файл не прикреплён: только uploader
-    /// - после прикрепления: участники диалога
-    /// </summary>
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> Get(Guid id, [FromQuery] bool download = false, CancellationToken ct = default)
     {
@@ -177,7 +162,7 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
         var root = GetAbsoluteStorageRoot();
         var absPath = Path.Combine(root, file.StoredPath.Replace('/', Path.DirectorySeparatorChar));
 
-        // fallback: если в базе уже есть старые файлы, которые лежали в wwwroot/uploads
+        // legacy fallback: старые файлы могли лежать в wwwroot/uploads
         if (!System.IO.File.Exists(absPath))
         {
             var webRoot = env.WebRootPath ?? Path.Combine(env.ContentRootPath, "wwwroot");
@@ -188,15 +173,23 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
                 return NotFound(new { error = "File is missing on disk." });
         }
 
-        // Content-Disposition
         var safeName = SanitizeFileName(file.OriginalFileName);
         var disposition = download ? "attachment" : "inline";
-        Response.Headers["Content-Disposition"] = $"{disposition}; filename=\"{safeName}\"";
 
-        // Cache: приватно (файлы приватные)
+        // ВАЖНО: inline для просмотра, attachment только по download=true
+        Response.Headers["Content-Disposition"] = $"{disposition}; filename=\"{safeName}\"";
         Response.Headers.CacheControl = "private,max-age=3600";
 
-        var stream = System.IO.File.OpenRead(absPath);
-        return File(stream, file.ContentType ?? "application/octet-stream");
+        // Полезно для вьюверов/кеша
+        var lastWriteUtc = System.IO.File.GetLastWriteTimeUtc(absPath);
+        Response.Headers["Last-Modified"] = lastWriteUtc.ToString("R");
+
+        // КЛЮЧЕВОЕ: включаем Range, чтобы картинки/видео нормально открывались (и не падали 500)
+        var result = new PhysicalFileResult(absPath, file.ContentType ?? "application/octet-stream")
+        {
+            EnableRangeProcessing = true
+        };
+
+        return result;
     }
 }
