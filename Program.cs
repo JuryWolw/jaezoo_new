@@ -154,14 +154,19 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-// ---------- wwwroot/avatars + uploads ----------
+// ---------- wwwroot/avatars (static) + uploads (PRIVATE storage outside wwwroot) ----------
 var env = app.Services.GetRequiredService<IWebHostEnvironment>();
 var webRoot = env.WebRootPath ?? Path.Combine(env.ContentRootPath, "wwwroot");
 Directory.CreateDirectory(Path.Combine(webRoot, "avatars"));
 
-var uploadsRel = (app.Configuration.GetValue<string>("Files:StoragePath") ?? "uploads")
-    .Trim().TrimStart('/').TrimStart('\\');
-Directory.CreateDirectory(Path.Combine(webRoot, uploadsRel));
+// Files:StoragePath может быть абсолютным или относительным.
+// Если относительный — считаем относительно ContentRoot (НЕ wwwroot).
+var storagePath = (app.Configuration.GetValue<string>("Files:StoragePath") ?? "data/uploads").Trim();
+var uploadsAbs = Path.IsPathRooted(storagePath)
+    ? storagePath
+    : Path.Combine(env.ContentRootPath, storagePath);
+
+Directory.CreateDirectory(uploadsAbs);
 
 // ---------- Проксирование ----------
 var fwd = new ForwardedHeadersOptions
@@ -175,7 +180,20 @@ app.UseForwardedHeaders(fwd);
 // app.UseHttpsRedirection(); // Render TLS до контейнера
 
 // ---------- Пайплайн ----------
-app.UseStaticFiles();
+// Статику оставляем (нужна для wwwroot/avatars и др.)
+// Доп. защита: даже если кто-то по ошибке вернёт uploads в wwwroot, /uploads/* не раздаём.
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = ctx =>
+    {
+        if (ctx.Context.Request.Path.StartsWithSegments("/uploads"))
+        {
+            ctx.Context.Response.StatusCode = StatusCodes.Status404NotFound;
+            ctx.Context.Response.ContentLength = 0;
+            ctx.Context.Response.Body = Stream.Null;
+        }
+    }
+});
 
 if (app.Environment.IsDevelopment() || app.Configuration.GetValue<bool>("Swagger"))
 {

@@ -30,8 +30,11 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
     private long MaxUploadBytes =>
         cfg.GetValue<long?>("Files:MaxUploadBytes") ?? (50L * 1024 * 1024);
 
-    private string StorageRootRel =>
-        (cfg.GetValue<string>("Files:StoragePath") ?? "uploads").Trim().TrimStart('/').TrimStart('\\');
+    // ВАЖНО: StoragePath теперь может быть:
+    // - относительным (например "data/uploads") => относительно ContentRootPath
+    // - абсолютным
+    private string StoragePath =>
+        (cfg.GetValue<string>("Files:StoragePath") ?? "data/uploads").Trim();
 
     private string[] AllowedTypes =>
         cfg.GetSection("Files:AllowedContentTypes").Get<string[]>() ?? Array.Empty<string>();
@@ -53,15 +56,12 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
         return name;
     }
 
-    private string GetWebRoot()
-    {
-        return env.WebRootPath ?? Path.Combine(env.ContentRootPath, "wwwroot");
-    }
-
     private string GetAbsoluteStorageRoot()
     {
-        // wwwroot/<StorageRootRel>
-        return Path.Combine(GetWebRoot(), StorageRootRel);
+        // НЕ wwwroot. Если относительный — считаем от ContentRoot.
+        return Path.IsPathRooted(StoragePath)
+            ? StoragePath
+            : Path.Combine(env.ContentRootPath, StoragePath);
     }
 
     private string BuildFileUrl(Guid id) => $"/api/files/{id}";
@@ -107,7 +107,7 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
         var ext = Path.GetExtension(safeName);
         if (ext.Length > 12) ext = ext[..12];
 
-        // Путь хранения: uploads/YYYY/MM/<guid><ext>
+        // Путь хранения: <StoragePath>/YYYY/MM/<guid><ext>
         var now = DateTime.UtcNow;
         var relDir = Path.Combine(now.Year.ToString("0000"), now.Month.ToString("00"));
         var storedName = $"{Guid.NewGuid():N}{ext}";
@@ -176,15 +176,24 @@ public class FilesController(AppDbContext db, IWebHostEnvironment env, IConfigur
 
         var root = GetAbsoluteStorageRoot();
         var absPath = Path.Combine(root, file.StoredPath.Replace('/', Path.DirectorySeparatorChar));
+
+        // fallback: если в базе уже есть старые файлы, которые лежали в wwwroot/uploads
         if (!System.IO.File.Exists(absPath))
-            return NotFound(new { error = "File is missing on disk." });
+        {
+            var webRoot = env.WebRootPath ?? Path.Combine(env.ContentRootPath, "wwwroot");
+            var legacyPath = Path.Combine(webRoot, "uploads", file.StoredPath.Replace('/', Path.DirectorySeparatorChar));
+            if (System.IO.File.Exists(legacyPath))
+                absPath = legacyPath;
+            else
+                return NotFound(new { error = "File is missing on disk." });
+        }
 
         // Content-Disposition
         var safeName = SanitizeFileName(file.OriginalFileName);
         var disposition = download ? "attachment" : "inline";
         Response.Headers["Content-Disposition"] = $"{disposition}; filename=\"{safeName}\"";
 
-        // Cache: можно кэшировать, но осторожно (файлы приватные). Для простоты: без public cache.
+        // Cache: приватно (файлы приватные)
         Response.Headers.CacheControl = "private,max-age=3600";
 
         var stream = System.IO.File.OpenRead(absPath);
