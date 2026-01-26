@@ -7,6 +7,8 @@ using JaeZoo.Server.Services.Storage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Net.Http.Headers;
+using System.Text;
 
 namespace JaeZoo.Server.Controllers;
 
@@ -61,6 +63,41 @@ public class FilesController(
         foreach (var c in Path.GetInvalidFileNameChars())
             name = name.Replace(c, '_');
         return name;
+    }
+
+    private static string ToAsciiFallback(string fileName)
+    {
+        // Для старого filename="..." (ASCII) делаем безопасный fallback.
+        // А настоящее имя кладём в filename* (UTF-8), чтобы кириллица работала.
+        var sb = new StringBuilder(fileName.Length);
+        foreach (var ch in fileName)
+        {
+            if (ch <= 0x7F && ch != '"' && ch != '\\')
+                sb.Append(ch);
+            else
+                sb.Append('_');
+        }
+
+        var s = sb.ToString();
+        if (string.IsNullOrWhiteSpace(s))
+            s = "file";
+
+        return s;
+    }
+
+    private void SetContentDisposition(string dispositionType, string originalFileName)
+    {
+        // RFC 6266 + RFC 5987: filename* (UTF-8) + filename (ASCII fallback)
+        // Это убирает 500 на кириллице в заголовках.
+        var cd = new ContentDispositionHeaderValue(dispositionType);
+
+        var utfName = originalFileName;
+        var asciiName = ToAsciiFallback(originalFileName);
+
+        cd.FileName = asciiName;      // ASCII fallback
+        cd.FileNameStar = utfName;    // UTF-8
+
+        Response.Headers[HeaderNames.ContentDisposition] = cd.ToString();
     }
 
     private string GetAbsoluteStorageRoot()
@@ -124,7 +161,7 @@ public class FilesController(
                 OriginalFileName = safeName,
                 ContentType = contentType,
                 SizeBytes = file.Length,
-                StoredPath = objectKey, // теперь StoredPath = ключ в B2
+                StoredPath = objectKey,
                 CreatedAt = DateTime.UtcNow,
                 IsAttached = false
             };
@@ -164,7 +201,9 @@ public class FilesController(
         var safeName = SanitizeFileName(file.OriginalFileName);
         var disposition = download ? "attachment" : "inline";
 
-        Response.Headers["Content-Disposition"] = $"{disposition}; filename=\"{safeName}\"";
+        // ВАЖНО: ставим корректно, чтобы кириллица НЕ ломала заголовки и не давала 500.
+        SetContentDisposition(disposition, safeName);
+
         Response.Headers.CacheControl = "private,max-age=3600";
 
         // 1) Пытаемся отдать из B2
@@ -175,16 +214,29 @@ public class FilesController(
         }
         catch (AmazonS3Exception s3ex) when (s3ex.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
-            // ниже попробуем legacy disk fallback
             log.LogWarning("Object missing in B2: id={FileId}, key={Key}", id, file.StoredPath);
+        }
+        catch (AmazonS3Exception s3ex)
+        {
+            log.LogError(s3ex,
+                "B2 get failed: id={FileId}, key={Key}, status={Status}, code={Code}, requestId={ReqId}",
+                id, file.StoredPath, s3ex.StatusCode, s3ex.ErrorCode, s3ex.RequestId);
+
+            // Не маскируем как “Unexpected error”: так будет видно, что реально произошло.
+            return StatusCode(502, new
+            {
+                error = "Object storage error",
+                status = s3ex.StatusCode.ToString(),
+                code = s3ex.ErrorCode,
+                key = file.StoredPath
+            });
         }
         catch (Exception ex)
         {
             log.LogError(ex, "B2 get failed: id={FileId}, key={Key}", id, file.StoredPath);
-            // ниже попробуем legacy disk fallback
         }
 
-        // 2) Legacy fallback: если у тебя остались старые файлы на диске (dev/старые деплои)
+        // 2) Legacy fallback (dev/старые деплои)
         var root = GetAbsoluteStorageRoot();
         var absPath = Path.Combine(root, file.StoredPath.Replace('/', Path.DirectorySeparatorChar));
 
