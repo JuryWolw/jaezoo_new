@@ -141,9 +141,31 @@ public class FilesController(
                 IsVideo(entity.ContentType)
             ));
         }
+        catch (AmazonS3Exception s3ex)
+        {
+            log.LogError(s3ex,
+                "Object storage upload failed: user={UserId}, file={FileName}, bucket={Bucket}, key={Key}, status={Status}, code={Code}, requestId={ReqId}",
+                MeId,
+                safeName,
+                cfg["ObjectStorage:Bucket"],
+                objectKey,
+                s3ex.StatusCode,
+                s3ex.ErrorCode,
+                s3ex.RequestId);
+
+            return StatusCode(502, new
+            {
+                error = "Object storage upload failed",
+                status = s3ex.StatusCode.ToString(),
+                code = s3ex.ErrorCode,
+                requestId = s3ex.RequestId,
+                key = objectKey,
+                message = s3ex.Message
+            });
+        }
         catch (Exception ex)
         {
-            log.LogError(ex, "Upload failed: user={UserId}, file={FileName}", MeId, safeName);
+            log.LogError(ex, "Upload failed: user={UserId}, file={FileName}, key={Key}", MeId, safeName, objectKey);
             return Problem("Upload failed.", statusCode: 500);
         }
     }
@@ -159,12 +181,10 @@ public class FilesController(
         var can = await CanAccessFileAsync(me, id, ct);
         if (!can) return Forbid();
 
-        // Главный быстрый путь: отдаём redirect на CDN.
         var publicUrl = BuildFileUrl(file);
         return Redirect(publicUrl);
     }
 
-    // optional fallback endpoint if CDN/origin temporarily unavailable during migration
     [HttpGet("{id:guid}/raw")]
     public async Task<IActionResult> GetRaw(Guid id, CancellationToken ct = default)
     {
@@ -197,7 +217,9 @@ public class FilesController(
                 error = "Object storage error",
                 status = s3ex.StatusCode.ToString(),
                 code = s3ex.ErrorCode,
-                key = file.StoredPath
+                key = file.StoredPath,
+                requestId = s3ex.RequestId,
+                message = s3ex.Message
             });
         }
         catch (Exception ex)
@@ -205,7 +227,6 @@ public class FilesController(
             log.LogError(ex, "Storage get failed: id={FileId}, key={Key}", id, file.StoredPath);
         }
 
-        // Legacy local fallback
         var root = GetAbsoluteStorageRoot();
         var absPath = Path.Combine(root, file.StoredPath.Replace('/', Path.DirectorySeparatorChar));
 

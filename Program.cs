@@ -77,7 +77,6 @@ builder.Services.AddControllers()
         o.SuppressModelStateInvalidFilter = false;
     });
 
-// Optional: Redis backplane
 var redis = Environment.GetEnvironmentVariable("REDIS_URL");
 if (!string.IsNullOrWhiteSpace(redis))
 {
@@ -131,7 +130,7 @@ builder.Services.AddSingleton<IAmazonS3>(sp =>
 {
     var cfg = sp.GetRequiredService<IConfiguration>();
 
-    var endpoint = cfg["ObjectStorage:Endpoint"] ?? throw new InvalidOperationException("ObjectStorage:Endpoint missing");
+    var endpoint = cfg["ObjectStorage:Endpoint"] ?? "https://s3.yandexcloud.net";
     var accessKey = cfg["ObjectStorage:AccessKey"] ?? throw new InvalidOperationException("ObjectStorage:AccessKey missing");
     var secretKey = cfg["ObjectStorage:SecretKey"] ?? throw new InvalidOperationException("ObjectStorage:SecretKey missing");
 
@@ -140,6 +139,7 @@ builder.Services.AddSingleton<IAmazonS3>(sp =>
     var s3cfg = new AmazonS3Config
     {
         ServiceURL = endpoint,
+        AuthenticationRegion = "ru-central1",
         ForcePathStyle = true
     };
 
