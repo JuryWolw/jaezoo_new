@@ -126,6 +126,7 @@ builder.Services.AddSwaggerGen(c =>
     c.SwaggerDoc("v1", new OpenApiInfo { Title = "JaeZoo API", Version = "v1" });
 });
 
+// ---------- Object Storage (Yandex S3-compatible) ----------
 builder.Services.AddSingleton<IAmazonS3>(sp =>
 {
     var cfg = sp.GetRequiredService<IConfiguration>();
@@ -139,17 +140,13 @@ builder.Services.AddSingleton<IAmazonS3>(sp =>
     var s3cfg = new AmazonS3Config
     {
         ServiceURL = endpoint,
-        ForcePathStyle = true, // ВАЖНО для Backblaze B2
+        ForcePathStyle = true
     };
 
     return new AmazonS3Client(creds, s3cfg);
 });
 
-builder.Services.AddSingleton<IObjectStorage, B2S3Storage>();
-
-
-
-
+builder.Services.AddSingleton<IObjectStorage, S3ObjectStorage>();
 
 var app = builder.Build();
 
@@ -182,13 +179,12 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-// ---------- wwwroot/avatars (static) + uploads (PRIVATE storage outside wwwroot) ----------
+// ---------- wwwroot/avatars ----------
 var env = app.Services.GetRequiredService<IWebHostEnvironment>();
 var webRoot = env.WebRootPath ?? Path.Combine(env.ContentRootPath, "wwwroot");
 Directory.CreateDirectory(Path.Combine(webRoot, "avatars"));
 
-// Files:StoragePath может быть абсолютным или относительным.
-// Если относительный — считаем относительно ContentRoot (НЕ wwwroot).
+// legacy local uploads path (fallback only)
 var storagePath = (app.Configuration.GetValue<string>("Files:StoragePath") ?? "data/uploads").Trim();
 var uploadsAbs = Path.IsPathRooted(storagePath)
     ? storagePath
@@ -205,11 +201,7 @@ fwd.KnownNetworks.Clear();
 fwd.KnownProxies.Clear();
 app.UseForwardedHeaders(fwd);
 
-// app.UseHttpsRedirection(); // Render TLS до контейнера
-
 // ---------- Пайплайн ----------
-// Статику оставляем (нужна для wwwroot/avatars и др.)
-// Доп. защита: даже если кто-то по ошибке вернёт uploads в wwwroot, /uploads/* не раздаём.
 app.UseStaticFiles(new StaticFileOptions
 {
     OnPrepareResponse = ctx =>

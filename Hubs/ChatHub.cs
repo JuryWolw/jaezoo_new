@@ -1,5 +1,6 @@
 ﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Services.Storage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
@@ -14,12 +15,14 @@ public class ChatHub : Hub
     private readonly AppDbContext _db;
     private readonly IPresenceTracker _presence;
     private readonly ILogger<ChatHub> _log;
+    private readonly IObjectStorage _storage;
 
-    public ChatHub(AppDbContext db, IPresenceTracker presence, ILogger<ChatHub> log)
+    public ChatHub(AppDbContext db, IPresenceTracker presence, ILogger<ChatHub> log, IObjectStorage storage)
     {
         _db = db;
         _presence = presence;
         _log = log;
+        _storage = storage;
     }
 
     private Guid MeId
@@ -110,8 +113,6 @@ public class ChatHub : Hub
     private static bool IsVideo(string? ct) =>
         !string.IsNullOrWhiteSpace(ct) && ct.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
 
-    // ===== Presence (с учётом ShowOnline) =====
-
     public override async Task OnConnectedAsync()
     {
         var userId = MeId.ToString();
@@ -165,21 +166,14 @@ public class ChatHub : Hub
         return visible;
     }
 
-    // ===== Direct messages =====
-
     public async Task SendDirectMessage(Guid targetUserId, string text)
     {
-        // Старый метод оставляем как есть: он требует непустой текст.
         text = (text ?? "").Trim();
         if (string.IsNullOrWhiteSpace(text)) return;
 
         await SendDirectMessageWithFiles(targetUserId, text, null);
     }
 
-    /// <summary>
-    /// NEW: сообщение с вложениями. Текст может быть пустым, если есть fileIds.
-    /// Клиент: сначала POST /api/files/upload -> fileId, потом SendDirectMessageWithFiles(target, text, [ids]).
-    /// </summary>
     public async Task SendDirectMessageWithFiles(Guid targetUserId, string? text, List<Guid>? fileIds)
     {
         try
@@ -200,7 +194,6 @@ public class ChatHub : Hub
 
             var dlg = await GetOrCreateDialog(me, targetUserId);
 
-            // 1) валидируем файлы: должны существовать, принадлежать мне, и быть не прикреплёнными
             var files = new List<ChatFile>();
             if (ids.Count > 0)
             {
@@ -220,7 +213,6 @@ public class ChatHub : Hub
                 }
             }
 
-            // 2) создаём сообщение
             var msg = new DirectMessage
             {
                 DialogId = dlg.Id,
@@ -232,7 +224,6 @@ public class ChatHub : Hub
             _db.DirectMessages.Add(msg);
             await _db.SaveChangesAsync();
 
-            // 3) создаём привязки
             if (files.Count > 0)
             {
                 foreach (var f in files)
@@ -251,14 +242,13 @@ public class ChatHub : Hub
                 await _db.SaveChangesAsync();
             }
 
-            // 4) собираем payload attachments
             var attachments = files.Select(f => new
             {
                 id = f.Id,
                 fileName = f.OriginalFileName,
                 contentType = f.ContentType,
                 sizeBytes = f.SizeBytes,
-                url = $"/api/files/{f.Id}",
+                url = _storage.GetPublicUrl(f.StoredPath),
                 isImage = IsImage(f.ContentType),
                 isVideo = IsVideo(f.ContentType)
             }).ToList();
@@ -286,7 +276,6 @@ public class ChatHub : Hub
             await Clients.User(me.ToString()).SendAsync("ReceiveDirectMessage", payloadForSender);
             await Clients.User(targetUserId.ToString()).SendAsync("ReceiveDirectMessage", payloadForReceiver);
 
-            // unread update для получателя
             try
             {
                 var ct = Context.ConnectionAborted;

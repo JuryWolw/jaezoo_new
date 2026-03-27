@@ -7,8 +7,6 @@ using JaeZoo.Server.Services.Storage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Net.Http.Headers;
-using System.Text;
 
 namespace JaeZoo.Server.Controllers;
 
@@ -41,7 +39,6 @@ public class FilesController(
     private long MaxUploadBytes =>
         cfg.GetValue<long?>("Files:MaxUploadBytes") ?? (50L * 1024 * 1024);
 
-    // legacy/local fallback path (можно оставить для dev)
     private string StoragePath =>
         (cfg.GetValue<string>("Files:StoragePath") ?? "data/uploads").Trim();
 
@@ -65,41 +62,6 @@ public class FilesController(
         return name;
     }
 
-    private static string ToAsciiFallback(string fileName)
-    {
-        // Для старого filename="..." (ASCII) делаем безопасный fallback.
-        // А настоящее имя кладём в filename* (UTF-8), чтобы кириллица работала.
-        var sb = new StringBuilder(fileName.Length);
-        foreach (var ch in fileName)
-        {
-            if (ch <= 0x7F && ch != '"' && ch != '\\')
-                sb.Append(ch);
-            else
-                sb.Append('_');
-        }
-
-        var s = sb.ToString();
-        if (string.IsNullOrWhiteSpace(s))
-            s = "file";
-
-        return s;
-    }
-
-    private void SetContentDisposition(string dispositionType, string originalFileName)
-    {
-        // RFC 6266 + RFC 5987: filename* (UTF-8) + filename (ASCII fallback)
-        // Это убирает 500 на кириллице в заголовках.
-        var cd = new ContentDispositionHeaderValue(dispositionType);
-
-        var utfName = originalFileName;
-        var asciiName = ToAsciiFallback(originalFileName);
-
-        cd.FileName = asciiName;      // ASCII fallback
-        cd.FileNameStar = utfName;    // UTF-8
-
-        Response.Headers[HeaderNames.ContentDisposition] = cd.ToString();
-    }
-
     private string GetAbsoluteStorageRoot()
     {
         return Path.IsPathRooted(StoragePath)
@@ -107,7 +69,7 @@ public class FilesController(
             : Path.Combine(env.ContentRootPath, StoragePath);
     }
 
-    private string BuildFileUrl(Guid id) => $"/api/files/{id}";
+    private string BuildFileUrl(ChatFile file) => storage.GetPublicUrl(file.StoredPath);
 
     private async Task<bool> CanAccessFileAsync(Guid me, Guid fileId, CancellationToken ct)
     {
@@ -144,7 +106,6 @@ public class FilesController(
         var ext = Path.GetExtension(safeName);
         if (ext.Length > 12) ext = ext[..12];
 
-        // Ключ объекта в B2: YYYY/MM/<guid><ext>
         var now = DateTime.UtcNow;
         var relDir = $"{now:yyyy}/{now:MM}";
         var storedName = $"{Guid.NewGuid():N}{ext}";
@@ -169,7 +130,7 @@ public class FilesController(
             db.ChatFiles.Add(entity);
             await db.SaveChangesAsync(ct);
 
-            var url = BuildFileUrl(entity.Id);
+            var url = BuildFileUrl(entity);
             return Ok(new FileUploadResponse(
                 entity.Id,
                 entity.OriginalFileName,
@@ -188,7 +149,7 @@ public class FilesController(
     }
 
     [HttpGet("{id:guid}")]
-    public async Task<IActionResult> Get(Guid id, [FromQuery] bool download = false, CancellationToken ct = default)
+    public async Task<IActionResult> Get(Guid id, CancellationToken ct = default)
     {
         var me = MeId;
 
@@ -198,31 +159,39 @@ public class FilesController(
         var can = await CanAccessFileAsync(me, id, ct);
         if (!can) return Forbid();
 
-        var safeName = SanitizeFileName(file.OriginalFileName);
-        var disposition = download ? "attachment" : "inline";
+        // Главный быстрый путь: отдаём redirect на CDN.
+        var publicUrl = BuildFileUrl(file);
+        return Redirect(publicUrl);
+    }
 
-        // ВАЖНО: ставим корректно, чтобы кириллица НЕ ломала заголовки и не давала 500.
-        SetContentDisposition(disposition, safeName);
+    // optional fallback endpoint if CDN/origin temporarily unavailable during migration
+    [HttpGet("{id:guid}/raw")]
+    public async Task<IActionResult> GetRaw(Guid id, CancellationToken ct = default)
+    {
+        var me = MeId;
 
-        Response.Headers.CacheControl = "private,max-age=3600";
+        var file = await db.ChatFiles.AsNoTracking().FirstOrDefaultAsync(f => f.Id == id, ct);
+        if (file is null) return NotFound();
 
-        // 1) Пытаемся отдать из B2
+        var can = await CanAccessFileAsync(me, id, ct);
+        if (!can) return Forbid();
+
         try
         {
             var (stream, ctType, _) = await storage.GetAsync(file.StoredPath, ct);
+            Response.Headers.CacheControl = "private,max-age=3600";
             return File(stream, ctType ?? file.ContentType ?? "application/octet-stream", enableRangeProcessing: true);
         }
         catch (AmazonS3Exception s3ex) when (s3ex.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
-            log.LogWarning("Object missing in B2: id={FileId}, key={Key}", id, file.StoredPath);
+            log.LogWarning("Object missing in object storage: id={FileId}, key={Key}", id, file.StoredPath);
         }
         catch (AmazonS3Exception s3ex)
         {
             log.LogError(s3ex,
-                "B2 get failed: id={FileId}, key={Key}, status={Status}, code={Code}, requestId={ReqId}",
+                "Storage get failed: id={FileId}, key={Key}, status={Status}, code={Code}, requestId={ReqId}",
                 id, file.StoredPath, s3ex.StatusCode, s3ex.ErrorCode, s3ex.RequestId);
 
-            // Не маскируем как “Unexpected error”: так будет видно, что реально произошло.
             return StatusCode(502, new
             {
                 error = "Object storage error",
@@ -233,10 +202,10 @@ public class FilesController(
         }
         catch (Exception ex)
         {
-            log.LogError(ex, "B2 get failed: id={FileId}, key={Key}", id, file.StoredPath);
+            log.LogError(ex, "Storage get failed: id={FileId}, key={Key}", id, file.StoredPath);
         }
 
-        // 2) Legacy fallback (dev/старые деплои)
+        // Legacy local fallback
         var root = GetAbsoluteStorageRoot();
         var absPath = Path.Combine(root, file.StoredPath.Replace('/', Path.DirectorySeparatorChar));
 

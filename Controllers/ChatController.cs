@@ -1,5 +1,6 @@
 ﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Services.Storage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -10,7 +11,7 @@ namespace JaeZoo.Server.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [Authorize]
-public class ChatController(AppDbContext db, ILogger<ChatController> log) : ControllerBase
+public class ChatController(AppDbContext db, ILogger<ChatController> log, IObjectStorage storage) : ControllerBase
 {
     private Guid MeId
     {
@@ -100,12 +101,12 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
     private static bool IsVideo(string? ct) =>
         !string.IsNullOrWhiteSpace(ct) && ct.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
 
-    private static AttachmentDto ToAttachmentDto(ChatFile f) => new(
+    private AttachmentDto ToAttachmentDto(ChatFile f) => new(
         f.Id,
         f.OriginalFileName,
         f.ContentType,
         f.SizeBytes,
-        $"/api/files/{f.Id}",
+        storage.GetPublicUrl(f.StoredPath),
         IsImage(f.ContentType),
         IsVideo(f.ContentType)
     );
@@ -144,7 +145,6 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
                 .AsNoTracking()
                 .Where(m => m.DialogId == dlg.Id);
 
-            // ===== cursor mode =====
             if (before.HasValue || after.HasValue)
             {
                 if (before.HasValue)
@@ -194,7 +194,6 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
                 return Ok(items);
             }
 
-            // ===== old mode (skip/take) =====
             var rowsOld = await q
                 .OrderBy(m => m.SentAt)
                 .ThenBy(m => m.Id)
@@ -244,7 +243,6 @@ public class ChatController(AppDbContext db, ILogger<ChatController> log) : Cont
             list.Add(ToAttachmentDto(r.File));
         }
 
-        // стабильный порядок вложений
         foreach (var kv in map)
             kv.Value.Sort((x, y) => string.CompareOrdinal(x.FileName, y.FileName));
 
