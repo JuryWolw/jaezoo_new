@@ -13,6 +13,7 @@ using System.Threading.RateLimiting;
 using Amazon.Runtime;
 using Amazon.S3;
 using JaeZoo.Server.Services.Storage;
+using JaeZoo.Server.Services.Calls;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -89,8 +90,12 @@ else
 }
 
 builder.Services.AddSingleton<IPresenceTracker, PresenceTracker>();
+builder.Services.Configure<TurnOptions>(builder.Configuration.GetSection("Turn"));
+builder.Services.AddSingleton<TurnCredentialsService>();
+builder.Services.AddSingleton<CallSessionService>();
+builder.Services.AddSingleton<CallAuditService>();
 
-// ---------- Производительность ----------
+// ---------- РџСЂРѕРёР·РІРѕРґРёС‚РµР»СЊРЅРѕСЃС‚СЊ ----------
 builder.Services.AddResponseCompression();
 builder.Services.AddResponseCaching();
 
@@ -126,31 +131,48 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 // ---------- Object Storage (Yandex S3-compatible) ----------
-builder.Services.AddSingleton<IAmazonS3>(sp =>
+var objCfg = builder.Configuration.GetSection("ObjectStorage");
+var storageAccessKey = objCfg["AccessKey"];
+var storageSecretKey = objCfg["SecretKey"];
+var storageConfigured = !string.IsNullOrWhiteSpace(storageAccessKey)
+    && !string.IsNullOrWhiteSpace(storageSecretKey)
+    && !string.Equals(storageAccessKey, "YOUR_ACCESS_KEY", StringComparison.OrdinalIgnoreCase)
+    && !string.Equals(storageSecretKey, "YOUR_SECRET_KEY", StringComparison.OrdinalIgnoreCase);
+
+if (storageConfigured)
 {
-    var cfg = sp.GetRequiredService<IConfiguration>();
-
-    var endpoint = cfg["ObjectStorage:Endpoint"] ?? "https://s3.yandexcloud.net";
-    var accessKey = cfg["ObjectStorage:AccessKey"] ?? throw new InvalidOperationException("ObjectStorage:AccessKey missing");
-    var secretKey = cfg["ObjectStorage:SecretKey"] ?? throw new InvalidOperationException("ObjectStorage:SecretKey missing");
-
-    var creds = new BasicAWSCredentials(accessKey, secretKey);
-
-    var s3cfg = new AmazonS3Config
+    builder.Services.AddSingleton<IAmazonS3>(sp =>
     {
-        ServiceURL = endpoint,
-        AuthenticationRegion = "ru-central1",
-        ForcePathStyle = true
-    };
+        var cfg = sp.GetRequiredService<IConfiguration>();
 
-    return new AmazonS3Client(creds, s3cfg);
-});
+        var endpoint = cfg["ObjectStorage:Endpoint"] ?? "https://s3.yandexcloud.net";
+        var accessKey = cfg["ObjectStorage:AccessKey"] ?? throw new InvalidOperationException("ObjectStorage:AccessKey missing");
+        var secretKey = cfg["ObjectStorage:SecretKey"] ?? throw new InvalidOperationException("ObjectStorage:SecretKey missing");
 
-builder.Services.AddSingleton<IObjectStorage, S3ObjectStorage>();
+        var creds = new BasicAWSCredentials(accessKey, secretKey);
+
+        var s3cfg = new AmazonS3Config
+        {
+            ServiceURL = endpoint,
+            AuthenticationRegion = "ru-central1",
+            ForcePathStyle = true
+        };
+
+        return new AmazonS3Client(creds, s3cfg);
+    });
+
+    builder.Services.AddSingleton<IObjectStorage, S3ObjectStorage>();
+}
+else
+{
+    builder.Logging.AddConsole();
+    Console.WriteLine("[WARN] Object storage is not configured. Falling back to local file storage.");
+    builder.Services.AddSingleton<IObjectStorage, LocalObjectStorage>();
+}
 
 var app = builder.Build();
 
-// ---------- Миграция БД + самовосстановление схемы ----------
+// ---------- РњРёРіСЂР°С†РёСЏ Р‘Р” + СЃР°РјРѕРІРѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРёРµ СЃС…РµРјС‹ ----------
 using (var scope = app.Services.CreateScope())
 {
     var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DbInit");
@@ -192,7 +214,7 @@ var uploadsAbs = Path.IsPathRooted(storagePath)
 
 Directory.CreateDirectory(uploadsAbs);
 
-// ---------- Проксирование ----------
+// ---------- РџСЂРѕРєСЃРёСЂРѕРІР°РЅРёРµ ----------
 var fwd = new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
@@ -201,7 +223,7 @@ fwd.KnownNetworks.Clear();
 fwd.KnownProxies.Clear();
 app.UseForwardedHeaders(fwd);
 
-// ---------- Пайплайн ----------
+// ---------- РџР°Р№РїР»Р°Р№РЅ ----------
 app.UseStaticFiles(new StaticFileOptions
 {
     OnPrepareResponse = ctx =>
@@ -240,6 +262,7 @@ app.MapGet("/healthz", () => Results.Ok(new { status = "ok", time = DateTimeOffs
 
 app.MapControllers();
 app.MapHub<ChatHub>("/hubs/chat");
+app.MapHub<CallsHub>("/hubs/calls");
 
 app.MapGet("/", () => Results.Redirect("/swagger"));
 
