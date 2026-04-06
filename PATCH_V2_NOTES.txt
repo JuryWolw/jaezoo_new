@@ -1,0 +1,9 @@
+JaeZoo Server patched v2
+
+Included in this iteration:
+- multi-attachment send contract via SendMessageRequest
+- forward with copied attachment records so forwarded file-only and multi-file messages work
+- richer MessageDto for forwarded message metadata
+- history now returns forward metadata
+- edit endpoint allows empty text when attachments exist
+- compatibility preserved for legacy hub events/methods

@@ -1,0 +1,6 @@
+@JaeZoo.Server_HostAddress = http://localhost:5273
+
+GET {{JaeZoo.Server_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

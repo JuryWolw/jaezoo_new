@@ -1,0 +1,13 @@
+**/bin/
+**/obj/
+**/.vs/
+**/.idea/
+**/.git/
+**/*.user
+**/*.suo
+**/*.log
+**/*.db
+**/*.db-shm
+**/*.db-wal
+Dockerfile
+README*
