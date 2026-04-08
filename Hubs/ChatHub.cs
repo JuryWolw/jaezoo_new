@@ -15,13 +15,15 @@ public class ChatHub : Hub
     private readonly IPresenceTracker _presence;
     private readonly ILogger<ChatHub> _log;
     private readonly DirectChatService _chat;
+    private readonly GroupChatService _groupChats;
 
-    public ChatHub(AppDbContext db, IPresenceTracker presence, ILogger<ChatHub> log, DirectChatService chat)
+    public ChatHub(AppDbContext db, IPresenceTracker presence, ILogger<ChatHub> log, DirectChatService chat, GroupChatService groupChats)
     {
         _db = db;
         _presence = presence;
         _log = log;
         _chat = chat;
+        _groupChats = groupChats;
     }
 
     private Guid MeId
@@ -225,4 +227,116 @@ public class ChatHub : Hub
             _log.LogWarning(ex, "ChatUnreadChanged failed. me={Me} target={Target} dialog={Dialog}", senderId, targetUserId, dlg.Id);
         }
     }
+
+
+    public async Task SendGroupMessage(Guid groupId, SendMessageRequest request)
+    {
+        try
+        {
+            var me = MeId;
+            request ??= new SendMessageRequest(null, null);
+
+            var created = await _groupChats.CreateMessageAsync(me, groupId, request.Text, request.FileIds, DirectMessageKind.User, null, null, Context.ConnectionAborted);
+            var dto = await _groupChats.GetMessageDtoAsync(groupId, created.message.Id, Context.ConnectionAborted);
+            if (dto is null)
+                throw new HubException("Не удалось сформировать сообщение.");
+
+            await EmitCreatedToGroup(groupId, dto, me, Context.ConnectionAborted);
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new HubException(ex.Message);
+        }
+        catch (HubException)
+        {
+            throw;
+        }
+        catch (DbUpdateException ex)
+        {
+            var detail = ex.InnerException?.Message ?? ex.Message;
+            _log.LogError(ex, "SendGroupMessage db update failed. group={GroupId}. detail={Detail}", groupId, detail);
+            throw new HubException($"SendGroupMessage failed: DbUpdateException: {detail}");
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "SendGroupMessage failed. group={GroupId}", groupId);
+            throw new HubException($"SendGroupMessage failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    public async Task SendGroupSystemMessage(Guid groupId, string systemKey, string? text)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(systemKey))
+                throw new HubException("SystemKey is required.");
+
+            var me = MeId;
+            var created = await _groupChats.CreateMessageAsync(me, groupId, text, null, DirectMessageKind.System, systemKey, null, Context.ConnectionAborted);
+            var dto = await _groupChats.GetMessageDtoAsync(groupId, created.message.Id, Context.ConnectionAborted);
+            if (dto is null)
+                throw new HubException("Не удалось сформировать системное сообщение.");
+
+            await EmitCreatedToGroup(groupId, dto, me, Context.ConnectionAborted);
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new HubException(ex.Message);
+        }
+    }
+
+    public async Task ForwardGroupMessages(Guid groupId, ForwardMessagesRequest request)
+    {
+        try
+        {
+            var me = MeId;
+            if (request?.MessageIds is null || request.MessageIds.Count == 0)
+                throw new HubException("MessageIds are required.");
+            if (!await _groupChats.IsMemberAsync(groupId, me, Context.ConnectionAborted))
+                throw new HubException("Групповой чат не найден.");
+
+            var ids = request.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
+            var sources = await _db.GroupMessages.AsNoTracking()
+                .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
+                .Join(_db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == me), m => m.GroupChatId, gm => gm.GroupChatId, (m, gm) => m)
+                .OrderBy(m => m.SentAt)
+                .ThenBy(m => m.Id)
+                .ToListAsync(Context.ConnectionAborted);
+
+            foreach (var source in sources)
+            {
+                var created = await _groupChats.ForwardMessageAsync(me, groupId, source, request.IncludeAttachments, Context.ConnectionAborted);
+                var dto = await _groupChats.GetMessageDtoAsync(groupId, created.message.Id, Context.ConnectionAborted);
+                if (dto is not null)
+                    await EmitCreatedToGroup(groupId, dto, me, Context.ConnectionAborted);
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new HubException(ex.Message);
+        }
+    }
+
+    private async Task EmitCreatedToGroup(Guid groupId, MessageDto dto, Guid senderId, CancellationToken ct)
+    {
+        var memberIds = await _db.GroupChatMembers.AsNoTracking().Where(m => m.GroupChatId == groupId).Select(m => m.UserId).ToListAsync(ct);
+        foreach (var memberId in memberIds)
+        {
+            await Clients.User(memberId.ToString()).SendAsync("GroupChatMessageCreated", new GroupChatRealtimeMessageDto(groupId, dto), ct);
+        }
+
+        foreach (var memberId in memberIds.Where(x => x != senderId))
+        {
+            try
+            {
+                var unread = await _groupChats.GetUnreadForUserAsync(groupId, memberId, ct);
+                await Clients.User(memberId.ToString()).SendAsync("GroupChatUnreadChanged", new GroupChatUnreadChangedDto(groupId, unread.count, unread.firstId, unread.firstAt), ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "GroupChatUnreadChanged failed. sender={Sender} member={Member} group={GroupId}", senderId, memberId, groupId);
+            }
+        }
+    }
+
 }

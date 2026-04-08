@@ -75,3 +75,42 @@ public record FileUploadResponse(
     bool IsImage,
     bool IsVideo
 );
+
+
+public record CreateGroupChatRequest(string Title, IReadOnlyList<Guid>? MemberIds = null);
+public record UpdateGroupChatRequest(string Title);
+public record UpdateGroupMembersRequest(IReadOnlyList<Guid> UserIds);
+
+public record GroupChatMemberDto(
+    Guid UserId,
+    string UserName,
+    string Email,
+    string? AvatarUrl,
+    DateTime JoinedAt,
+    bool IsOwner
+);
+
+public record GroupChatSummaryDto(
+    Guid Id,
+    string Title,
+    Guid OwnerId,
+    int MemberCount,
+    int MemberLimit,
+    DateTime CreatedAt,
+    DateTime UpdatedAt,
+    DateTime? LastMessageAt,
+    MessageDto? LastMessage,
+    int UnreadCount = 0,
+    Guid? FirstUnreadId = null,
+    DateTime? FirstUnreadAt = null
+);
+
+public record GroupChatDetailsDto(GroupChatSummaryDto Chat, IReadOnlyList<GroupChatMemberDto> Members);
+public record GroupUnreadChatDto(Guid GroupId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt);
+
+public record GroupChatRealtimeMessageDto(Guid GroupId, MessageDto Message);
+public record GroupChatMessageUpdatedDto(Guid GroupId, MessageDto Message);
+public record GroupChatMessageDeletedDto(Guid GroupId, Guid MessageId, DateTime DeletedAt, Guid DeletedById);
+public record GroupChatUnreadChangedDto(Guid GroupId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt);
+public record GroupChatUpdatedDto(GroupChatSummaryDto Chat);
+public record GroupChatMembersChangedDto(Guid GroupId, IReadOnlyList<GroupChatMemberDto> Members);

@@ -72,6 +72,7 @@ builder.Services
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<TokenService>();
 builder.Services.AddScoped<DirectChatService>();
+builder.Services.AddScoped<GroupChatService>();
 
 // ---------- MVC + SignalR ----------
 builder.Services.AddControllers()

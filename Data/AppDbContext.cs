@@ -12,6 +12,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Avatar> Avatars => Set<Avatar>();
     public DbSet<ChatFile> ChatFiles => Set<ChatFile>();
     public DbSet<DirectMessageAttachment> DirectMessageAttachments => Set<DirectMessageAttachment>();
+    public DbSet<GroupChat> GroupChats => Set<GroupChat>();
+    public DbSet<GroupChatMember> GroupChatMembers => Set<GroupChatMember>();
+    public DbSet<GroupMessage> GroupMessages => Set<GroupMessage>();
+    public DbSet<GroupMessageAttachment> GroupMessageAttachments => Set<GroupMessageAttachment>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -78,6 +82,69 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<DirectMessageAttachment>()
+            .HasOne<ChatFile>()
+            .WithMany()
+            .HasForeignKey(a => a.FileId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<GroupChat>()
+            .Property(g => g.Title)
+            .HasMaxLength(120);
+
+        b.Entity<GroupChat>()
+            .HasIndex(g => new { g.OwnerId, g.CreatedAt });
+
+        b.Entity<GroupChatMember>()
+            .HasIndex(m => new { m.GroupChatId, m.UserId })
+            .IsUnique();
+
+        b.Entity<GroupChatMember>()
+            .HasIndex(m => new { m.UserId, m.JoinedAt });
+
+        b.Entity<GroupChatMember>()
+            .HasOne<GroupChat>()
+            .WithMany(g => g.Members)
+            .HasForeignKey(m => m.GroupChatId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<GroupMessage>()
+            .HasIndex(m => new { m.GroupChatId, m.SentAt, m.Id });
+
+        b.Entity<GroupMessage>()
+            .Property(m => m.Text)
+            .HasMaxLength(4000);
+
+        b.Entity<GroupMessage>()
+            .Property(m => m.SystemKey)
+            .HasMaxLength(64);
+
+        b.Entity<GroupMessage>()
+            .Property(m => m.Kind)
+            .HasConversion<int>();
+
+        b.Entity<GroupMessage>()
+            .HasIndex(m => new { m.GroupChatId, m.DeletedAt, m.SentAt, m.Id });
+
+        b.Entity<GroupMessage>()
+            .HasIndex(m => m.ForwardedFromMessageId);
+
+        b.Entity<GroupMessage>()
+            .HasOne<GroupChat>()
+            .WithMany()
+            .HasForeignKey(m => m.GroupChatId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<GroupMessageAttachment>()
+            .HasIndex(a => new { a.MessageId, a.FileId })
+            .IsUnique();
+
+        b.Entity<GroupMessageAttachment>()
+            .HasOne<GroupMessage>()
+            .WithMany(m => m.Attachments)
+            .HasForeignKey(a => a.MessageId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<GroupMessageAttachment>()
             .HasOne<ChatFile>()
             .WithMany()
             .HasForeignKey(a => a.FileId)
