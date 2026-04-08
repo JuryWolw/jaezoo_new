@@ -8,6 +8,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 {
     public const int MaxGroupMembers = 50;
 
+    public static string GetAvatarUrl(GroupChat chat) =>
+        string.IsNullOrWhiteSpace(chat.AvatarUrl) ? $"/avatars/groups/{chat.Id}" : chat.AvatarUrl;
+
     public async Task<bool> IsMemberAsync(Guid groupId, Guid userId, CancellationToken ct = default) =>
         await db.GroupChatMembers.AsNoTracking().AnyAsync(m => m.GroupChatId == groupId && m.UserId == userId, ct);
 
@@ -106,6 +109,20 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             throw new InvalidOperationException("Title is too long.");
 
         chat.Title = normalizedTitle;
+        chat.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return chat;
+    }
+
+    public async Task<GroupChat> UpdateAvatarUrlAsync(Guid groupId, Guid me, string? avatarUrl, CancellationToken ct = default)
+    {
+        var chat = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct)
+            ?? throw new InvalidOperationException("Group chat not found.");
+
+        if (chat.OwnerId != me)
+            throw new InvalidOperationException("Only the owner can change the group avatar.");
+
+        chat.AvatarUrl = string.IsNullOrWhiteSpace(avatarUrl) ? null : avatarUrl.Trim();
         chat.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         return chat;
@@ -289,6 +306,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return new GroupChatSummaryDto(
             chat.Id,
             chat.Title,
+            GetAvatarUrl(chat),
             chat.OwnerId,
             memberCount,
             chat.MemberLimit,
@@ -360,31 +378,67 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         if (sourceIds.Count == 0)
             return new();
 
-        var sources = await db.GroupMessages
+        var result = new Dictionary<Guid, MessageForwardInfoDto>();
+
+        var groupSources = await db.GroupMessages
             .AsNoTracking()
             .Where(m => sourceIds.Contains(m.Id))
             .Select(m => new { m.Id, m.SenderId, m.Text, m.SentAt, m.Kind, m.SystemKey, m.DeletedAt })
             .ToListAsync(ct);
 
-        var attachmentMessageIds = await db.GroupMessageAttachments
+        var groupAttachmentMessageIds = await db.GroupMessageAttachments
             .AsNoTracking()
             .Where(a => sourceIds.Contains(a.MessageId))
             .Select(a => a.MessageId)
             .Distinct()
             .ToListAsync(ct);
-        var hasAttachments = attachmentMessageIds.ToHashSet();
+        var groupHasAttachments = groupAttachmentMessageIds.ToHashSet();
 
-        return sources.ToDictionary(
-            x => x.Id,
-            x => new MessageForwardInfoDto(
+        foreach (var x in groupSources)
+        {
+            result[x.Id] = new MessageForwardInfoDto(
                 x.Id,
                 x.SenderId,
                 x.DeletedAt.HasValue ? string.Empty : x.Text,
                 x.SentAt,
-                hasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
+                groupHasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
                 x.Kind,
                 x.DeletedAt.HasValue ? null : x.SystemKey,
-                x.DeletedAt));
+                x.DeletedAt);
+        }
+
+        var unresolvedIds = sourceIds.Where(id => !result.ContainsKey(id)).ToList();
+        if (unresolvedIds.Count > 0)
+        {
+            var directSources = await db.DirectMessages
+                .AsNoTracking()
+                .Where(m => unresolvedIds.Contains(m.Id))
+                .Select(m => new { m.Id, m.SenderId, m.Text, m.SentAt, m.Kind, m.SystemKey, m.DeletedAt })
+                .ToListAsync(ct);
+
+            var directAttachmentMessageIds = await db.DirectMessageAttachments
+                .AsNoTracking()
+                .Where(a => unresolvedIds.Contains(a.MessageId))
+                .Select(a => a.MessageId)
+                .Distinct()
+                .ToListAsync(ct);
+            var directHasAttachments = directAttachmentMessageIds.ToHashSet();
+
+            foreach (var x in directSources)
+            {
+                result[x.Id] = new MessageForwardInfoDto(
+                    x.Id,
+                    x.SenderId,
+                    x.DeletedAt.HasValue ? string.Empty : x.Text,
+                    x.SentAt,
+                    directHasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
+                    x.Kind,
+                    x.DeletedAt.HasValue ? null : x.SystemKey,
+                    x.DeletedAt);
+            }
+        }
+
+        return result;
     }
 
     public MessageDto ToMessageDto(GroupMessage message, IReadOnlyList<AttachmentDto>? attachments = null, MessageForwardInfoDto? forwardedFrom = null)
@@ -524,6 +578,81 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         {
             sourceFiles = await (
                 from a in db.GroupMessageAttachments
+                join f in db.ChatFiles on a.FileId equals f.Id
+                where a.MessageId == source.Id
+                orderby a.CreatedAt, a.Id
+                select f
+            ).ToListAsync(ct);
+        }
+
+        var hasSystemMarker = source.Kind == DirectMessageKind.System && !string.IsNullOrWhiteSpace(source.SystemKey);
+        if (string.IsNullOrWhiteSpace(source.Text) && sourceFiles.Count == 0 && !hasSystemMarker)
+            throw new InvalidOperationException("Message must contain text or attachments.");
+
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+        var clones = sourceFiles.Select(f => new ChatFile
+        {
+            UploaderId = senderId,
+            OriginalFileName = f.OriginalFileName,
+            ContentType = f.ContentType,
+            SizeBytes = f.SizeBytes,
+            StoredPath = f.StoredPath,
+            CreatedAt = now,
+            IsAttached = true,
+            AttachedAt = now
+        }).ToList();
+
+        if (clones.Count > 0)
+            db.ChatFiles.AddRange(clones);
+
+        var message = new GroupMessage
+        {
+            GroupChatId = groupId,
+            SenderId = senderId,
+            Text = (source.Text ?? string.Empty).Trim(),
+            SentAt = now,
+            Kind = source.Kind,
+            SystemKey = string.IsNullOrWhiteSpace(source.SystemKey) ? null : source.SystemKey.Trim(),
+            ForwardedFromMessageId = source.Id
+        };
+        db.GroupMessages.Add(message);
+
+        foreach (var file in clones)
+        {
+            db.GroupMessageAttachments.Add(new GroupMessageAttachment
+            {
+                MessageId = message.Id,
+                FileId = file.Id,
+                CreatedAt = now
+            });
+        }
+
+        chat.UpdatedAt = now;
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return (chat, message);
+    }
+
+    public async Task<(GroupChat chat, GroupMessage message)> ForwardMessageAsync(
+        Guid senderId,
+        Guid groupId,
+        DirectMessage source,
+        bool includeAttachments,
+        CancellationToken ct = default)
+    {
+        if (source.DeletedAt.HasValue)
+            throw new InvalidOperationException("Deleted message cannot be forwarded.");
+
+        var chat = await GetChatForMemberAsync(groupId, senderId, ct)
+            ?? throw new InvalidOperationException("Group chat not found or access denied.");
+        var now = DateTime.UtcNow;
+
+        List<ChatFile> sourceFiles = [];
+        if (includeAttachments)
+        {
+            sourceFiles = await (
+                from a in db.DirectMessageAttachments
                 join f in db.ChatFiles on a.FileId equals f.Id
                 where a.MessageId == source.Id
                 orderby a.CreatedAt, a.Id

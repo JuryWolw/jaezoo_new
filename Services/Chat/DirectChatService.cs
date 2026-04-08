@@ -129,7 +129,9 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
         if (sourceIds.Count == 0)
             return new();
 
-        var sources = await db.DirectMessages
+        var result = new Dictionary<Guid, MessageForwardInfoDto>();
+
+        var directSources = await db.DirectMessages
             .AsNoTracking()
             .Where(m => sourceIds.Contains(m.Id))
             .Select(m => new
@@ -144,25 +146,68 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
             })
             .ToListAsync(ct);
 
-        var attachmentMessageIds = await db.DirectMessageAttachments
+        var directAttachmentMessageIds = await db.DirectMessageAttachments
             .AsNoTracking()
             .Where(a => sourceIds.Contains(a.MessageId))
             .Select(a => a.MessageId)
             .Distinct()
             .ToListAsync(ct);
-        var hasAttachments = attachmentMessageIds.ToHashSet();
+        var directHasAttachments = directAttachmentMessageIds.ToHashSet();
 
-        return sources.ToDictionary(
-            x => x.Id,
-            x => new MessageForwardInfoDto(
+        foreach (var x in directSources)
+        {
+            result[x.Id] = new MessageForwardInfoDto(
                 x.Id,
                 x.SenderId,
                 x.DeletedAt.HasValue ? string.Empty : x.Text,
                 x.SentAt,
-                hasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
+                directHasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
                 x.Kind,
                 x.DeletedAt.HasValue ? null : x.SystemKey,
-                x.DeletedAt));
+                x.DeletedAt);
+        }
+
+        var unresolvedIds = sourceIds.Where(id => !result.ContainsKey(id)).ToList();
+        if (unresolvedIds.Count > 0)
+        {
+            var groupSources = await db.GroupMessages
+                .AsNoTracking()
+                .Where(m => unresolvedIds.Contains(m.Id))
+                .Select(m => new
+                {
+                    m.Id,
+                    m.SenderId,
+                    m.Text,
+                    m.SentAt,
+                    m.Kind,
+                    m.SystemKey,
+                    m.DeletedAt
+                })
+                .ToListAsync(ct);
+
+            var groupAttachmentMessageIds = await db.GroupMessageAttachments
+                .AsNoTracking()
+                .Where(a => unresolvedIds.Contains(a.MessageId))
+                .Select(a => a.MessageId)
+                .Distinct()
+                .ToListAsync(ct);
+            var groupHasAttachments = groupAttachmentMessageIds.ToHashSet();
+
+            foreach (var x in groupSources)
+            {
+                result[x.Id] = new MessageForwardInfoDto(
+                    x.Id,
+                    x.SenderId,
+                    x.DeletedAt.HasValue ? string.Empty : x.Text,
+                    x.SentAt,
+                    groupHasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
+                    x.Kind,
+                    x.DeletedAt.HasValue ? null : x.SystemKey,
+                    x.DeletedAt);
+            }
+        }
+
+        return result;
     }
 
     public MessageDto ToMessageDto(
@@ -330,6 +375,79 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
         {
             sourceFiles = await (
                 from a in db.DirectMessageAttachments
+                join f in db.ChatFiles on a.FileId equals f.Id
+                where a.MessageId == source.Id
+                orderby a.CreatedAt, a.Id
+                select f
+            ).ToListAsync(ct);
+        }
+
+        var hasSystemMarker = source.Kind == DirectMessageKind.System && !string.IsNullOrWhiteSpace(source.SystemKey);
+        if (string.IsNullOrWhiteSpace(source.Text) && sourceFiles.Count == 0 && !hasSystemMarker)
+            throw new InvalidOperationException("Message must contain text or attachments.");
+
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+        var clones = sourceFiles.Select(f => new ChatFile
+        {
+            UploaderId = senderId,
+            OriginalFileName = f.OriginalFileName,
+            ContentType = f.ContentType,
+            SizeBytes = f.SizeBytes,
+            StoredPath = f.StoredPath,
+            CreatedAt = now,
+            IsAttached = true,
+            AttachedAt = now
+        }).ToList();
+
+        if (clones.Count > 0)
+            db.ChatFiles.AddRange(clones);
+
+        var message = new DirectMessage
+        {
+            DialogId = dlg.Id,
+            SenderId = senderId,
+            Text = (source.Text ?? string.Empty).Trim(),
+            SentAt = now,
+            Kind = source.Kind,
+            SystemKey = string.IsNullOrWhiteSpace(source.SystemKey) ? null : source.SystemKey.Trim(),
+            ForwardedFromMessageId = source.Id
+        };
+        db.DirectMessages.Add(message);
+
+        foreach (var file in clones)
+        {
+            db.DirectMessageAttachments.Add(new DirectMessageAttachment
+            {
+                MessageId = message.Id,
+                FileId = file.Id,
+                CreatedAt = now
+            });
+        }
+
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return (dlg, message);
+    }
+
+    public async Task<(DirectDialog dialog, DirectMessage message)> ForwardMessageAsync(
+        Guid senderId,
+        Guid peerId,
+        GroupMessage source,
+        bool includeAttachments,
+        CancellationToken ct = default)
+    {
+        if (source.DeletedAt.HasValue)
+            throw new InvalidOperationException("Deleted message cannot be forwarded.");
+
+        var dlg = await GetOrCreateDialogAsync(senderId, peerId, ct);
+        var now = DateTime.UtcNow;
+
+        List<ChatFile> sourceFiles = [];
+        if (includeAttachments)
+        {
+            sourceFiles = await (
+                from a in db.GroupMessageAttachments
                 join f in db.ChatFiles on a.FileId equals f.Id
                 where a.MessageId == source.Id
                 orderby a.CreatedAt, a.Id

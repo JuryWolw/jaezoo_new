@@ -18,7 +18,8 @@ public class ChatController(
     ILogger<ChatController> log,
     DirectChatService chat,
     GroupChatService groupChats,
-    IHubContext<ChatHub> hub) : ControllerBase
+    IHubContext<ChatHub> hub,
+    IWebHostEnvironment env) : ControllerBase
 {
     private Guid MeId
     {
@@ -33,6 +34,23 @@ public class ChatController(
 
             return id;
         }
+    }
+
+    private string GetGroupDefaultAvatarPath()
+    {
+        var root = env.WebRootPath ?? Path.Combine(env.ContentRootPath, "wwwroot");
+        var groupDefault = Path.Combine(root, "avatars", "default_group.png");
+        if (System.IO.File.Exists(groupDefault))
+            return groupDefault;
+
+        return Path.Combine(root, "avatars", "default.png");
+    }
+
+    private async Task BroadcastGroupSummaryChanged(Guid groupId, CancellationToken ct)
+    {
+        var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
+        if (summary is not null)
+            await BroadcastGroupUpdated(summary, ct);
     }
 
     [HttpGet("history/{friendId:guid}")]
@@ -609,6 +627,107 @@ public class ChatController(
         }
     }
 
+    [HttpPut("groups/{groupId:guid}/avatar/url")]
+    public async Task<ActionResult<GroupChatSummaryDto>> SetGroupAvatarUrl(Guid groupId, [FromBody] SetGroupAvatarUrlRequest body, CancellationToken ct)
+    {
+        try
+        {
+            if (body is null) return BadRequest(new { error = "Body is required." });
+
+            await groupChats.UpdateAvatarUrlAsync(groupId, MeId, body.AvatarUrl, ct);
+            var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
+            if (summary is null) return NotFound(new { error = "Group chat not found." });
+
+            await BroadcastGroupUpdated(summary, ct);
+            return Ok(summary);
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "SetGroupAvatarUrl failed: me={MeId}, group={GroupId}", MeId, groupId);
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [RequestSizeLimit(5 * 1024 * 1024)]
+    [HttpPost("groups/{groupId:guid}/avatar/upload")]
+    public async Task<ActionResult<object>> UploadGroupAvatar(Guid groupId, IFormFile file, CancellationToken ct)
+    {
+        try
+        {
+            var group = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct);
+            if (group is null) return NotFound(new { error = "Group chat not found." });
+            if (group.OwnerId != MeId) return Forbid();
+
+            if (file == null || file.Length == 0)
+                return BadRequest(new { error = "Файл не найден." });
+
+            var allowed = new[] { "image/png", "image/jpeg", "image/webp" };
+            if (!allowed.Contains(file.ContentType ?? string.Empty, StringComparer.OrdinalIgnoreCase))
+                return BadRequest(new { error = "Поддерживаются только PNG/JPEG/WEBP." });
+
+            var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
+            if (ext is not ".png" and not ".jpg" and not ".jpeg" and not ".webp")
+                return BadRequest(new { error = "Неверное расширение файла." });
+
+            await using var ms = new MemoryStream();
+            await file.CopyToAsync(ms, ct);
+            var bytes = ms.ToArray();
+            if (bytes.Length == 0)
+                return BadRequest(new { error = "Пустой файл." });
+
+            db.GroupAvatars.Add(new GroupAvatar
+            {
+                GroupChatId = groupId,
+                Data = bytes,
+                ContentType = file.ContentType ?? "image/png",
+                CreatedAt = DateTime.UtcNow
+            });
+
+            var version = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            group.AvatarUrl = $"/avatars/groups/{groupId}?v={version}";
+            group.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+
+            var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
+            if (summary is not null)
+                await BroadcastGroupUpdated(summary, ct);
+
+            return Ok(new { url = group.AvatarUrl });
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "UploadGroupAvatar failed: me={MeId}, group={GroupId}", MeId, groupId);
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [AllowAnonymous]
+    [HttpGet("/avatars/groups/{id:guid}")]
+    public async Task<IActionResult> GetGroupAvatar(Guid id, CancellationToken ct)
+    {
+        var avatar = await db.GroupAvatars.AsNoTracking()
+            .Where(a => a.GroupChatId == id)
+            .OrderByDescending(a => a.CreatedAt)
+            .FirstOrDefaultAsync(ct);
+
+        if (avatar is null || avatar.Data.Length == 0)
+        {
+            var path = GetGroupDefaultAvatarPath();
+            if (System.IO.File.Exists(path))
+                return PhysicalFile(path, "image/png");
+            return NotFound();
+        }
+
+        var etag = $"W/\"{avatar.Data.Length}-{avatar.CreatedAt.ToUniversalTime():yyyyMMddHHmmss}\"";
+        var ifNone = Request.Headers["If-None-Match"].ToString();
+        if (!string.IsNullOrEmpty(ifNone) && string.Equals(ifNone, etag, StringComparison.Ordinal))
+            return StatusCode(StatusCodes.Status304NotModified);
+
+        Response.Headers.ETag = etag;
+        Response.Headers.CacheControl = "public,max-age=3600";
+        return File(avatar.Data, avatar.ContentType ?? "image/png");
+    }
+
     [HttpGet("groups/{groupId:guid}/history")]
     public async Task<ActionResult<IEnumerable<MessageDto>>> GroupHistory(
         Guid groupId,
@@ -876,6 +995,144 @@ public class ChatController(
         catch (Exception ex)
         {
             log.LogError(ex, "ForwardGroupMessages failed: me={MeId}, group={GroupId}", MeId, groupId);
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpPost("forward/direct/{friendId:guid}")]
+    public async Task<ActionResult<IEnumerable<MessageDto>>> ForwardMessagesToDirect(Guid friendId, [FromBody] CrossChatForwardRequest body, CancellationToken ct)
+    {
+        try
+        {
+            if (body?.MessageIds is null || body.MessageIds.Count == 0)
+                return BadRequest(new { error = "MessageIds are required." });
+            if (!await chat.AreFriends(MeId, friendId, ct)) return Forbid();
+
+            var ids = body.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
+            var source = (body.Source ?? string.Empty).Trim().ToLowerInvariant();
+            var createdDtos = new List<MessageDto>();
+
+            if (source == "group")
+            {
+                var sourcesQuery = db.GroupMessages.AsNoTracking()
+                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
+                    .Join(db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == MeId), m => m.GroupChatId, gm => gm.GroupChatId, (m, gm) => m);
+
+                if (body.SourceChatId.HasValue && body.SourceChatId.Value != Guid.Empty)
+                    sourcesQuery = sourcesQuery.Where(m => m.GroupChatId == body.SourceChatId.Value);
+
+                var sources = await sourcesQuery.OrderBy(m => m.SentAt).ThenBy(m => m.Id).ToListAsync(ct);
+                foreach (var sourceMessage in sources)
+                {
+                    var forwarded = await chat.ForwardMessageAsync(MeId, friendId, sourceMessage, body.IncludeAttachments, ct);
+                    var dto = await chat.GetMessageDtoAsync(forwarded.dialog.Id, forwarded.message.Id, ct);
+                    if (dto is not null)
+                    {
+                        createdDtos.Add(dto);
+                        await BroadcastCreated(friendId, dto, ct);
+                    }
+                }
+            }
+            else if (source == "direct")
+            {
+                var sources = await (
+                    from m in db.DirectMessages.AsNoTracking()
+                    join d in db.DirectDialogs.AsNoTracking() on m.DialogId equals d.Id
+                    where ids.Contains(m.Id) && m.DeletedAt == null && (d.User1Id == MeId || d.User2Id == MeId)
+                    orderby m.SentAt, m.Id
+                    select m
+                ).ToListAsync(ct);
+
+                foreach (var sourceMessage in sources)
+                {
+                    var forwarded = await chat.ForwardMessageAsync(MeId, friendId, sourceMessage, body.IncludeAttachments, ct);
+                    var dto = await chat.GetMessageDtoAsync(forwarded.dialog.Id, forwarded.message.Id, ct);
+                    if (dto is not null)
+                    {
+                        createdDtos.Add(dto);
+                        await BroadcastCreated(friendId, dto, ct);
+                    }
+                }
+            }
+            else
+            {
+                return BadRequest(new { error = "Source must be 'direct' or 'group'." });
+            }
+
+            return Ok(createdDtos);
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "ForwardMessagesToDirect failed: me={MeId}, friend={FriendId}", MeId, friendId);
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpPost("forward/group/{groupId:guid}")]
+    public async Task<ActionResult<IEnumerable<MessageDto>>> ForwardMessagesToGroup(Guid groupId, [FromBody] CrossChatForwardRequest body, CancellationToken ct)
+    {
+        try
+        {
+            if (body?.MessageIds is null || body.MessageIds.Count == 0)
+                return BadRequest(new { error = "MessageIds are required." });
+            if (!await groupChats.IsMemberAsync(groupId, MeId, ct)) return NotFound(new { error = "Group chat not found." });
+
+            var ids = body.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
+            var source = (body.Source ?? string.Empty).Trim().ToLowerInvariant();
+            var createdDtos = new List<MessageDto>();
+
+            if (source == "group")
+            {
+                var sourcesQuery = db.GroupMessages.AsNoTracking()
+                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
+                    .Join(db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == MeId), m => m.GroupChatId, gm => gm.GroupChatId, (m, gm) => m);
+
+                if (body.SourceChatId.HasValue && body.SourceChatId.Value != Guid.Empty)
+                    sourcesQuery = sourcesQuery.Where(m => m.GroupChatId == body.SourceChatId.Value);
+
+                var sources = await sourcesQuery.OrderBy(m => m.SentAt).ThenBy(m => m.Id).ToListAsync(ct);
+                foreach (var sourceMessage in sources)
+                {
+                    var forwarded = await groupChats.ForwardMessageAsync(MeId, groupId, sourceMessage, body.IncludeAttachments, ct);
+                    var dto = await groupChats.GetMessageDtoAsync(groupId, forwarded.message.Id, ct);
+                    if (dto is not null)
+                    {
+                        createdDtos.Add(dto);
+                        await BroadcastGroupCreated(groupId, dto, ct);
+                    }
+                }
+            }
+            else if (source == "direct")
+            {
+                var sources = await (
+                    from m in db.DirectMessages.AsNoTracking()
+                    join d in db.DirectDialogs.AsNoTracking() on m.DialogId equals d.Id
+                    where ids.Contains(m.Id) && m.DeletedAt == null && (d.User1Id == MeId || d.User2Id == MeId)
+                    orderby m.SentAt, m.Id
+                    select m
+                ).ToListAsync(ct);
+
+                foreach (var sourceMessage in sources)
+                {
+                    var forwarded = await groupChats.ForwardMessageAsync(MeId, groupId, sourceMessage, body.IncludeAttachments, ct);
+                    var dto = await groupChats.GetMessageDtoAsync(groupId, forwarded.message.Id, ct);
+                    if (dto is not null)
+                    {
+                        createdDtos.Add(dto);
+                        await BroadcastGroupCreated(groupId, dto, ct);
+                    }
+                }
+            }
+            else
+            {
+                return BadRequest(new { error = "Source must be 'direct' or 'group'." });
+            }
+
+            return Ok(createdDtos);
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "ForwardMessagesToGroup failed: me={MeId}, group={GroupId}", MeId, groupId);
             return BadRequest(new { error = ex.Message });
         }
     }

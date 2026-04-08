@@ -93,6 +93,7 @@ public record GroupChatMemberDto(
 public record GroupChatSummaryDto(
     Guid Id,
     string Title,
+    string? AvatarUrl,
     Guid OwnerId,
     int MemberCount,
     int MemberLimit,
@@ -114,3 +115,7 @@ public record GroupChatMessageDeletedDto(Guid GroupId, Guid MessageId, DateTime 
 public record GroupChatUnreadChangedDto(Guid GroupId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt);
 public record GroupChatUpdatedDto(GroupChatSummaryDto Chat);
 public record GroupChatMembersChangedDto(Guid GroupId, IReadOnlyList<GroupChatMemberDto> Members);
+
+
+public record SetGroupAvatarUrlRequest(string AvatarUrl);
+public record CrossChatForwardRequest(string Source, Guid? SourceChatId, IReadOnlyList<Guid> MessageIds, bool IncludeAttachments = true);

@@ -15,6 +15,9 @@ public class GroupChat
 
     public int MemberLimit { get; set; } = DefaultMemberLimit;
 
+    [MaxLength(512)]
+    public string? AvatarUrl { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;

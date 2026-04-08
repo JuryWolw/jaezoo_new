@@ -317,6 +317,112 @@ public class ChatHub : Hub
         }
     }
 
+    public async Task ForwardMessagesToDirect(Guid targetUserId, CrossChatForwardRequest request)
+    {
+        try
+        {
+            var me = MeId;
+            if (request?.MessageIds is null || request.MessageIds.Count == 0)
+                throw new HubException("MessageIds are required.");
+            if (!await _chat.AreFriends(me, targetUserId, Context.ConnectionAborted))
+                throw new HubException("Вы не друзья.");
+
+            var ids = request.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
+            var source = (request.Source ?? string.Empty).Trim().ToLowerInvariant();
+
+            if (source == "group")
+            {
+                var sourcesQuery = _db.GroupMessages.AsNoTracking()
+                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
+                    .Join(_db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == me), m => m.GroupChatId, gm => gm.GroupChatId, (m, gm) => m);
+
+                if (request.SourceChatId.HasValue && request.SourceChatId.Value != Guid.Empty)
+                    sourcesQuery = sourcesQuery.Where(m => m.GroupChatId == request.SourceChatId.Value);
+
+                var sources = await sourcesQuery.OrderBy(m => m.SentAt).ThenBy(m => m.Id).ToListAsync(Context.ConnectionAborted);
+                foreach (var sourceMessage in sources)
+                {
+                    var created = await _chat.ForwardMessageAsync(me, targetUserId, sourceMessage, request.IncludeAttachments, Context.ConnectionAborted);
+                    var dto = await _chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, Context.ConnectionAborted);
+                    if (dto is not null)
+                        await EmitCreatedToParticipants(me, targetUserId, dto, created.dialog, Context.ConnectionAborted);
+                }
+            }
+            else if (source == "direct")
+            {
+                await ForwardMessages(targetUserId, new ForwardMessagesRequest(ids, request.IncludeAttachments));
+            }
+            else
+            {
+                throw new HubException("Source must be 'direct' or 'group'.");
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new HubException(ex.Message);
+        }
+    }
+
+    public async Task ForwardMessagesToGroup(Guid groupId, CrossChatForwardRequest request)
+    {
+        try
+        {
+            var me = MeId;
+            if (request?.MessageIds is null || request.MessageIds.Count == 0)
+                throw new HubException("MessageIds are required.");
+            if (!await _groupChats.IsMemberAsync(groupId, me, Context.ConnectionAborted))
+                throw new HubException("Групповой чат не найден.");
+
+            var ids = request.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
+            var source = (request.Source ?? string.Empty).Trim().ToLowerInvariant();
+
+            if (source == "group")
+            {
+                var sourcesQuery = _db.GroupMessages.AsNoTracking()
+                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
+                    .Join(_db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == me), m => m.GroupChatId, gm => gm.GroupChatId, (m, gm) => m);
+
+                if (request.SourceChatId.HasValue && request.SourceChatId.Value != Guid.Empty)
+                    sourcesQuery = sourcesQuery.Where(m => m.GroupChatId == request.SourceChatId.Value);
+
+                var sources = await sourcesQuery.OrderBy(m => m.SentAt).ThenBy(m => m.Id).ToListAsync(Context.ConnectionAborted);
+                foreach (var sourceMessage in sources)
+                {
+                    var created = await _groupChats.ForwardMessageAsync(me, groupId, sourceMessage, request.IncludeAttachments, Context.ConnectionAborted);
+                    var dto = await _groupChats.GetMessageDtoAsync(groupId, created.message.Id, Context.ConnectionAborted);
+                    if (dto is not null)
+                        await EmitCreatedToGroup(groupId, dto, me, Context.ConnectionAborted);
+                }
+            }
+            else if (source == "direct")
+            {
+                var sources = await (
+                    from m in _db.DirectMessages.AsNoTracking()
+                    join d in _db.DirectDialogs.AsNoTracking() on m.DialogId equals d.Id
+                    where ids.Contains(m.Id) && m.DeletedAt == null && (d.User1Id == me || d.User2Id == me)
+                    orderby m.SentAt, m.Id
+                    select m
+                ).ToListAsync(Context.ConnectionAborted);
+
+                foreach (var sourceMessage in sources)
+                {
+                    var created = await _groupChats.ForwardMessageAsync(me, groupId, sourceMessage, request.IncludeAttachments, Context.ConnectionAborted);
+                    var dto = await _groupChats.GetMessageDtoAsync(groupId, created.message.Id, Context.ConnectionAborted);
+                    if (dto is not null)
+                        await EmitCreatedToGroup(groupId, dto, me, Context.ConnectionAborted);
+                }
+            }
+            else
+            {
+                throw new HubException("Source must be 'direct' or 'group'.");
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new HubException(ex.Message);
+        }
+    }
+
     private async Task EmitCreatedToGroup(Guid groupId, MessageDto dto, Guid senderId, CancellationToken ct)
     {
         var memberIds = await _db.GroupChatMembers.AsNoTracking().Where(m => m.GroupChatId == groupId).Select(m => m.UserId).ToListAsync(ct);

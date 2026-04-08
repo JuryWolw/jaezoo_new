@@ -16,6 +16,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GroupChatMember> GroupChatMembers => Set<GroupChatMember>();
     public DbSet<GroupMessage> GroupMessages => Set<GroupMessage>();
     public DbSet<GroupMessageAttachment> GroupMessageAttachments => Set<GroupMessageAttachment>();
+    public DbSet<GroupAvatar> GroupAvatars => Set<GroupAvatar>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -94,6 +95,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<GroupChat>()
             .HasIndex(g => new { g.OwnerId, g.CreatedAt });
 
+        b.Entity<GroupChat>()
+            .Property(g => g.AvatarUrl)
+            .HasMaxLength(512);
+
         b.Entity<GroupChatMember>()
             .HasIndex(m => new { m.GroupChatId, m.UserId })
             .IsUnique();
@@ -149,5 +154,14 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .WithMany()
             .HasForeignKey(a => a.FileId)
             .OnDelete(DeleteBehavior.Cascade);
+        b.Entity<GroupAvatar>()
+            .HasIndex(a => a.GroupChatId);
+
+        b.Entity<GroupAvatar>()
+            .HasOne<GroupChat>()
+            .WithMany()
+            .HasForeignKey(a => a.GroupChatId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 }
+
