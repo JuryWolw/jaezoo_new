@@ -133,8 +133,11 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         var chat = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct)
             ?? throw new InvalidOperationException("Group chat not found.");
 
-        if (chat.OwnerId != me)
-            throw new InvalidOperationException("Only the owner can add members.");
+        var isActorMember = await db.GroupChatMembers
+            .AsNoTracking()
+            .AnyAsync(m => m.GroupChatId == groupId && m.UserId == me, ct);
+        if (!isActorMember)
+            throw new InvalidOperationException("Only group members can add members.");
 
         var requested = (userIds ?? Array.Empty<Guid>())
             .Where(x => x != Guid.Empty)
@@ -166,7 +169,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
         var friendSet = acceptedFriendIds.ToHashSet();
         if (requested.Any(id => !friendSet.Contains(id)))
-            throw new InvalidOperationException("You can add only accepted friends.");
+            throw new InvalidOperationException("You can add only your accepted friends.");
 
         var existingUsers = await db.Users.AsNoTracking().Where(u => requested.Contains(u.Id)).Select(u => u.Id).ToListAsync(ct);
         if (existingUsers.Count != requested.Count)
