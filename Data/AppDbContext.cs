@@ -96,8 +96,16 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .HasIndex(g => new { g.OwnerId, g.CreatedAt });
 
         b.Entity<GroupChat>()
+            .Property(g => g.Description)
+            .HasMaxLength(1000);
+
+        b.Entity<GroupChat>()
             .Property(g => g.AvatarUrl)
             .HasMaxLength(512);
+
+        b.Entity<GroupChatMember>()
+            .Property(m => m.Role)
+            .HasConversion<int>();
 
         b.Entity<GroupChatMember>()
             .HasIndex(m => new { m.GroupChatId, m.UserId })

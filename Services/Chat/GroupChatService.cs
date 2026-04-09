@@ -11,6 +11,37 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
     public static string GetAvatarUrl(GroupChat chat) =>
         string.IsNullOrWhiteSpace(chat.AvatarUrl) ? $"/avatars/groups/{chat.Id}" : chat.AvatarUrl;
 
+    private static string? NormalizeDescription(string? description)
+    {
+        var normalized = string.IsNullOrWhiteSpace(description) ? null : description.Trim();
+        if (normalized is not null && normalized.Length > 1000)
+            throw new InvalidOperationException("Description is too long.");
+        return normalized;
+    }
+
+    private static GroupChatRole GetEffectiveRole(GroupChat chat, GroupChatMember member) =>
+        chat.OwnerId == member.UserId ? GroupChatRole.Admin : member.Role;
+
+    private static bool CanEditGroup(GroupChat chat, GroupChatMember member) =>
+        chat.OwnerId == member.UserId || member.Role == GroupChatRole.Admin;
+
+    private static bool CanManageRoles(GroupChat chat, GroupChatMember member) =>
+        chat.OwnerId == member.UserId || member.Role == GroupChatRole.Admin;
+
+    private static bool CanRemoveMember(GroupChat chat, GroupChatMember actor, GroupChatMember target)
+    {
+        if (target.UserId == chat.OwnerId)
+            return false;
+
+        if (chat.OwnerId == actor.UserId || actor.Role == GroupChatRole.Admin)
+            return true;
+
+        if (actor.Role == GroupChatRole.Moderator)
+            return target.Role is GroupChatRole.Member or GroupChatRole.Helper;
+
+        return false;
+    }
+
     public async Task<bool> IsMemberAsync(Guid groupId, Guid userId, CancellationToken ct = default) =>
         await db.GroupChatMembers.AsNoTracking().AnyAsync(m => m.GroupChatId == groupId && m.UserId == userId, ct);
 
@@ -23,13 +54,14 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct);
     }
 
-    public async Task<GroupChat> CreateChatAsync(Guid ownerId, string? title, IReadOnlyCollection<Guid>? memberIds, CancellationToken ct = default)
+    public async Task<GroupChat> CreateChatAsync(Guid ownerId, string? title, string? description, IReadOnlyCollection<Guid>? memberIds, CancellationToken ct = default)
     {
         var normalizedTitle = (title ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(normalizedTitle))
             throw new InvalidOperationException("Title is required.");
         if (normalizedTitle.Length > 120)
             throw new InvalidOperationException("Title is too long.");
+        var normalizedDescription = NormalizeDescription(description);
 
         var requested = (memberIds ?? Array.Empty<Guid>())
             .Where(x => x != Guid.Empty && x != ownerId)
@@ -66,6 +98,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         var chat = new GroupChat
         {
             Title = normalizedTitle,
+            Description = normalizedDescription,
             OwnerId = ownerId,
             MemberLimit = MaxGroupMembers,
             CreatedAt = now,
@@ -77,6 +110,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         {
             GroupChatId = chat.Id,
             UserId = ownerId,
+            Role = GroupChatRole.Admin,
             JoinedAt = now
         });
 
@@ -94,13 +128,16 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return chat;
     }
 
-    public async Task<GroupChat> UpdateTitleAsync(Guid groupId, Guid me, string? title, CancellationToken ct = default)
+    public async Task<GroupChat> UpdateChatAsync(Guid groupId, Guid me, string? title, string? description, CancellationToken ct = default)
     {
         var chat = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct)
             ?? throw new InvalidOperationException("Group chat not found.");
 
-        if (chat.OwnerId != me)
-            throw new InvalidOperationException("Only the owner can rename the group.");
+        var actor = await db.GroupChatMembers.FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == me, ct)
+            ?? throw new InvalidOperationException("Group membership not found.");
+
+        if (!CanEditGroup(chat, actor))
+            throw new InvalidOperationException("Only the owner or admin can edit the group.");
 
         var normalizedTitle = (title ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(normalizedTitle))
@@ -109,6 +146,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             throw new InvalidOperationException("Title is too long.");
 
         chat.Title = normalizedTitle;
+        chat.Description = NormalizeDescription(description);
         chat.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         return chat;
@@ -119,8 +157,11 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         var chat = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct)
             ?? throw new InvalidOperationException("Group chat not found.");
 
-        if (chat.OwnerId != me)
-            throw new InvalidOperationException("Only the owner can change the group avatar.");
+        var actor = await db.GroupChatMembers.FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == me, ct)
+            ?? throw new InvalidOperationException("Group membership not found.");
+
+        if (!CanEditGroup(chat, actor))
+            throw new InvalidOperationException("Only the owner or admin can change the group avatar.");
 
         chat.AvatarUrl = string.IsNullOrWhiteSpace(avatarUrl) ? null : avatarUrl.Trim();
         chat.UpdatedAt = DateTime.UtcNow;
@@ -133,11 +174,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         var chat = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct)
             ?? throw new InvalidOperationException("Group chat not found.");
 
-        var isActorMember = await db.GroupChatMembers
-            .AsNoTracking()
-            .AnyAsync(m => m.GroupChatId == groupId && m.UserId == me, ct);
-        if (!isActorMember)
-            throw new InvalidOperationException("Only group members can add members.");
+        var actor = await db.GroupChatMembers
+            .FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == me, ct)
+            ?? throw new InvalidOperationException("Only group members can add members.");
 
         var requested = (userIds ?? Array.Empty<Guid>())
             .Where(x => x != Guid.Empty)
@@ -202,16 +241,44 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         var chat = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct)
             ?? throw new InvalidOperationException("Group chat not found.");
 
-        if (chat.OwnerId != me)
-            throw new InvalidOperationException("Only the owner can remove members.");
-        if (userId == chat.OwnerId)
-            throw new InvalidOperationException("Owner cannot be removed from the group.");
-
+        var actor = await db.GroupChatMembers.FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == me, ct)
+            ?? throw new InvalidOperationException("Group membership not found.");
         var member = await db.GroupChatMembers.FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == userId, ct);
         if (member is null)
             throw new InvalidOperationException("Member was not found.");
 
+        if (!CanRemoveMember(chat, actor, member))
+            throw new InvalidOperationException("You do not have access to remove this member.");
+
         db.GroupChatMembers.Remove(member);
+        chat.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        return await db.GroupChatMembers
+            .AsNoTracking()
+            .Where(m => m.GroupChatId == groupId)
+            .OrderBy(m => m.JoinedAt)
+            .ThenBy(m => m.Id)
+            .ToListAsync(ct);
+    }
+
+
+    public async Task<IReadOnlyList<GroupChatMember>> UpdateMemberRoleAsync(Guid groupId, Guid me, Guid userId, GroupChatRole role, CancellationToken ct = default)
+    {
+        var chat = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct)
+            ?? throw new InvalidOperationException("Group chat not found.");
+
+        var actor = await db.GroupChatMembers.FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == me, ct)
+            ?? throw new InvalidOperationException("Group membership not found.");
+        if (!CanManageRoles(chat, actor))
+            throw new InvalidOperationException("Only the owner or admin can manage roles.");
+        if (userId == chat.OwnerId)
+            throw new InvalidOperationException("Owner role cannot be changed.");
+
+        var target = await db.GroupChatMembers.FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == userId, ct)
+            ?? throw new InvalidOperationException("Member was not found.");
+
+        target.Role = role;
         chat.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
 
@@ -279,7 +346,11 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
                 u.Email,
                 u.AvatarUrl,
                 m.JoinedAt,
-                g.OwnerId == u.Id
+                g.OwnerId == u.Id,
+                g.OwnerId == u.Id ? GroupChatRole.Admin : m.Role,
+                GroupChatRoleInfo.GetDisplayName(g.OwnerId == u.Id ? GroupChatRole.Admin : m.Role),
+                GroupChatRoleInfo.GetColorHex(g.OwnerId == u.Id ? GroupChatRole.Admin : m.Role),
+                GroupChatRoleInfo.GetColorName(g.OwnerId == u.Id ? GroupChatRole.Admin : m.Role)
             )
         ).ToListAsync(ct);
     }
@@ -293,6 +364,11 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         if (chat is null)
             return null;
 
+        var member = await db.GroupChatMembers.AsNoTracking().FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == me, ct);
+        if (member is null)
+            return null;
+
+        var myRole = GetEffectiveRole(chat, member);
         var memberCount = await db.GroupChatMembers.AsNoTracking().CountAsync(m => m.GroupChatId == groupId, ct);
         var lastMessage = await db.GroupMessages
             .AsNoTracking()
@@ -309,6 +385,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return new GroupChatSummaryDto(
             chat.Id,
             chat.Title,
+            chat.Description,
             GetAvatarUrl(chat),
             chat.OwnerId,
             memberCount,
@@ -317,6 +394,13 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             chat.UpdatedAt,
             lastMessage?.SentAt,
             lastMessageDto,
+            myRole,
+            GroupChatRoleInfo.GetDisplayName(myRole),
+            GroupChatRoleInfo.GetColorHex(myRole),
+            GroupChatRoleInfo.GetColorName(myRole),
+            CanEditGroup(chat, member),
+            true,
+            CanManageRoles(chat, member),
             unread.count,
             unread.firstId,
             unread.firstAt);

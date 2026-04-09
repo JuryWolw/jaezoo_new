@@ -8,6 +8,8 @@ public class GroupChatMember
 
     public Guid UserId { get; set; }
 
+    public GroupChatRole Role { get; set; } = GroupChatRole.Member;
+
     public DateTime JoinedAt { get; set; } = DateTime.UtcNow;
 
     public DateTime LastReadAt { get; set; } = DateTime.MinValue;

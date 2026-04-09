@@ -77,9 +77,10 @@ public record FileUploadResponse(
 );
 
 
-public record CreateGroupChatRequest(string Title, IReadOnlyList<Guid>? MemberIds = null);
-public record UpdateGroupChatRequest(string Title);
+public record CreateGroupChatRequest(string Title, string? Description = null, IReadOnlyList<Guid>? MemberIds = null);
+public record UpdateGroupChatRequest(string Title, string? Description = null);
 public record UpdateGroupMembersRequest(IReadOnlyList<Guid> UserIds);
+public record UpdateGroupMemberRoleRequest(string Role);
 
 public record GroupChatMemberDto(
     Guid UserId,
@@ -87,12 +88,17 @@ public record GroupChatMemberDto(
     string Email,
     string? AvatarUrl,
     DateTime JoinedAt,
-    bool IsOwner
+    bool IsOwner,
+    GroupChatRole Role,
+    string RoleName,
+    string RoleColorHex,
+    string RoleColorName
 );
 
 public record GroupChatSummaryDto(
     Guid Id,
     string Title,
+    string? Description,
     string? AvatarUrl,
     Guid OwnerId,
     int MemberCount,
@@ -101,6 +107,13 @@ public record GroupChatSummaryDto(
     DateTime UpdatedAt,
     DateTime? LastMessageAt,
     MessageDto? LastMessage,
+    GroupChatRole MyRole,
+    string MyRoleName,
+    string MyRoleColorHex,
+    string MyRoleColorName,
+    bool CanEditGroup,
+    bool CanManageMembers,
+    bool CanManageRoles,
     int UnreadCount = 0,
     Guid? FirstUnreadId = null,
     DateTime? FirstUnreadAt = null

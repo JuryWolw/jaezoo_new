@@ -11,6 +11,9 @@ public class GroupChat
     [MaxLength(120)]
     public string Title { get; set; } = string.Empty;
 
+    [MaxLength(1000)]
+    public string? Description { get; set; }
+
     public Guid OwnerId { get; set; }
 
     public int MemberLimit { get; set; } = DefaultMemberLimit;

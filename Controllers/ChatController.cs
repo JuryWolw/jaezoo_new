@@ -505,7 +505,7 @@ public class ChatController(
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
 
-            var group = await groupChats.CreateChatAsync(MeId, body.Title, body.MemberIds, ct);
+            var group = await groupChats.CreateChatAsync(MeId, body.Title, body.Description, body.MemberIds, ct);
             var details = await BuildGroupDetailsAsync(group.Id, ct);
             if (details is null) return Problem("Failed to build group chat dto.", statusCode: 500);
 
@@ -543,7 +543,7 @@ public class ChatController(
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
 
-            await groupChats.UpdateTitleAsync(groupId, MeId, body.Title, ct);
+            await groupChats.UpdateChatAsync(groupId, MeId, body.Title, body.Description, ct);
             var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
             if (summary is null) return NotFound(new { error = "Group chat not found." });
 
@@ -552,7 +552,7 @@ public class ChatController(
         }
         catch (Exception ex)
         {
-            log.LogError(ex, "UpdateGroupTitle failed: me={MeId}, group={GroupId}", MeId, groupId);
+            log.LogError(ex, "UpdateGroupMeta failed: me={MeId}, group={GroupId}", MeId, groupId);
             return BadRequest(new { error = ex.Message });
         }
     }
@@ -600,6 +600,31 @@ public class ChatController(
         catch (Exception ex)
         {
             log.LogError(ex, "RemoveGroupMember failed: me={MeId}, group={GroupId}, user={UserId}", MeId, groupId, userId);
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpPost("groups/{groupId:guid}/members/{userId:guid}/role")]
+    public async Task<ActionResult<IReadOnlyList<GroupChatMemberDto>>> UpdateGroupMemberRole(Guid groupId, Guid userId, [FromBody] UpdateGroupMemberRoleRequest body, CancellationToken ct)
+    {
+        try
+        {
+            if (body is null || !GroupChatRoleInfo.TryParse(body.Role, out var role))
+                return BadRequest(new { error = "Valid role is required." });
+
+            await groupChats.UpdateMemberRoleAsync(groupId, MeId, userId, role, ct);
+            var members = await groupChats.GetMemberDtosAsync(groupId, ct);
+            await BroadcastGroupMembersChanged(groupId, ct);
+
+            var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
+            if (summary is not null)
+                await BroadcastGroupUpdated(summary, ct);
+
+            return Ok(members);
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "UpdateGroupMemberRole failed: me={MeId}, group={GroupId}, user={UserId}", MeId, groupId, userId);
             return BadRequest(new { error = ex.Message });
         }
     }
@@ -656,7 +681,10 @@ public class ChatController(
         {
             var group = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct);
             if (group is null) return NotFound(new { error = "Group chat not found." });
-            if (group.OwnerId != MeId) return Forbid();
+
+            var actor = await db.GroupChatMembers.AsNoTracking().FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == MeId, ct);
+            if (actor is null) return Forbid();
+            if (group.OwnerId != MeId && actor.Role != GroupChatRole.Admin) return Forbid();
 
             if (file == null || file.Length == 0)
                 return BadRequest(new { error = "Файл не найден." });
