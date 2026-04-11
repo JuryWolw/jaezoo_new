@@ -47,12 +47,34 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
         _s3 = new AmazonS3Client(creds, cfg);
     }
 
-    public async Task<LauncherManifest> GetManifestAsync(string? channel, CancellationToken cancellationToken = default)
+    public Task<LauncherManifest> GetManifestAsync(string? channel, CancellationToken cancellationToken = default)
+        => GetClientManifestAsync(channel, cancellationToken);
+
+    public Task<string> GetSignedFileUrlAsync(string filePath, string? channel, CancellationToken cancellationToken = default)
+        => GetSignedClientFileUrlAsync(filePath, channel, cancellationToken);
+
+    public Task<LauncherManifest> GetClientManifestAsync(string? channel, CancellationToken cancellationToken = default)
+        => GetManifestCoreAsync(UpdateTarget.Client, channel, cancellationToken);
+
+    public Task<LauncherManifest> GetLauncherManifestAsync(string? channel, CancellationToken cancellationToken = default)
+        => GetManifestCoreAsync(UpdateTarget.Launcher, channel, cancellationToken);
+
+    public Task<string> GetSignedClientFileUrlAsync(string filePath, string? channel, CancellationToken cancellationToken = default)
+        => GetSignedFileUrlCoreAsync(UpdateTarget.Client, filePath, channel, cancellationToken);
+
+    public Task<string> GetSignedLauncherFileUrlAsync(string filePath, string? channel, CancellationToken cancellationToken = default)
+        => GetSignedFileUrlCoreAsync(UpdateTarget.Launcher, filePath, channel, cancellationToken);
+
+    private async Task<LauncherManifest> GetManifestCoreAsync(UpdateTarget target, string? channel, CancellationToken cancellationToken)
     {
         var normalizedChannel = NormalizeChannel(channel);
-        var manifestKey = BuildManifestKey(normalizedChannel);
+        var manifestKey = BuildManifestKey(target, normalizedChannel);
 
-        _logger.LogInformation("Loading launcher manifest from bucket {Bucket}, key {Key}", _options.Bucket, manifestKey);
+        _logger.LogInformation(
+            "Loading update manifest from bucket {Bucket}, target {Target}, key {Key}",
+            _options.Bucket,
+            target,
+            manifestKey);
 
         using var response = await _s3.GetObjectAsync(new GetObjectRequest
         {
@@ -64,21 +86,23 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
         var manifest = await JsonSerializer.DeserializeAsync<LauncherManifest>(stream, JsonOptions, cancellationToken);
 
         if (manifest is null)
-            throw new InvalidOperationException("Launcher manifest is empty or invalid.");
+            throw new InvalidOperationException($"{target} manifest is empty or invalid.");
 
         manifest.Channel = normalizedChannel;
         return manifest;
     }
 
-    public Task<string> GetSignedFileUrlAsync(string filePath, string? channel, CancellationToken cancellationToken = default)
+    private Task<string> GetSignedFileUrlCoreAsync(UpdateTarget target, string filePath, string? channel, CancellationToken cancellationToken)
     {
+        _ = cancellationToken;
+
         var normalizedChannel = NormalizeChannel(channel);
         var normalizedPath = NormalizeFilePath(filePath);
 
         if (string.IsNullOrWhiteSpace(normalizedPath))
             throw new ArgumentException("File path is required.", nameof(filePath));
 
-        var key = $"{normalizedChannel}/files/{normalizedPath}".Replace("\\", "/");
+        var key = BuildFilesPrefix(target, normalizedChannel) + normalizedPath;
 
         var request = new GetPreSignedUrlRequest
         {
@@ -100,19 +124,33 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
             : channel.Trim().ToLowerInvariant();
     }
 
-    private string BuildManifestKey(string channel)
+    private string BuildManifestKey(UpdateTarget target, string channel)
     {
-        if (!string.IsNullOrWhiteSpace(_options.ManifestKey) &&
-            _options.ManifestKey.StartsWith($"{channel}/", StringComparison.OrdinalIgnoreCase))
-        {
-            return _options.ManifestKey.Replace("\\", "/");
-        }
+        var explicitKey = target == UpdateTarget.Client
+            ? _options.ClientManifestKey
+            : _options.LauncherManifestKey;
 
-        return $"{channel}/manifest.json";
+        if (!string.IsNullOrWhiteSpace(explicitKey))
+            return explicitKey.Replace("\\", "/");
+
+        var area = target == UpdateTarget.Client ? "client" : "launcher";
+        return $"{channel}/{area}/manifest.json";
+    }
+
+    private static string BuildFilesPrefix(UpdateTarget target, string channel)
+    {
+        var area = target == UpdateTarget.Client ? "client" : "launcher";
+        return $"{channel}/{area}/files/";
     }
 
     private static string NormalizeFilePath(string filePath)
     {
         return filePath.Replace("\\", "/").Trim().TrimStart('/');
+    }
+
+    private enum UpdateTarget
+    {
+        Client,
+        Launcher
     }
 }

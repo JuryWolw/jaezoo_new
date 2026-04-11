@@ -9,6 +9,10 @@ public sealed class LauncherUpdatesOptions
     public string SecretKey { get; set; } = string.Empty;
 
     public string Channel { get; set; } = "stable";
-    public string ManifestKey { get; set; } = "stable/manifest.json";
     public int SignedUrlTtlMinutes { get; set; } = 15;
+
+    // Optional overrides. Leave empty to use the default layout:
+    // {channel}/client/manifest.json and {channel}/launcher/manifest.json
+    public string? ClientManifestKey { get; set; }
+    public string? LauncherManifestKey { get; set; }
 }
