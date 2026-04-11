@@ -1,4 +1,4 @@
-using JaeZoo.Server.Data;
+﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Middleware;
@@ -15,6 +15,8 @@ using Amazon.S3;
 using JaeZoo.Server.Services.Storage;
 using JaeZoo.Server.Services.Calls;
 using JaeZoo.Server.Services.Chat;
+using JaeZoo.Server.Options;
+using JaeZoo.Server.Services.Launcher;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -73,6 +75,11 @@ builder.Services.AddAuthorization();
 builder.Services.AddScoped<TokenService>();
 builder.Services.AddScoped<DirectChatService>();
 builder.Services.AddScoped<GroupChatService>();
+
+// ---------- Launcher updates ----------
+builder.Services.Configure<LauncherUpdatesOptions>(
+    builder.Configuration.GetSection("LauncherUpdates"));
+builder.Services.AddSingleton<ILauncherUpdateService, LauncherUpdateService>();
 
 // ---------- MVC + SignalR ----------
 builder.Services.AddControllers()
