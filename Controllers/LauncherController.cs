@@ -34,6 +34,13 @@ public sealed class LauncherController : ControllerBase
         return Ok(await BuildManifestResponseAsync(manifest, isLauncher: true, cancellationToken));
     }
 
+    [HttpGet("package/self")]
+    public async Task<IActionResult> GetSelfPackage([FromQuery] string? channel, CancellationToken cancellationToken)
+    {
+        var url = await _launcherUpdateService.GetSignedLauncherPackageUrlAsync(channel, cancellationToken);
+        return Ok(new { url });
+    }
+
     private async Task<object> BuildManifestResponseAsync(
         LauncherManifest manifest,
         bool isLauncher,

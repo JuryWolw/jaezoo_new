@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Amazon.Runtime;
 using Amazon.S3;
@@ -64,6 +66,35 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
 
     public Task<string> GetSignedLauncherFileUrlAsync(string filePath, string? channel, CancellationToken cancellationToken = default)
         => GetSignedFileUrlCoreAsync(UpdateTarget.Launcher, filePath, channel, cancellationToken);
+
+    public Task<string> GetSignedLauncherPackageUrlAsync(string? channel, CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+
+        if (string.IsNullOrWhiteSpace(_options.CdnBaseUrl))
+            throw new InvalidOperationException("LauncherUpdates:CdnBaseUrl is missing.");
+
+        if (string.IsNullOrWhiteSpace(_options.CdnSecureKey))
+            throw new InvalidOperationException("LauncherUpdates:CdnSecureKey is missing.");
+
+        var normalizedChannel = NormalizeChannel(channel);
+        var packagePath = "/" + BuildPackageKey(normalizedChannel).TrimStart('/');
+        var baseUrl = _options.CdnBaseUrl.TrimEnd('/');
+        var expires = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + Math.Max(30, _options.PackageUrlTtlSeconds);
+
+        // Yandex Cloud CDN secure token format without IP restriction:
+        // md5 = base64url(md5("{expires}{path} {secret}"))
+        var payload = $"{expires}{packagePath} {_options.CdnSecureKey}";
+        using var md5 = MD5.Create();
+        var digest = md5.ComputeHash(Encoding.UTF8.GetBytes(payload));
+        var token = Convert.ToBase64String(digest)
+            .Replace('+', '-')
+            .Replace('/', '_')
+            .TrimEnd('=');
+
+        var signedUrl = $"{baseUrl}{packagePath}?md5={Uri.EscapeDataString(token)}&expires={expires}";
+        return Task.FromResult(signedUrl);
+    }
 
     private async Task<LauncherManifest> GetManifestCoreAsync(UpdateTarget target, string? channel, CancellationToken cancellationToken)
     {
@@ -135,6 +166,14 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
 
         var area = target == UpdateTarget.Client ? "client" : "launcher";
         return $"{channel}/{area}/manifest.json";
+    }
+
+    private string BuildPackageKey(string channel)
+    {
+        if (!string.IsNullOrWhiteSpace(_options.PackageKey))
+            return _options.PackageKey!.Replace("\\", "/");
+
+        return $"{channel}/launcher/package.zip";
     }
 
     private static string BuildFilesPrefix(UpdateTarget target, string channel)

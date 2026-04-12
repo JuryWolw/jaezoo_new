@@ -15,4 +15,10 @@ public sealed class LauncherUpdatesOptions
     // {channel}/client/manifest.json and {channel}/launcher/manifest.json
     public string? ClientManifestKey { get; set; }
     public string? LauncherManifestKey { get; set; }
+
+    // CDN package delivery for setup/bootstrap.
+    public string CdnBaseUrl { get; set; } = string.Empty;
+    public string CdnSecureKey { get; set; } = string.Empty;
+    public string? PackageKey { get; set; }
+    public int PackageUrlTtlSeconds { get; set; } = 300;
 }
