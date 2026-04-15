@@ -64,8 +64,11 @@ builder.Services
             {
                 var accessToken = context.Request.Query["access_token"];
                 var path = context.HttpContext.Request.Path;
-                if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs/chat"))
+                if (!string.IsNullOrEmpty(accessToken) &&
+                    (path.StartsWithSegments("/hubs/chat") || path.StartsWithSegments("/hubs/calls")))
+                {
                     context.Token = accessToken;
+                }
                 return Task.CompletedTask;
             }
         };
@@ -101,9 +104,12 @@ else
 
 builder.Services.AddSingleton<IPresenceTracker, PresenceTracker>();
 builder.Services.Configure<TurnOptions>(builder.Configuration.GetSection("Turn"));
+builder.Services.Configure<CallLifecycleOptions>(builder.Configuration.GetSection("Calls:Lifecycle"));
 builder.Services.AddSingleton<TurnCredentialsService>();
 builder.Services.AddSingleton<CallSessionService>();
 builder.Services.AddSingleton<CallAuditService>();
+builder.Services.AddScoped<CallHistoryService>();
+builder.Services.AddHostedService<CallSessionMonitorService>();
 
 // ---------- Производительность ----------
 builder.Services.AddResponseCompression();

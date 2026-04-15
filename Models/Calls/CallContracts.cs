@@ -136,10 +136,14 @@ public sealed class CallSession
     public DateTime? LastOfferAtUtc { get; set; }
     public DateTime? LastAnswerAtUtc { get; set; }
     public DateTime? LastIceCandidateAtUtc { get; set; }
+    public DateTime? LastActivityAtUtc { get; set; }
+    public DateTime? LastCallerActivityAtUtc { get; set; }
+    public DateTime? LastCalleeActivityAtUtc { get; set; }
     public string? EndReason { get; set; }
     public string CorrelationId { get; init; } = Guid.NewGuid().ToString("N");
     public string? CallerClientVersion { get; set; }
     public string? CallerDeviceInfo { get; set; }
     public string? CalleeClientVersion { get; set; }
     public string? CalleeDeviceInfo { get; set; }
+    public DateTime? HistoryPersistedAtUtc { get; set; }
 }

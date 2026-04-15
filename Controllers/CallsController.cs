@@ -20,6 +20,7 @@ public sealed class CallsController : ControllerBase
     private readonly CallSessionService _sessions;
     private readonly TurnCredentialsService _turn;
     private readonly CallAuditService _audit;
+    private readonly CallHistoryService _history;
     private readonly IHubContext<CallsHub> _callsHub;
 
     public CallsController(
@@ -27,12 +28,14 @@ public sealed class CallsController : ControllerBase
         CallSessionService sessions,
         TurnCredentialsService turn,
         CallAuditService audit,
+        CallHistoryService history,
         IHubContext<CallsHub> callsHub)
     {
         _db = db;
         _sessions = sessions;
         _turn = turn;
         _audit = audit;
+        _history = history;
         _callsHub = callsHub;
     }
 
@@ -85,12 +88,28 @@ public sealed class CallsController : ControllerBase
         if (!areFriends)
             return Forbid();
 
-        if (_sessions.HasActiveCall(me) || _sessions.HasActiveCall(request.PeerUserId))
+        var caller = await _db.Users.AsNoTracking().FirstAsync(u => u.Id == me, ct);
+
+        Guid resolvedDialogId;
+        try
+        {
+            resolvedDialogId = await _history.ResolveDirectDialogIdAsync(me, request.PeerUserId, request.DialogId, ct);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+
+        if (!_sessions.TryCreateIfUsersAvailable(me, request.PeerUserId, resolvedDialogId, request.Type, request.ClientVersion, request.DeviceInfo, out var session) || session is null)
             return Conflict(new { message = "Caller or callee already has an active call." });
 
-        var caller = await _db.Users.AsNoTracking().FirstAsync(u => u.Id == me, ct);
-        var session = _sessions.Create(me, request.PeerUserId, request.DialogId, request.Type, request.ClientVersion, request.DeviceInfo);
-        session.State = CallState.Ringing;
+        _sessions.Update(session.CallId, s =>
+        {
+            s.State = CallState.Ringing;
+            s.LastActivityAtUtc = DateTime.UtcNow;
+            s.LastCallerActivityAtUtc = DateTime.UtcNow;
+            s.LastCalleeActivityAtUtc = DateTime.UtcNow;
+        });
 
         var invite = new CallInviteDto(
             session.CallId,
