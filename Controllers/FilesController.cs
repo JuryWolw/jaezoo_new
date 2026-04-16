@@ -69,7 +69,7 @@ public class FilesController(
             : Path.Combine(env.ContentRootPath, StoragePath);
     }
 
-    private string BuildFileUrl(ChatFile file) => storage.GetPublicUrl(file.StoredPath);
+    private string BuildFileUrl(ChatFile file) => $"/api/files/{file.Id}/raw";
 
     private async Task<bool> CanAccessFileAsync(Guid me, Guid fileId, CancellationToken ct)
     {
@@ -79,11 +79,22 @@ public class FilesController(
         if (!f.IsAttached)
             return f.UploaderId == me;
 
-        return await (
+        var canAccessDirect = await (
             from a in db.DirectMessageAttachments.AsNoTracking()
             join m in db.DirectMessages.AsNoTracking() on a.MessageId equals m.Id
             join d in db.DirectDialogs.AsNoTracking() on m.DialogId equals d.Id
             where a.FileId == fileId && (d.User1Id == me || d.User2Id == me)
+            select a.Id
+        ).AnyAsync(ct);
+
+        if (canAccessDirect)
+            return true;
+
+        return await (
+            from a in db.GroupMessageAttachments.AsNoTracking()
+            join m in db.GroupMessages.AsNoTracking() on a.MessageId equals m.Id
+            join gm in db.GroupChatMembers.AsNoTracking() on m.GroupChatId equals gm.GroupChatId
+            where a.FileId == fileId && gm.UserId == me
             select a.Id
         ).AnyAsync(ct);
     }
