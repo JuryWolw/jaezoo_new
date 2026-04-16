@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using JaeZoo.Server.Models.Calls;
 
 namespace JaeZoo.Server.Services.Calls;
@@ -89,31 +90,6 @@ public sealed class CallSessionService
 
     public bool TryRemove(Guid callId, out CallSession? session) => _sessions.TryRemove(callId, out session);
 
-    public object Describe(CallSession session) => new
-    {
-        session.CallId,
-        session.CallerUserId,
-        session.CalleeUserId,
-        session.DialogId,
-        session.State,
-        session.CreatedAtUtc,
-        session.AcceptedAtUtc,
-        session.ConnectedAtUtc,
-        session.EndedAtUtc,
-        session.LastActivityAtUtc,
-        session.LastOfferAtUtc,
-        session.LastAnswerAtUtc,
-        session.LastIceCandidateAtUtc,
-        session.LastCallerActivityAtUtc,
-        session.LastCalleeActivityAtUtc,
-        session.EndReason,
-        session.CorrelationId
-    };
-
-    public object Describe(Guid callId) => _sessions.TryGetValue(callId, out var session) && session is not null
-        ? Describe(session)
-        : new { CallId = callId, Missing = true };
-
     public void MarkUserConnected(Guid userId, string connectionId)
     {
         var bucket = _userConnections.GetOrAdd(userId, _ => new ConcurrentDictionary<string, byte>(StringComparer.Ordinal));
@@ -151,6 +127,46 @@ public sealed class CallSessionService
 
     public bool IsUserOnline(Guid userId) =>
         _userConnections.TryGetValue(userId, out var bucket) && !bucket.IsEmpty;
+
+    public string BuildDebugSnapshot(Guid? focusUserId = null)
+    {
+        var sb = new StringBuilder();
+        sb.Append("sessions=");
+        var sessions = _sessions.Values.OrderBy(x => x.CreatedAtUtc).ToArray();
+        if (sessions.Length == 0)
+        {
+            sb.Append("<empty>");
+        }
+        else
+        {
+            for (var i = 0; i < sessions.Length; i++)
+            {
+                if (i > 0) sb.Append(" || ");
+                sb.Append(DescribeSession(sessions[i]));
+            }
+        }
+
+        if (focusUserId.HasValue)
+        {
+            sb.Append(" | focusUser=").Append(focusUserId.Value);
+            sb.Append(" | activeForFocus=");
+            var active = GetActiveForUser(focusUserId.Value).Select(x => x.CallId).ToArray();
+            sb.Append(active.Length == 0 ? "<none>" : string.Join(',', active));
+            sb.Append(" | online=").Append(IsUserOnline(focusUserId.Value));
+            sb.Append(" | lastSeenUtc=").Append(GetUserLastSeenUtc(focusUserId.Value)?.ToString("O") ?? "null");
+            sb.Append(" | connections=");
+            if (_userConnections.TryGetValue(focusUserId.Value, out var bucket) && !bucket.IsEmpty)
+                sb.Append(string.Join(',', bucket.Keys.OrderBy(x => x)));
+            else
+                sb.Append("<none>");
+        }
+
+        return sb.ToString();
+    }
+
+    public static string DescribeSession(CallSession session)
+        => $"callId={session.CallId};state={session.State};caller={session.CallerUserId};callee={session.CalleeUserId};dialogId={session.DialogId};corr={session.CorrelationId};created={session.CreatedAtUtc:O};accepted={session.AcceptedAtUtc:O};connected={session.ConnectedAtUtc:O};ended={session.EndedAtUtc:O};lastActivity={session.LastActivityAtUtc:O};lastCaller={session.LastCallerActivityAtUtc:O};lastCallee={session.LastCalleeActivityAtUtc:O};lastOffer={session.LastOfferAtUtc:O};lastAnswer={session.LastAnswerAtUtc:O};lastIce={session.LastIceCandidateAtUtc:O};endReason={session.EndReason}";
+
 
     public DateTime? GetUserLastSeenUtc(Guid userId) =>
         _userLastSeenUtc.TryGetValue(userId, out var lastSeenUtc) ? lastSeenUtc : null;
