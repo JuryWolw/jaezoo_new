@@ -67,7 +67,13 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
     public Task<string> GetSignedLauncherFileUrlAsync(string filePath, string? channel, CancellationToken cancellationToken = default)
         => GetSignedFileUrlCoreAsync(UpdateTarget.Launcher, filePath, channel, cancellationToken);
 
+    public Task<string> GetSignedClientPackageUrlAsync(string? channel, CancellationToken cancellationToken = default)
+        => GetSignedPackageUrlCoreAsync(UpdateTarget.Client, channel, cancellationToken);
+
     public Task<string> GetSignedLauncherPackageUrlAsync(string? channel, CancellationToken cancellationToken = default)
+        => GetSignedPackageUrlCoreAsync(UpdateTarget.Launcher, channel, cancellationToken);
+
+    private Task<string> GetSignedPackageUrlCoreAsync(UpdateTarget target, string? channel, CancellationToken cancellationToken)
     {
         _ = cancellationToken;
 
@@ -78,7 +84,7 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
             throw new InvalidOperationException("LauncherUpdates:CdnSecureKey is missing.");
 
         var normalizedChannel = NormalizeChannel(channel);
-        var packagePath = "/" + BuildPackageKey(normalizedChannel).TrimStart('/');
+        var packagePath = "/" + BuildPackageKey(target, normalizedChannel).TrimStart('/');
         var baseUrl = _options.CdnBaseUrl.TrimEnd('/');
         var expires = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + Math.Max(30, _options.PackageUrlTtlSeconds);
 
@@ -168,12 +174,13 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
         return $"{channel}/{area}/manifest.json";
     }
 
-    private string BuildPackageKey(string channel)
+    private string BuildPackageKey(UpdateTarget target, string channel)
     {
-        if (!string.IsNullOrWhiteSpace(_options.PackageKey))
+        if (target == UpdateTarget.Launcher && !string.IsNullOrWhiteSpace(_options.PackageKey))
             return _options.PackageKey!.Replace("\\", "/");
 
-        return $"{channel}/launcher/package.zip";
+        var area = target == UpdateTarget.Client ? "client" : "launcher";
+        return $"{channel}/{area}/package.zip";
     }
 
     private static string BuildFilesPrefix(UpdateTarget target, string channel)
