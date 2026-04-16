@@ -89,6 +89,31 @@ public sealed class CallSessionService
 
     public bool TryRemove(Guid callId, out CallSession? session) => _sessions.TryRemove(callId, out session);
 
+    public object Describe(CallSession session) => new
+    {
+        session.CallId,
+        session.CallerUserId,
+        session.CalleeUserId,
+        session.DialogId,
+        session.State,
+        session.CreatedAtUtc,
+        session.AcceptedAtUtc,
+        session.ConnectedAtUtc,
+        session.EndedAtUtc,
+        session.LastActivityAtUtc,
+        session.LastOfferAtUtc,
+        session.LastAnswerAtUtc,
+        session.LastIceCandidateAtUtc,
+        session.LastCallerActivityAtUtc,
+        session.LastCalleeActivityAtUtc,
+        session.EndReason,
+        session.CorrelationId
+    };
+
+    public object Describe(Guid callId) => _sessions.TryGetValue(callId, out var session) && session is not null
+        ? Describe(session)
+        : new { CallId = callId, Missing = true };
+
     public void MarkUserConnected(Guid userId, string connectionId)
     {
         var bucket = _userConnections.GetOrAdd(userId, _ => new ConcurrentDictionary<string, byte>(StringComparer.Ordinal));
