@@ -9,6 +9,8 @@ namespace JaeZoo.Server.Hubs;
 [Authorize]
 public sealed class CallsHub : Hub
 {
+    private const string VersionMarker = "CALLS_ALIGN_V4_20260416";
+
     private readonly CallSessionService _sessions;
     private readonly CallAuditService _audit;
     private readonly TurnCredentialsService _turn;
@@ -38,7 +40,7 @@ public sealed class CallsHub : Hub
                       ?? Context.User?.FindFirst("uid")?.Value;
 
             if (!Guid.TryParse(raw, out var id))
-                throw new HubException("No user id claim.");
+                throw new HubException($"{VersionMarker}|No user id claim.");
 
             return id;
         }
@@ -47,14 +49,14 @@ public sealed class CallsHub : Hub
     public override Task OnConnectedAsync()
     {
         _sessions.MarkUserConnected(MeId, Context.ConnectionId);
-        _logger.LogInformation("CallsHub connected. UserId={UserId} ConnectionId={ConnectionId}", MeId, Context.ConnectionId);
+        _logger.LogInformation("CallsHub[{Version}] connected. UserId={UserId} ConnectionId={ConnectionId}", VersionMarker, MeId, Context.ConnectionId);
         return base.OnConnectedAsync();
     }
 
     public override Task OnDisconnectedAsync(Exception? exception)
     {
         _sessions.MarkUserDisconnected(MeId, Context.ConnectionId);
-        _logger.LogInformation(exception, "CallsHub disconnected. UserId={UserId} ConnectionId={ConnectionId}", MeId, Context.ConnectionId);
+        _logger.LogInformation(exception, "CallsHub[{Version}] disconnected. UserId={UserId} ConnectionId={ConnectionId}", VersionMarker, MeId, Context.ConnectionId);
         return base.OnDisconnectedAsync(exception);
     }
 
@@ -66,10 +68,14 @@ public sealed class CallsHub : Hub
         var me = MeId;
 
         if (session.CalleeUserId != me)
-            throw new HubException("Only callee can accept the call.");
+            throw new HubException($"{VersionMarker}|Only callee can accept the call.");
 
+        var broadcast = false;
         _sessions.Update(session.CallId, s =>
         {
+            if (s.State is CallState.Accepted or CallState.Connecting or CallState.Connected)
+                return;
+
             EnsureState(s, CallState.Pending, CallState.Ringing);
             s.State = CallState.Accepted;
             s.AcceptedAtUtc = DateTime.UtcNow;
@@ -77,8 +83,12 @@ public sealed class CallsHub : Hub
             s.LastCalleeActivityAtUtc = DateTime.UtcNow;
             s.CalleeClientVersion = request.ClientVersion;
             s.CalleeDeviceInfo = request.DeviceInfo;
+            broadcast = true;
         });
         _sessions.TouchUser(me);
+
+        if (!broadcast)
+            return;
 
         var changed = ToStateChanged(session, CallState.Accepted, null);
         _audit.Info(session, "call.accepted");
@@ -90,19 +100,10 @@ public sealed class CallsHub : Hub
     public async Task DeclineCall(DeclineCallRequest request)
     {
         var session = RequireParticipant(request.CallId);
-
-        _sessions.Update(session.CallId, s =>
-        {
-            EnsureState(s, CallState.Pending, CallState.Ringing, CallState.Accepted, CallState.Connecting);
-            s.State = CallState.Declined;
-            s.EndReason = string.IsNullOrWhiteSpace(request.Reason) ? "declined" : request.Reason;
-            s.EndedAtUtc = DateTime.UtcNow;
-            s.LastActivityAtUtc = DateTime.UtcNow;
-        });
+        if (!TryApplyTerminal(session, CallState.Declined, string.IsNullOrWhiteSpace(request.Reason) ? "declined" : request.Reason, out var changed))
+            return;
 
         await _history.TryPersistTerminalEventAsync(session);
-
-        var changed = ToStateChanged(session, CallState.Declined, session.EndReason);
         _audit.Info(session, "call.declined", session.EndReason);
 
         await Clients.Users(session.CallerUserId.ToString(), session.CalleeUserId.ToString())
@@ -116,20 +117,12 @@ public sealed class CallsHub : Hub
         var session = RequireParticipant(request.CallId);
         var me = MeId;
         if (session.CalleeUserId != me)
-            throw new HubException("Only callee can report busy for this call.");
+            throw new HubException($"{VersionMarker}|Only callee can report busy for this call.");
 
-        _sessions.Update(session.CallId, s =>
-        {
-            EnsureState(s, CallState.Pending, CallState.Ringing);
-            s.State = CallState.Busy;
-            s.EndReason = string.IsNullOrWhiteSpace(request.Reason) ? "busy" : request.Reason;
-            s.EndedAtUtc = DateTime.UtcNow;
-            s.LastActivityAtUtc = DateTime.UtcNow;
-        });
+        if (!TryApplyTerminal(session, CallState.Busy, string.IsNullOrWhiteSpace(request.Reason) ? "busy" : request.Reason, out var changed, CallState.Pending, CallState.Ringing))
+            return;
 
         await _history.TryPersistTerminalEventAsync(session);
-
-        var changed = ToStateChanged(session, CallState.Busy, session.EndReason);
         _audit.Warn(session, "call.busy", session.EndReason);
 
         await Clients.Users(session.CallerUserId.ToString(), session.CalleeUserId.ToString())
@@ -142,10 +135,15 @@ public sealed class CallsHub : Hub
     {
         var session = RequireParticipant(request.CallId);
         var me = MeId;
+        var changed = default(CallStateChangedDto);
+        var eventName = "call.ended";
+        var shouldBroadcast = false;
 
         _sessions.Update(session.CallId, s =>
         {
-            EnsureState(s, CallState.Pending, CallState.Ringing, CallState.Accepted, CallState.Connecting, CallState.Connected);
+            if (!CallSessionService.IsActiveState(s.State))
+                return;
+
             var normalizedReason = string.IsNullOrWhiteSpace(request.Reason) ? "hangup" : request.Reason;
             s.State = normalizedReason.Contains("cancel", StringComparison.OrdinalIgnoreCase) && !s.ConnectedAtUtc.HasValue
                 ? CallState.Cancelled
@@ -157,13 +155,17 @@ public sealed class CallsHub : Hub
                 s.LastCallerActivityAtUtc = DateTime.UtcNow;
             else if (s.CalleeUserId == me)
                 s.LastCalleeActivityAtUtc = DateTime.UtcNow;
+
+            changed = ToStateChanged(s, s.State, s.EndReason);
+            eventName = s.State == CallState.Cancelled ? "call.cancelled" : "call.ended";
+            shouldBroadcast = true;
         });
         _sessions.TouchUser(me);
 
-        await _history.TryPersistTerminalEventAsync(session);
+        if (!shouldBroadcast || changed is null)
+            return;
 
-        var eventName = session.State == CallState.Cancelled ? "call.cancelled" : "call.ended";
-        var changed = ToStateChanged(session, session.State, session.EndReason);
+        await _history.TryPersistTerminalEventAsync(session);
         _audit.Info(session, eventName, session.EndReason);
 
         await Clients.Users(session.CallerUserId.ToString(), session.CalleeUserId.ToString())
@@ -174,6 +176,9 @@ public sealed class CallsHub : Hub
 
     public async Task SendOffer(WebRtcOfferDto request)
     {
+        if (request.CallId == Guid.Empty || string.IsNullOrWhiteSpace(request.Sdp))
+            throw new HubException($"{VersionMarker}|Invalid offer payload.");
+
         var session = RequireParticipant(request.CallId);
         var me = MeId;
         var peer = _sessions.GetPeerId(session, me);
@@ -194,7 +199,7 @@ public sealed class CallsHub : Hub
         });
         _sessions.TouchUser(me);
 
-        _audit.Info(session, "call.offer", extra: new { fromUserId = me, sdpLength = request.Sdp?.Length ?? 0 });
+        _audit.Info(session, "call.offer", extra: new { fromUserId = me, sdpLength = request.Sdp.Length, marker = VersionMarker });
 
         await Clients.User(peer.ToString()).SendAsync("call.offer", new
         {
@@ -208,6 +213,9 @@ public sealed class CallsHub : Hub
 
     public async Task SendAnswer(WebRtcAnswerDto request)
     {
+        if (request.CallId == Guid.Empty || string.IsNullOrWhiteSpace(request.Sdp))
+            throw new HubException($"{VersionMarker}|Invalid answer payload.");
+
         var session = RequireParticipant(request.CallId);
         var me = MeId;
         var peer = _sessions.GetPeerId(session, me);
@@ -228,7 +236,7 @@ public sealed class CallsHub : Hub
         });
         _sessions.TouchUser(me);
 
-        _audit.Info(session, "call.answer", extra: new { fromUserId = me, sdpLength = request.Sdp?.Length ?? 0 });
+        _audit.Info(session, "call.answer", extra: new { fromUserId = me, sdpLength = request.Sdp.Length, marker = VersionMarker });
 
         await Clients.User(peer.ToString()).SendAsync("call.answer", new
         {
@@ -240,9 +248,12 @@ public sealed class CallsHub : Hub
         });
     }
 
-    public async Task SendIceCandidate(Guid callId, string? candidate, string? sdpMid, int? sdpMLineIndex, string? usernameFragment)
+    public async Task SendIceCandidate(IceCandidateDto request)
     {
-        var session = RequireParticipant(callId);
+        if (request.CallId == Guid.Empty)
+            throw new HubException($"{VersionMarker}|Invalid ICE payload: empty callId.");
+
+        var session = RequireParticipant(request.CallId);
         var me = MeId;
         var peer = _sessions.GetPeerId(session, me);
 
@@ -262,28 +273,34 @@ public sealed class CallsHub : Hub
         });
         _sessions.TouchUser(me);
 
-        _audit.Info(session, "call.ice-candidate", extra: new { fromUserId = me, sdpMid, sdpMLineIndex, hasCandidate = !string.IsNullOrWhiteSpace(candidate) });
+        _audit.Info(session, "call.ice-candidate", extra: new { fromUserId = me, request.SdpMid, request.SdpMLineIndex, hasCandidate = !string.IsNullOrWhiteSpace(request.Candidate), marker = VersionMarker });
 
         await Clients.User(peer.ToString()).SendAsync("call.ice-candidate", new
         {
-            callId,
-            candidate,
-            sdpMid,
-            sdpMLineIndex,
-            usernameFragment,
+            request.CallId,
+            request.Candidate,
+            request.SdpMid,
+            request.SdpMLineIndex,
+            request.UsernameFragment,
             fromUserId = me,
             correlationId = session.CorrelationId
         });
     }
 
-    public async Task MarkConnected(Guid callId)
+    public async Task MarkConnected(MarkConnectedRequest request)
     {
-        var session = RequireParticipant(callId);
+        if (request.CallId == Guid.Empty)
+            return;
+
+        var session = RequireParticipant(request.CallId);
         var me = MeId;
+        var broadcast = false;
 
         _sessions.Update(session.CallId, s =>
         {
             if (!CallSessionService.IsActiveState(s.State))
+                return;
+            if (s.State == CallState.Connected)
                 return;
 
             s.State = CallState.Connected;
@@ -293,39 +310,53 @@ public sealed class CallsHub : Hub
                 s.LastCallerActivityAtUtc = DateTime.UtcNow;
             else
                 s.LastCalleeActivityAtUtc = DateTime.UtcNow;
+            broadcast = true;
         });
         _sessions.TouchUser(me);
 
+        if (!broadcast)
+            return;
+
         var changed = ToStateChanged(session, CallState.Connected, null);
-        _audit.Info(session, "call.connected");
+        _audit.Info(session, "call.connected", extra: new { marker = VersionMarker });
 
         await Clients.Users(session.CallerUserId.ToString(), session.CalleeUserId.ToString())
             .SendAsync("call.connected", changed);
     }
 
-    public async Task ReportFailure(Guid callId, string reason)
+    public async Task ReportFailure(ReportFailureRequest request)
     {
-        var session = RequireParticipant(callId);
+        if (request.CallId == Guid.Empty)
+            return;
+
+        var session = RequireParticipant(request.CallId);
         var me = MeId;
+        var changed = default(CallStateChangedDto);
+        var shouldBroadcast = false;
 
         _sessions.Update(session.CallId, s =>
         {
-            EnsureState(s, CallState.Pending, CallState.Ringing, CallState.Accepted, CallState.Connecting, CallState.Connected);
+            if (!CallSessionService.IsActiveState(s.State))
+                return;
+
             s.State = CallState.Failed;
-            s.EndReason = string.IsNullOrWhiteSpace(reason) ? "failed" : reason;
+            s.EndReason = string.IsNullOrWhiteSpace(request.Reason) ? "failed" : request.Reason;
             s.EndedAtUtc = DateTime.UtcNow;
             s.LastActivityAtUtc = DateTime.UtcNow;
             if (s.CallerUserId == me)
                 s.LastCallerActivityAtUtc = DateTime.UtcNow;
             else
                 s.LastCalleeActivityAtUtc = DateTime.UtcNow;
+            changed = ToStateChanged(s, CallState.Failed, s.EndReason);
+            shouldBroadcast = true;
         });
         _sessions.TouchUser(me);
 
-        await _history.TryPersistTerminalEventAsync(session);
+        if (!shouldBroadcast || changed is null)
+            return;
 
-        var changed = ToStateChanged(session, CallState.Failed, session.EndReason);
-        _audit.Warn(session, "call.failed", session.EndReason);
+        await _history.TryPersistTerminalEventAsync(session);
+        _audit.Warn(session, "call.failed", session.EndReason, new { marker = VersionMarker });
 
         await Clients.Users(session.CallerUserId.ToString(), session.CalleeUserId.ToString())
             .SendAsync("call.failed", changed);
@@ -333,21 +364,51 @@ public sealed class CallsHub : Hub
         _sessions.TryRemove(session.CallId, out _);
     }
 
-    public Task HeartbeatCall(Guid callId)
+    public Task HeartbeatCall(HeartbeatCallRequest request)
     {
-        var session = RequireParticipant(callId);
-        _sessions.TouchCallParticipant(callId, MeId);
-        _audit.Info(session, "call.heartbeat", extra: new { connectionId = Context.ConnectionId, userId = MeId });
+        if (request.CallId == Guid.Empty)
+            return Task.CompletedTask;
+
+        if (!_sessions.TryGet(request.CallId, out var session) || session is null)
+            return Task.CompletedTask;
+
+        if (!_sessions.IsParticipant(session, MeId))
+            return Task.CompletedTask;
+
+        _sessions.TouchCallParticipant(request.CallId, MeId);
         return Task.CompletedTask;
+    }
+
+    private bool TryApplyTerminal(CallSession session, CallState state, string reason, out CallStateChangedDto? changed, params CallState[] allowed)
+    {
+        changed = null;
+        var changedFlag = false;
+        _sessions.Update(session.CallId, s =>
+        {
+            if (!CallSessionService.IsActiveState(s.State))
+                return;
+
+            if (allowed.Length != 0)
+                EnsureState(s, allowed);
+
+            s.State = state;
+            s.EndReason = reason;
+            s.EndedAtUtc = DateTime.UtcNow;
+            s.LastActivityAtUtc = DateTime.UtcNow;
+            changed = ToStateChanged(s, state, s.EndReason);
+            changedFlag = true;
+        });
+
+        return changedFlag && changed is not null;
     }
 
     private CallSession RequireParticipant(Guid callId)
     {
         if (!_sessions.TryGet(callId, out var session) || session is null)
-            throw new HubException("Call session not found.");
+            throw new HubException($"{VersionMarker}|Call session not found.|callId={callId}");
 
         if (!_sessions.IsParticipant(session, MeId))
-            throw new HubException("User is not a participant of this call.");
+            throw new HubException($"{VersionMarker}|User is not a participant of this call.|callId={callId}|userId={MeId}");
 
         return session;
     }

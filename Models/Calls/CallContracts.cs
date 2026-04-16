@@ -121,6 +121,10 @@ public record IceCandidateDto(
     string? UsernameFragment = null
 );
 
+public record MarkConnectedRequest(Guid CallId);
+public record ReportFailureRequest(Guid CallId, string Reason);
+public record HeartbeatCallRequest(Guid CallId);
+
 public sealed class CallSession
 {
     public Guid CallId { get; init; }
