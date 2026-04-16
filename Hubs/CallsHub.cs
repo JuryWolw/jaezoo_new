@@ -290,5 +290,16 @@ public sealed class CallsHub : Hub
     }
 
     private static CallStateChangedDto ToStateChanged(CallSession session, CallState state, string? reason)
-        => new(session.CallId, session.CallerUserId, session.CalleeUserId, session.DialogId, session.Type, state, DateTime.UtcNow, reason, session.CorrelationId);
+        => new()
+        {
+            CallId = session.CallId,
+            CallerUserId = session.CallerUserId,
+            CalleeUserId = session.CalleeUserId,
+            DialogId = session.DialogId,
+            Type = session.Type,
+            State = state,
+            OccurredAtUtc = DateTime.UtcNow,
+            Reason = reason,
+            CorrelationId = session.CorrelationId
+        };
 }

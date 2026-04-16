@@ -93,16 +93,18 @@ public sealed class CallSessionMonitorService : BackgroundService
             }
 
             _audit.Warn(removed, appliedDecision.AuditEvent, appliedDecision.Reason);
-            var dto = new CallStateChangedDto(
-                removed.CallId,
-                removed.CallerUserId,
-                removed.CalleeUserId,
-                removed.DialogId,
-                removed.Type,
-                removed.State,
-                nowUtc,
-                removed.EndReason,
-                removed.CorrelationId);
+            var dto = new CallStateChangedDto
+            {
+                CallId = removed.CallId,
+                CallerUserId = removed.CallerUserId,
+                CalleeUserId = removed.CalleeUserId,
+                DialogId = removed.DialogId,
+                Type = removed.Type,
+                State = removed.State,
+                OccurredAtUtc = nowUtc,
+                Reason = removed.EndReason,
+                CorrelationId = removed.CorrelationId
+            };
 
             await _hub.Clients.Users(removed.CallerUserId.ToString(), removed.CalleeUserId.ToString())
                 .SendAsync(appliedDecision.ClientEvent, dto, ct);

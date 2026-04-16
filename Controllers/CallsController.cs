@@ -63,7 +63,7 @@ public sealed class CallsController : ControllerBase
     {
         var data = _sessions.GetActiveForUser(MeId)
             .OrderByDescending(x => x.CreatedAtUtc)
-            .Select(x => new StartCallResponse(x.CallId, _sessions.GetPeerId(x, MeId), x.DialogId, x.Type, x.State, x.CreatedAtUtc, x.CorrelationId))
+            .Select(x => new StartCallResponse { CallId = x.CallId, PeerUserId = _sessions.GetPeerId(x, MeId), DialogId = x.DialogId, Type = x.Type, State = x.State, CreatedAtUtc = x.CreatedAtUtc, CorrelationId = x.CorrelationId })
             .ToList();
 
         return Ok(data);
@@ -111,33 +111,46 @@ public sealed class CallsController : ControllerBase
             s.LastCalleeActivityAtUtc = DateTime.UtcNow;
         });
 
-        var invite = new CallInviteDto(
-            session.CallId,
-            session.CallerUserId,
-            session.CalleeUserId,
-            session.DialogId,
-            session.Type,
-            session.CreatedAtUtc,
-            session.CorrelationId,
-            caller.DisplayName ?? caller.UserName,
-            string.IsNullOrWhiteSpace(caller.AvatarUrl) ? $"/avatars/{caller.Id}" : caller.AvatarUrl);
+        var invite = new CallInviteDto
+        {
+            CallId = session.CallId,
+            CallerUserId = session.CallerUserId,
+            CalleeUserId = session.CalleeUserId,
+            DialogId = session.DialogId,
+            Type = session.Type,
+            CreatedAtUtc = session.CreatedAtUtc,
+            CorrelationId = session.CorrelationId,
+            CallerDisplayName = caller.DisplayName ?? caller.UserName,
+            CallerAvatarUrl = string.IsNullOrWhiteSpace(caller.AvatarUrl) ? $"/avatars/{caller.Id}" : caller.AvatarUrl
+        };
 
-        var changed = new CallStateChangedDto(
-            session.CallId,
-            session.CallerUserId,
-            session.CalleeUserId,
-            session.DialogId,
-            session.Type,
-            session.State,
-            DateTime.UtcNow,
-            null,
-            session.CorrelationId);
+        var changed = new CallStateChangedDto
+        {
+            CallId = session.CallId,
+            CallerUserId = session.CallerUserId,
+            CalleeUserId = session.CalleeUserId,
+            DialogId = session.DialogId,
+            Type = session.Type,
+            State = session.State,
+            OccurredAtUtc = DateTime.UtcNow,
+            Reason = null,
+            CorrelationId = session.CorrelationId
+        };
 
         _audit.Info(session, "call.invite.created");
 
         await _callsHub.Clients.User(request.PeerUserId.ToString()).SendAsync("call.invite", invite, ct);
         await _callsHub.Clients.Users(me.ToString(), request.PeerUserId.ToString()).SendAsync("call.state", changed, ct);
 
-        return Ok(new StartCallResponse(session.CallId, request.PeerUserId, session.DialogId, session.Type, session.State, session.CreatedAtUtc, session.CorrelationId));
+        return Ok(new StartCallResponse
+        {
+            CallId = session.CallId,
+            PeerUserId = request.PeerUserId,
+            DialogId = session.DialogId,
+            Type = session.Type,
+            State = session.State,
+            CreatedAtUtc = session.CreatedAtUtc,
+            CorrelationId = session.CorrelationId
+        });
     }
 }

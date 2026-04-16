@@ -25,101 +25,116 @@ public enum CallState
     TimedOut = 11
 }
 
-public record IceServerDto(
-    string[] Urls,
-    string Username,
-    string Credential,
-    string CredentialType = "password"
-);
+public sealed class IceServerDto
+{
+    public string[] Urls { get; set; } = Array.Empty<string>();
+    public string Username { get; set; } = string.Empty;
+    public string Credential { get; set; } = string.Empty;
+    public string CredentialType { get; set; } = "password";
+}
 
-public record IceConfigResponse(
-    IReadOnlyList<IceServerDto> IceServers,
-    int TtlSeconds,
-    DateTime ExpiresAtUtc
-);
+public sealed class IceConfigResponse
+{
+    public IReadOnlyList<IceServerDto> IceServers { get; set; } = Array.Empty<IceServerDto>();
+    public int TtlSeconds { get; set; }
+    public DateTime ExpiresAtUtc { get; set; }
+}
 
-public record StartCallRequest(
-    Guid PeerUserId,
-    Guid? DialogId,
-    CallType Type = CallType.Voice,
-    string? ClientVersion = null,
-    string? DeviceInfo = null
-);
+public sealed class StartCallRequest
+{
+    public Guid PeerUserId { get; set; }
+    public Guid? DialogId { get; set; }
+    public CallType Type { get; set; } = CallType.Voice;
+    public string? ClientVersion { get; set; }
+    public string? DeviceInfo { get; set; }
+}
 
-public record StartCallResponse(
-    Guid CallId,
-    Guid PeerUserId,
-    Guid? DialogId,
-    CallType Type,
-    CallState State,
-    DateTime CreatedAtUtc,
-    string CorrelationId
-);
+public sealed class StartCallResponse
+{
+    public Guid CallId { get; set; }
+    public Guid PeerUserId { get; set; }
+    public Guid? DialogId { get; set; }
+    public CallType Type { get; set; }
+    public CallState State { get; set; }
+    public DateTime CreatedAtUtc { get; set; }
+    public string CorrelationId { get; set; } = string.Empty;
+}
 
-public record CallInviteDto(
-    Guid CallId,
-    Guid CallerUserId,
-    Guid CalleeUserId,
-    Guid? DialogId,
-    CallType Type,
-    DateTime CreatedAtUtc,
-    string CorrelationId,
-    string? CallerDisplayName,
-    string? CallerAvatarUrl
-);
+public sealed class CallInviteDto
+{
+    public Guid CallId { get; set; }
+    public Guid CallerUserId { get; set; }
+    public Guid CalleeUserId { get; set; }
+    public Guid? DialogId { get; set; }
+    public CallType Type { get; set; }
+    public DateTime CreatedAtUtc { get; set; }
+    public string CorrelationId { get; set; } = string.Empty;
+    public string? CallerDisplayName { get; set; }
+    public string? CallerAvatarUrl { get; set; }
+}
 
-public record AcceptCallRequest(
-    Guid CallId,
-    string? ClientVersion = null,
-    string? DeviceInfo = null
-);
+public sealed class AcceptCallRequest
+{
+    public Guid CallId { get; set; }
+    public string? ClientVersion { get; set; }
+    public string? DeviceInfo { get; set; }
+}
 
-public record DeclineCallRequest(
-    Guid CallId,
-    string? Reason = null
-);
+public sealed class DeclineCallRequest
+{
+    public Guid CallId { get; set; }
+    public string? Reason { get; set; }
+}
 
-public record HangupCallRequest(
-    Guid CallId,
-    string? Reason = null
-);
+public sealed class HangupCallRequest
+{
+    public Guid CallId { get; set; }
+    public string? Reason { get; set; }
+}
 
-public record BusyCallRequest(
-    Guid CallId,
-    string? Reason = null
-);
+public sealed class BusyCallRequest
+{
+    public Guid CallId { get; set; }
+    public string? Reason { get; set; }
+}
 
-public record CallStateChangedDto(
-    Guid CallId,
-    Guid CallerUserId,
-    Guid CalleeUserId,
-    Guid? DialogId,
-    CallType Type,
-    CallState State,
-    DateTime OccurredAtUtc,
-    string? Reason,
-    string CorrelationId
-);
+public sealed class CallStateChangedDto
+{
+    public Guid CallId { get; set; }
+    public Guid CallerUserId { get; set; }
+    public Guid CalleeUserId { get; set; }
+    public Guid? DialogId { get; set; }
+    public CallType Type { get; set; }
+    public CallState State { get; set; }
+    public DateTime OccurredAtUtc { get; set; }
+    public string? Reason { get; set; }
+    public string CorrelationId { get; set; } = string.Empty;
+}
 
-public record WebRtcOfferDto(
-    Guid CallId,
-    [property: Required] string Sdp,
-    string Type = "offer"
-);
+public sealed class WebRtcOfferDto
+{
+    public Guid CallId { get; set; }
+    [Required]
+    public string Sdp { get; set; } = string.Empty;
+    public string Type { get; set; } = "offer";
+}
 
-public record WebRtcAnswerDto(
-    Guid CallId,
-    [property: Required] string Sdp,
-    string Type = "answer"
-);
+public sealed class WebRtcAnswerDto
+{
+    public Guid CallId { get; set; }
+    [Required]
+    public string Sdp { get; set; } = string.Empty;
+    public string Type { get; set; } = "answer";
+}
 
-public record IceCandidateDto(
-    Guid CallId,
-    string Candidate,
-    string? SdpMid,
-    int? SdpMLineIndex,
-    string? UsernameFragment = null
-);
+public sealed class IceCandidateDto
+{
+    public Guid CallId { get; set; }
+    public string Candidate { get; set; } = string.Empty;
+    public string? SdpMid { get; set; }
+    public int? SdpMLineIndex { get; set; }
+    public string? UsernameFragment { get; set; }
+}
 
 public sealed class CallSession
 {
@@ -148,9 +163,18 @@ public sealed class CallSession
     public DateTime? HistoryPersistedAtUtc { get; set; }
 }
 
+public sealed class MarkConnectedRequest
+{
+    public Guid CallId { get; set; }
+}
 
-public record MarkConnectedRequest(Guid CallId);
+public sealed class ReportFailureRequest
+{
+    public Guid CallId { get; set; }
+    public string? Reason { get; set; }
+}
 
-public record ReportFailureRequest(Guid CallId, string? Reason = null);
-
-public record HeartbeatCallRequest(Guid CallId);
+public sealed class HeartbeatCallRequest
+{
+    public Guid CallId { get; set; }
+}
