@@ -180,8 +180,11 @@ public sealed class CallsHub : Hub
 
         _sessions.Update(session.CallId, s =>
         {
-            EnsureState(s, CallState.Accepted, CallState.Connecting, CallState.Connected);
-            s.State = CallState.Connecting;
+            if (!CallSessionService.IsActiveState(s.State))
+                return;
+
+            if (s.State is CallState.Accepted or CallState.Pending or CallState.Ringing)
+                s.State = CallState.Connecting;
             s.LastOfferAtUtc = DateTime.UtcNow;
             s.LastActivityAtUtc = DateTime.UtcNow;
             if (s.CallerUserId == me)
@@ -211,8 +214,11 @@ public sealed class CallsHub : Hub
 
         _sessions.Update(session.CallId, s =>
         {
-            EnsureState(s, CallState.Accepted, CallState.Connecting, CallState.Connected);
-            s.State = CallState.Connecting;
+            if (!CallSessionService.IsActiveState(s.State))
+                return;
+
+            if (s.State is CallState.Accepted or CallState.Pending or CallState.Ringing)
+                s.State = CallState.Connecting;
             s.LastAnswerAtUtc = DateTime.UtcNow;
             s.LastActivityAtUtc = DateTime.UtcNow;
             if (s.CallerUserId == me)
@@ -242,7 +248,11 @@ public sealed class CallsHub : Hub
 
         _sessions.Update(session.CallId, s =>
         {
-            EnsureState(s, CallState.Accepted, CallState.Connecting, CallState.Connected);
+            if (!CallSessionService.IsActiveState(s.State))
+                return;
+
+            if (s.State is CallState.Accepted or CallState.Pending or CallState.Ringing)
+                s.State = CallState.Connecting;
             s.LastIceCandidateAtUtc = DateTime.UtcNow;
             s.LastActivityAtUtc = DateTime.UtcNow;
             if (s.CallerUserId == me)
@@ -273,7 +283,9 @@ public sealed class CallsHub : Hub
 
         _sessions.Update(session.CallId, s =>
         {
-            EnsureState(s, CallState.Accepted, CallState.Connecting, CallState.Connected);
+            if (!CallSessionService.IsActiveState(s.State))
+                return;
+
             s.State = CallState.Connected;
             s.ConnectedAtUtc ??= DateTime.UtcNow;
             s.LastActivityAtUtc = DateTime.UtcNow;
