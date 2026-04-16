@@ -9,8 +9,6 @@ namespace JaeZoo.Server.Hubs;
 [Authorize]
 public sealed class CallsHub : Hub
 {
-    public const string BuildMarker = "CALLS_DIAG_V2_20260416_0035";
-
     private readonly CallSessionService _sessions;
     private readonly CallAuditService _audit;
     private readonly TurnCredentialsService _turn;
@@ -49,14 +47,14 @@ public sealed class CallsHub : Hub
     public override Task OnConnectedAsync()
     {
         _sessions.MarkUserConnected(MeId, Context.ConnectionId);
-        _logger.LogInformation("CallsHub[{Marker}] connected. UserId={UserId} ConnectionId={ConnectionId} Snapshot={Snapshot}", BuildMarker, MeId, Context.ConnectionId, _sessions.BuildDebugSnapshot(MeId));
+        _logger.LogInformation("CallsHub connected. UserId={UserId} ConnectionId={ConnectionId}", MeId, Context.ConnectionId);
         return base.OnConnectedAsync();
     }
 
     public override Task OnDisconnectedAsync(Exception? exception)
     {
         _sessions.MarkUserDisconnected(MeId, Context.ConnectionId);
-        _logger.LogInformation(exception, "CallsHub[{Marker}] disconnected. UserId={UserId} ConnectionId={ConnectionId} Snapshot={Snapshot}", BuildMarker, MeId, Context.ConnectionId, _sessions.BuildDebugSnapshot(MeId));
+        _logger.LogInformation(exception, "CallsHub disconnected. UserId={UserId} ConnectionId={ConnectionId}", MeId, Context.ConnectionId);
         return base.OnDisconnectedAsync(exception);
     }
 
@@ -242,56 +240,40 @@ public sealed class CallsHub : Hub
         });
     }
 
-    public async Task SendIceCandidate(IceCandidateDto request)
+    public async Task SendIceCandidate(Guid callId, string? candidate, string? sdpMid, int? sdpMLineIndex, string? usernameFragment)
     {
+        var session = RequireParticipant(callId);
         var me = MeId;
-        try
+        var peer = _sessions.GetPeerId(session, me);
+
+        _sessions.Update(session.CallId, s =>
         {
-            var session = RequireParticipant(request.CallId);
-            var peer = _sessions.GetPeerId(session, me);
+            if (!CallSessionService.IsActiveState(s.State))
+                return;
 
-            _sessions.Update(session.CallId, s =>
-            {
-                if (!CallSessionService.IsActiveState(s.State))
-                    return;
+            if (s.State is CallState.Accepted or CallState.Pending or CallState.Ringing)
+                s.State = CallState.Connecting;
+            s.LastIceCandidateAtUtc = DateTime.UtcNow;
+            s.LastActivityAtUtc = DateTime.UtcNow;
+            if (s.CallerUserId == me)
+                s.LastCallerActivityAtUtc = DateTime.UtcNow;
+            else
+                s.LastCalleeActivityAtUtc = DateTime.UtcNow;
+        });
+        _sessions.TouchUser(me);
 
-                if (s.State is CallState.Accepted or CallState.Pending or CallState.Ringing)
-                    s.State = CallState.Connecting;
-                s.LastIceCandidateAtUtc = DateTime.UtcNow;
-                s.LastActivityAtUtc = DateTime.UtcNow;
-                if (s.CallerUserId == me)
-                    s.LastCallerActivityAtUtc = DateTime.UtcNow;
-                else
-                    s.LastCalleeActivityAtUtc = DateTime.UtcNow;
-            });
-            _sessions.TouchUser(me);
+        _audit.Info(session, "call.ice-candidate", extra: new { fromUserId = me, sdpMid, sdpMLineIndex, hasCandidate = !string.IsNullOrWhiteSpace(candidate) });
 
-            _audit.Info(session, "call.ice-candidate", extra: new { marker = BuildMarker, fromUserId = me, request.SdpMid, request.SdpMLineIndex });
-            _logger.LogInformation("CallsHub[{Marker}] SendIceCandidate OK. CallId={CallId} FromUserId={FromUserId} ToUserId={ToUserId} Snapshot={Snapshot}", BuildMarker, session.CallId, me, peer, CallSessionService.DescribeSession(session));
-
-            await Clients.User(peer.ToString()).SendAsync("call.ice-candidate", new
-            {
-                request.CallId,
-                request.Candidate,
-                request.SdpMid,
-                request.SdpMLineIndex,
-                request.UsernameFragment,
-                fromUserId = me,
-                correlationId = session.CorrelationId
-            });
-        }
-        catch (HubException ex)
+        await Clients.User(peer.ToString()).SendAsync("call.ice-candidate", new
         {
-            var snapshot = _sessions.BuildDebugSnapshot(me);
-            _logger.LogError(ex, "CallsHub[{Marker}] SendIceCandidate HUB ERROR. CallId={CallId} UserId={UserId} ConnectionId={ConnectionId} Snapshot={Snapshot}", BuildMarker, request.CallId, me, Context.ConnectionId, snapshot);
-            throw new HubException($"{BuildMarker}|SendIceCandidate|{ex.Message}|callId={request.CallId}|userId={me}|connectionId={Context.ConnectionId}");
-        }
-        catch (Exception ex)
-        {
-            var snapshot = _sessions.BuildDebugSnapshot(me);
-            _logger.LogError(ex, "CallsHub[{Marker}] SendIceCandidate UNEXPECTED ERROR. CallId={CallId} UserId={UserId} ConnectionId={ConnectionId} Snapshot={Snapshot}", BuildMarker, request.CallId, me, Context.ConnectionId, snapshot);
-            throw new HubException($"{BuildMarker}|SendIceCandidate|Unexpected:{ex.GetType().Name}:{ex.Message}|callId={request.CallId}|userId={me}|connectionId={Context.ConnectionId}");
-        }
+            callId,
+            candidate,
+            sdpMid,
+            sdpMLineIndex,
+            usernameFragment,
+            fromUserId = me,
+            correlationId = session.CorrelationId
+        });
     }
 
     public async Task MarkConnected(Guid callId)
@@ -361,21 +343,11 @@ public sealed class CallsHub : Hub
 
     private CallSession RequireParticipant(Guid callId)
     {
-        var me = MeId;
         if (!_sessions.TryGet(callId, out var session) || session is null)
-        {
-            var snapshot = _sessions.BuildDebugSnapshot(me);
-            _logger.LogError("CallsHub[{Marker}] RequireParticipant FAILED: session not found. CallId={CallId} UserId={UserId} ConnectionId={ConnectionId} Snapshot={Snapshot}", BuildMarker, callId, me, Context.ConnectionId, snapshot);
-            throw new HubException($"{BuildMarker}|Call session not found.|callId={callId}|userId={me}|connectionId={Context.ConnectionId}");
-        }
+            throw new HubException("Call session not found.");
 
-        if (!_sessions.IsParticipant(session, me))
-        {
-            var sessionDump = CallSessionService.DescribeSession(session);
-            var snapshot = _sessions.BuildDebugSnapshot(me);
-            _logger.LogError("CallsHub[{Marker}] RequireParticipant FAILED: user is not participant. CallId={CallId} UserId={UserId} ConnectionId={ConnectionId} Session={Session} Snapshot={Snapshot}", BuildMarker, callId, me, Context.ConnectionId, sessionDump, snapshot);
-            throw new HubException($"{BuildMarker}|User is not a participant of this call.|callId={callId}|userId={me}|connectionId={Context.ConnectionId}|session={sessionDump}");
-        }
+        if (!_sessions.IsParticipant(session, MeId))
+            throw new HubException("User is not a participant of this call.");
 
         return session;
     }
@@ -385,7 +357,7 @@ public sealed class CallsHub : Hub
         if (allowedStates.Contains(session.State))
             return;
 
-        throw new HubException($"{BuildMarker}|Invalid call state transition from '{session.State}'.|session={CallSessionService.DescribeSession(session)}");
+        throw new HubException($"Invalid call state transition from '{session.State}'.");
     }
 
     private static CallStateChangedDto ToStateChanged(CallSession session, CallState state, string? reason)
