@@ -1,4 +1,4 @@
-using JaeZoo.Server.Data;
+﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Options;
 using Microsoft.EntityFrameworkCore;
@@ -201,7 +201,7 @@ public sealed class GroupVoiceService(
                 Array.Empty<GroupVoiceParticipantDto>());
         }
 
-        var participants = await (
+        var participantRows = await (
             from p in db.GroupVoiceParticipants.AsNoTracking()
             join u in db.Users.AsNoTracking() on p.UserId equals u.Id
             where p.SessionId == session.Id && p.IsActive
@@ -214,6 +214,13 @@ public sealed class GroupVoiceService(
                 p.LastSeenAt,
                 p.IsActive)
         ).ToListAsync(ct);
+
+        var participants = participantRows
+            .GroupBy(p => p.UserId)
+            .Select(g => g.OrderByDescending(p => p.LastSeenAt).ThenByDescending(p => p.JoinedAt).First())
+            .OrderBy(p => p.JoinedAt)
+            .ThenBy(p => p.UserName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
         return new GroupVoiceStateDto(
             groupId,
