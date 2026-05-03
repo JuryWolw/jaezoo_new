@@ -10,6 +10,7 @@ namespace JaeZoo.Server.Controllers;
 
 [ApiController]
 [Authorize]
+[Route("api/chat/groups/{groupId:guid}/voice")]
 [Route("api/groups/{groupId:guid}/voice")]
 public sealed class GroupVoiceController(
     GroupVoiceService voice,
