@@ -10,8 +10,6 @@ namespace JaeZoo.Server.Controllers;
 
 [ApiController]
 [Authorize]
-[Route("api/chat/groups/{groupId:guid}/voice")]
-[Route("api/groups/{groupId:guid}/voice")]
 public sealed class GroupVoiceController(
     GroupVoiceService voice,
     IHubContext<ChatHub> hub,
@@ -32,7 +30,29 @@ public sealed class GroupVoiceController(
         }
     }
 
-    [HttpGet("state")]
+    [AllowAnonymous]
+    [HttpGet("/api/groupvoice/ping")]
+    public ActionResult<object> Ping()
+        => Ok(new
+        {
+            ok = true,
+            feature = "group-voice-livekit",
+            version = "fix3-absolute-routes",
+            routes = new[]
+            {
+                "/api/chat/groups/{groupId}/voice/state",
+                "/api/chat/groups/{groupId}/voice/join",
+                "/api/chat/groups/{groupId}/voice/heartbeat",
+                "/api/chat/groups/{groupId}/voice/leave",
+                "/api/groups/{groupId}/voice/state",
+                "/api/groups/{groupId}/voice/join",
+                "/api/groups/{groupId}/voice/heartbeat",
+                "/api/groups/{groupId}/voice/leave"
+            }
+        });
+
+    [HttpGet("/api/chat/groups/{groupId:guid}/voice/state")]
+    [HttpGet("/api/groups/{groupId:guid}/voice/state")]
     public async Task<ActionResult<GroupVoiceStateDto>> State(Guid groupId, CancellationToken ct)
     {
         try
@@ -45,7 +65,8 @@ public sealed class GroupVoiceController(
         }
     }
 
-    [HttpPost("join")]
+    [HttpPost("/api/chat/groups/{groupId:guid}/voice/join")]
+    [HttpPost("/api/groups/{groupId:guid}/voice/join")]
     public async Task<ActionResult<GroupVoiceJoinResponse>> Join(Guid groupId, [FromBody] GroupVoiceJoinRequest? request, CancellationToken ct)
     {
         try
@@ -62,7 +83,8 @@ public sealed class GroupVoiceController(
         }
     }
 
-    [HttpPost("heartbeat")]
+    [HttpPost("/api/chat/groups/{groupId:guid}/voice/heartbeat")]
+    [HttpPost("/api/groups/{groupId:guid}/voice/heartbeat")]
     public async Task<ActionResult<GroupVoiceStateDto>> Heartbeat(Guid groupId, CancellationToken ct)
     {
         try
@@ -76,7 +98,8 @@ public sealed class GroupVoiceController(
         }
     }
 
-    [HttpPost("leave")]
+    [HttpPost("/api/chat/groups/{groupId:guid}/voice/leave")]
+    [HttpPost("/api/groups/{groupId:guid}/voice/leave")]
     public async Task<ActionResult<GroupVoiceStateDto>> Leave(Guid groupId, CancellationToken ct)
     {
         try
