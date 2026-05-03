@@ -17,6 +17,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GroupMessage> GroupMessages => Set<GroupMessage>();
     public DbSet<GroupMessageAttachment> GroupMessageAttachments => Set<GroupMessageAttachment>();
     public DbSet<GroupAvatar> GroupAvatars => Set<GroupAvatar>();
+    public DbSet<GroupVoiceSession> GroupVoiceSessions => Set<GroupVoiceSession>();
+    public DbSet<GroupVoiceParticipant> GroupVoiceParticipants => Set<GroupVoiceParticipant>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -169,6 +171,46 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .HasOne<GroupChat>()
             .WithMany()
             .HasForeignKey(a => a.GroupChatId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<GroupVoiceSession>()
+            .Property(s => s.RoomName)
+            .HasMaxLength(160);
+
+        b.Entity<GroupVoiceSession>()
+            .Property(s => s.State)
+            .HasConversion<int>();
+
+        b.Entity<GroupVoiceSession>()
+            .HasIndex(s => new { s.GroupChatId, s.State, s.StartedAt });
+
+        b.Entity<GroupVoiceSession>()
+            .HasOne<GroupChat>()
+            .WithMany()
+            .HasForeignKey(s => s.GroupChatId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<GroupVoiceParticipant>()
+            .Property(p => p.ClientInfo)
+            .HasMaxLength(256);
+
+        b.Entity<GroupVoiceParticipant>()
+            .HasIndex(p => new { p.SessionId, p.UserId })
+            .IsUnique();
+
+        b.Entity<GroupVoiceParticipant>()
+            .HasIndex(p => new { p.GroupChatId, p.IsActive, p.LastSeenAt });
+
+        b.Entity<GroupVoiceParticipant>()
+            .HasOne<GroupVoiceSession>()
+            .WithMany(s => s.Participants)
+            .HasForeignKey(p => p.SessionId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<GroupVoiceParticipant>()
+            .HasOne<GroupChat>()
+            .WithMany()
+            .HasForeignKey(p => p.GroupChatId)
             .OnDelete(DeleteBehavior.Cascade);
     }
 }

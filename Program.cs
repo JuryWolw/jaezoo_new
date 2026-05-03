@@ -17,6 +17,7 @@ using JaeZoo.Server.Services.Calls;
 using JaeZoo.Server.Services.Chat;
 using JaeZoo.Server.Options;
 using JaeZoo.Server.Services.Launcher;
+using JaeZoo.Server.Services.Voice;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -105,6 +106,9 @@ else
 builder.Services.AddSingleton<IPresenceTracker, PresenceTracker>();
 builder.Services.Configure<TurnOptions>(builder.Configuration.GetSection("Turn"));
 builder.Services.Configure<CallLifecycleOptions>(builder.Configuration.GetSection("Calls:Lifecycle"));
+builder.Services.Configure<LiveKitOptions>(builder.Configuration.GetSection("LiveKit"));
+builder.Services.AddSingleton<LiveKitTokenService>();
+builder.Services.AddScoped<GroupVoiceService>();
 builder.Services.AddSingleton<TurnCredentialsService>();
 builder.Services.AddSingleton<CallSessionService>();
 builder.Services.AddSingleton<CallAuditService>();

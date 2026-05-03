@@ -132,3 +132,37 @@ public record GroupChatMembersChangedDto(Guid GroupId, IReadOnlyList<GroupChatMe
 
 public record SetGroupAvatarUrlRequest(string AvatarUrl);
 public record CrossChatForwardRequest(string Source, Guid? SourceChatId, IReadOnlyList<Guid> MessageIds, bool IncludeAttachments = true);
+
+public record GroupVoiceJoinRequest(string? ClientInfo = null);
+
+public record GroupVoiceParticipantDto(
+    Guid UserId,
+    string UserName,
+    string? AvatarUrl,
+    DateTime JoinedAt,
+    DateTime LastSeenAt,
+    bool IsActive
+);
+
+public record GroupVoiceStateDto(
+    Guid GroupId,
+    bool IsActive,
+    Guid? SessionId,
+    string? RoomName,
+    Guid? StartedByUserId,
+    DateTime? StartedAt,
+    int ActiveParticipantCount,
+    IReadOnlyList<GroupVoiceParticipantDto> Participants
+);
+
+public record GroupVoiceJoinResponse(
+    string LiveKitUrl,
+    string RoomName,
+    string Token,
+    Guid SessionId,
+    bool IsNewSession,
+    GroupVoiceStateDto State
+);
+
+public record GroupVoiceStateChangedDto(Guid GroupId, GroupVoiceStateDto State);
+public record GroupVoiceParticipantChangedDto(Guid GroupId, Guid SessionId, Guid UserId, GroupVoiceStateDto State);
