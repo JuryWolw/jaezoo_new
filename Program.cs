@@ -200,6 +200,8 @@ using (var scope = app.Services.CreateScope())
 
     await db.Database.MigrateAsync();
 
+    await EnsureGroupVoiceTablesAsync(db, logger);
+
     if (db.Database.IsNpgsql())
     {
         try
@@ -287,3 +289,89 @@ app.MapHub<CallsHub>("/hubs/calls");
 app.MapGet("/", () => Results.Redirect("/swagger"));
 
 app.Run();
+
+static async Task EnsureGroupVoiceTablesAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "GroupVoiceSessions" (
+                    "Id" uuid NOT NULL,
+                    "GroupChatId" uuid NOT NULL,
+                    "RoomName" character varying(160) NOT NULL,
+                    "StartedByUserId" uuid NOT NULL,
+                    "StartedAt" timestamp with time zone NOT NULL,
+                    "LastActivityAt" timestamp with time zone NOT NULL,
+                    "EndedAt" timestamp with time zone NULL,
+                    "State" integer NOT NULL,
+                    CONSTRAINT "PK_GroupVoiceSessions" PRIMARY KEY ("Id"),
+                    CONSTRAINT "FK_GroupVoiceSessions_GroupChats_GroupChatId" FOREIGN KEY ("GroupChatId") REFERENCES "GroupChats" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS "GroupVoiceParticipants" (
+                    "Id" uuid NOT NULL,
+                    "SessionId" uuid NOT NULL,
+                    "GroupChatId" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "JoinedAt" timestamp with time zone NOT NULL,
+                    "LastSeenAt" timestamp with time zone NOT NULL,
+                    "LeftAt" timestamp with time zone NULL,
+                    "IsActive" boolean NOT NULL,
+                    "ClientInfo" character varying(256) NULL,
+                    CONSTRAINT "PK_GroupVoiceParticipants" PRIMARY KEY ("Id"),
+                    CONSTRAINT "FK_GroupVoiceParticipants_GroupChats_GroupChatId" FOREIGN KEY ("GroupChatId") REFERENCES "GroupChats" ("Id") ON DELETE CASCADE,
+                    CONSTRAINT "FK_GroupVoiceParticipants_GroupVoiceSessions_SessionId" FOREIGN KEY ("SessionId") REFERENCES "GroupVoiceSessions" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS "IX_GroupVoiceSessions_GroupChatId_State_StartedAt" ON "GroupVoiceSessions" ("GroupChatId", "State", "StartedAt");
+                CREATE INDEX IF NOT EXISTS "IX_GroupVoiceParticipants_GroupChatId_IsActive_LastSeenAt" ON "GroupVoiceParticipants" ("GroupChatId", "IsActive", "LastSeenAt");
+                CREATE INDEX IF NOT EXISTS "IX_GroupVoiceParticipants_GroupChatId" ON "GroupVoiceParticipants" ("GroupChatId");
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_GroupVoiceParticipants_SessionId_UserId" ON "GroupVoiceParticipants" ("SessionId", "UserId");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "GroupVoiceSessions" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_GroupVoiceSessions" PRIMARY KEY,
+                    "GroupChatId" TEXT NOT NULL,
+                    "RoomName" TEXT NOT NULL,
+                    "StartedByUserId" TEXT NOT NULL,
+                    "StartedAt" TEXT NOT NULL,
+                    "LastActivityAt" TEXT NOT NULL,
+                    "EndedAt" TEXT NULL,
+                    "State" INTEGER NOT NULL,
+                    CONSTRAINT "FK_GroupVoiceSessions_GroupChats_GroupChatId" FOREIGN KEY ("GroupChatId") REFERENCES "GroupChats" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS "GroupVoiceParticipants" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_GroupVoiceParticipants" PRIMARY KEY,
+                    "SessionId" TEXT NOT NULL,
+                    "GroupChatId" TEXT NOT NULL,
+                    "UserId" TEXT NOT NULL,
+                    "JoinedAt" TEXT NOT NULL,
+                    "LastSeenAt" TEXT NOT NULL,
+                    "LeftAt" TEXT NULL,
+                    "IsActive" INTEGER NOT NULL,
+                    "ClientInfo" TEXT NULL,
+                    CONSTRAINT "FK_GroupVoiceParticipants_GroupChats_GroupChatId" FOREIGN KEY ("GroupChatId") REFERENCES "GroupChats" ("Id") ON DELETE CASCADE,
+                    CONSTRAINT "FK_GroupVoiceParticipants_GroupVoiceSessions_SessionId" FOREIGN KEY ("SessionId") REFERENCES "GroupVoiceSessions" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS "IX_GroupVoiceSessions_GroupChatId_State_StartedAt" ON "GroupVoiceSessions" ("GroupChatId", "State", "StartedAt");
+                CREATE INDEX IF NOT EXISTS "IX_GroupVoiceParticipants_GroupChatId_IsActive_LastSeenAt" ON "GroupVoiceParticipants" ("GroupChatId", "IsActive", "LastSeenAt");
+                CREATE INDEX IF NOT EXISTS "IX_GroupVoiceParticipants_GroupChatId" ON "GroupVoiceParticipants" ("GroupChatId");
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_GroupVoiceParticipants_SessionId_UserId" ON "GroupVoiceParticipants" ("SessionId", "UserId");
+                """);
+        }
+
+        logger.LogInformation("Group voice schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure group voice schema.");
+        throw;
+    }
+}

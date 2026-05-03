@@ -1,10 +1,14 @@
 using System;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using JaeZoo.Server.Data;
 
 #nullable disable
 
 namespace JaeZoo.Server.Migrations
 {
+    [DbContext(typeof(AppDbContext))]
+    [Migration("20260503190000_AddGroupVoiceSessions")]
     public partial class AddGroupVoiceSessions : Migration
     {
         protected override void Up(MigrationBuilder migrationBuilder)
