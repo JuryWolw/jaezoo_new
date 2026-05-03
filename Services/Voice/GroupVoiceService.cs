@@ -146,6 +146,36 @@ public sealed class GroupVoiceService(
         return await GetStateAsync(groupId, userId, ct: ct);
     }
 
+    public async Task<GroupVoiceStateDto> EndAsync(Guid groupId, Guid userId, CancellationToken ct = default)
+    {
+        await EnsureMemberAsync(groupId, userId, ct);
+
+        var session = await db.GroupVoiceSessions
+            .Where(s => s.GroupChatId == groupId && s.State == GroupVoiceSessionState.Active)
+            .OrderByDescending(s => s.StartedAt)
+            .FirstOrDefaultAsync(ct);
+
+        if (session is not null)
+        {
+            var now = DateTime.UtcNow;
+            var participants = await db.GroupVoiceParticipants
+                .Where(p => p.SessionId == session.Id && p.IsActive)
+                .ToListAsync(ct);
+
+            foreach (var participant in participants)
+            {
+                participant.IsActive = false;
+                participant.LeftAt = now;
+                participant.LastSeenAt = now;
+            }
+
+            EndSession(session, now);
+            await db.SaveChangesAsync(ct);
+        }
+
+        return await GetStateAsync(groupId, userId, skipCleanup: true, ct);
+    }
+
     public async Task<GroupVoiceStateDto> GetStateAsync(Guid groupId, Guid userId, bool skipCleanup = false, CancellationToken ct = default)
     {
         await EnsureMemberAsync(groupId, userId, ct);
@@ -232,7 +262,7 @@ public sealed class GroupVoiceService(
             }
 
             var hasActiveParticipants = await db.GroupVoiceParticipants
-                .AnyAsync(p => p.SessionId == session.Id && p.IsActive, ct);
+                .AnyAsync(p => p.SessionId == session.Id && p.IsActive && p.LastSeenAt >= cutoff, ct);
 
             if (!hasActiveParticipants)
                 EndSession(session, now);

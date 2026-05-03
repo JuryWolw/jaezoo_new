@@ -37,17 +37,19 @@ public sealed class GroupVoiceController(
         {
             ok = true,
             feature = "group-voice-livekit",
-            version = "fix3-absolute-routes",
+            version = "fix5-group-voice-end-flat-events",
             routes = new[]
             {
                 "/api/chat/groups/{groupId}/voice/state",
                 "/api/chat/groups/{groupId}/voice/join",
                 "/api/chat/groups/{groupId}/voice/heartbeat",
                 "/api/chat/groups/{groupId}/voice/leave",
+                "/api/chat/groups/{groupId}/voice/end",
                 "/api/groups/{groupId}/voice/state",
                 "/api/groups/{groupId}/voice/join",
                 "/api/groups/{groupId}/voice/heartbeat",
-                "/api/groups/{groupId}/voice/leave"
+                "/api/groups/{groupId}/voice/leave",
+                "/api/groups/{groupId}/voice/end"
             }
         });
 
@@ -123,10 +125,26 @@ public sealed class GroupVoiceController(
         }
     }
 
+    [HttpPost("/api/chat/groups/{groupId:guid}/voice/end")]
+    [HttpPost("/api/groups/{groupId:guid}/voice/end")]
+    public async Task<ActionResult<GroupVoiceStateDto>> End(Guid groupId, CancellationToken ct)
+    {
+        try
+        {
+            var state = await voice.EndAsync(groupId, MeId, ct);
+            await BroadcastStateAsync(groupId, state, "GroupVoiceEnded", ct);
+            return Ok(state);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
     private async Task BroadcastStateAsync(Guid groupId, GroupVoiceStateDto state, string eventName, CancellationToken ct)
     {
         var memberIds = await voice.GetGroupMemberIdsAsync(groupId, ct);
-        var payload = new GroupVoiceStateChangedDto(groupId, state);
+        var payload = ToRealtimePayload(groupId, state);
         foreach (var memberId in memberIds)
         {
             await hub.Clients.User(memberId.ToString()).SendAsync(eventName, payload, ct);
@@ -140,8 +158,22 @@ public sealed class GroupVoiceController(
             return;
 
         var memberIds = await voice.GetGroupMemberIdsAsync(groupId, ct);
-        var payload = new GroupVoiceParticipantChangedDto(groupId, sessionId, userId, state);
+        var payload = ToRealtimePayload(groupId, state, userId);
         foreach (var memberId in memberIds)
             await hub.Clients.User(memberId.ToString()).SendAsync(eventName, payload, ct);
     }
+
+    private static object ToRealtimePayload(Guid groupId, GroupVoiceStateDto state, Guid? userId = null)
+        => new
+        {
+            GroupId = groupId,
+            SessionId = state.SessionId,
+            IsActive = state.IsActive,
+            RoomName = state.RoomName,
+            StartedByUserId = state.StartedByUserId,
+            StartedAtUtc = state.StartedAt,
+            ParticipantCount = state.ActiveParticipantCount,
+            UserId = userId,
+            Participants = state.Participants
+        };
 }
