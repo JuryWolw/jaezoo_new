@@ -56,7 +56,21 @@ public sealed class CallsController : ControllerBase
 
     [HttpGet("ice-config")]
     public ActionResult<IceConfigResponse> GetIceConfig()
-        => Ok(_turn.CreateForUser(MeId));
+    {
+        try
+        {
+            return Ok(_turn.CreateForUser(MeId));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { message = ex.Message, diagnostics = _turn.GetDiagnostics() });
+        }
+    }
+
+    [HttpGet("diagnostics")]
+    [AllowAnonymous]
+    public ActionResult<TurnDiagnosticsResponse> GetDiagnostics()
+        => Ok(_turn.GetDiagnostics());
 
     [HttpGet("active")]
     public ActionResult<IEnumerable<StartCallResponse>> GetActive()
@@ -87,6 +101,14 @@ public sealed class CallsController : ControllerBase
 
         if (!areFriends)
             return Forbid();
+
+        var turnDiagnostics = _turn.GetDiagnostics();
+        if (!turnDiagnostics.Configured)
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                message = "Private calls are temporarily unavailable: TURN is not configured on the server.",
+                diagnostics = turnDiagnostics
+            });
 
         var caller = await _db.Users.AsNoTracking().FirstAsync(u => u.Id == me, ct);
 

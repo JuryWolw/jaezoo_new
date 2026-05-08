@@ -58,7 +58,17 @@ public sealed class CallsHub : Hub
         return base.OnDisconnectedAsync(exception);
     }
 
-    public Task<IceConfigResponse> GetIceConfig() => Task.FromResult(_turn.CreateForUser(MeId));
+    public Task<IceConfigResponse> GetIceConfig()
+    {
+        try
+        {
+            return Task.FromResult(_turn.CreateForUser(MeId));
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new HubException(ex.Message);
+        }
+    }
 
     public async Task AcceptCall(AcceptCallRequest request)
     {

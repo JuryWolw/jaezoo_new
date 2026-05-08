@@ -57,6 +57,19 @@ public sealed class IceConfigResponse
     }
 }
 
+
+public sealed class TurnDiagnosticsResponse
+{
+    public bool Configured { get; set; }
+    public bool HasSecret { get; set; }
+    public bool SecretLooksLikePlaceholder { get; set; }
+    public int TtlSeconds { get; set; }
+    public DateTime? SampleExpiresAtUtc { get; set; }
+    public string Realm { get; set; } = string.Empty;
+    public string[] Urls { get; set; } = Array.Empty<string>();
+    public string[] Problems { get; set; } = Array.Empty<string>();
+}
+
 public sealed class StartCallRequest
 {
     public Guid PeerUserId { get; set; }
