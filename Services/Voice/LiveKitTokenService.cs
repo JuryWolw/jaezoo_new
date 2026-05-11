@@ -17,12 +17,14 @@ public sealed class LiveKitTokenService(IOptions<LiveKitOptions> options)
     public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(_options.Url) &&
         !string.IsNullOrWhiteSpace(_options.ApiKey) &&
-        !string.IsNullOrWhiteSpace(_options.ApiSecret);
+        !string.IsNullOrWhiteSpace(_options.ApiSecret) &&
+        !LooksLikePlaceholder(_options.ApiKey) &&
+        !LooksLikePlaceholder(_options.ApiSecret);
 
     public string CreateJoinToken(User user, Guid groupId, Guid sessionId, string roomName)
     {
         if (!IsConfigured)
-            throw new InvalidOperationException("LiveKit is not configured. Set LiveKit:Url, LiveKit:ApiKey and LiveKit:ApiSecret.");
+            throw new InvalidOperationException("LiveKit is not configured. Set LiveKit__Url, LiveKit__ApiKey and LiveKit__ApiSecret.");
 
         var now = DateTimeOffset.UtcNow;
         var ttl = TimeSpan.FromMinutes(Math.Clamp(_options.TokenTtlMinutes, 5, 24 * 60));
@@ -68,6 +70,15 @@ public sealed class LiveKitTokenService(IOptions<LiveKitOptions> options)
     }
 
     public static string BuildGroupRoomName(Guid groupId) => $"group-{groupId:N}-voice";
+
+    private static bool LooksLikePlaceholder(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        return value.Contains("SET_", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("placeholder", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("<secret", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static string NormalizeUrl(string? url)
     {
