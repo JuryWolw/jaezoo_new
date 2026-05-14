@@ -153,6 +153,87 @@ public class ChatHub : Hub
         await SendMessage(targetUserId, new SendMessageRequest(text, fileIds));
     }
 
+
+    // ===== Typing indicators =====
+    // These hub methods are transient realtime signals only: they do not create messages
+    // and do not touch unread counters/history.
+    public async Task SetTyping(Guid targetUserId, bool isTyping)
+    {
+        var me = MeId;
+        if (targetUserId == Guid.Empty || targetUserId == me)
+            return;
+
+        if (!await _chat.AreFriends(me, targetUserId, Context.ConnectionAborted))
+            throw new HubException("Вы не друзья.");
+
+        await Clients.User(targetUserId.ToString()).SendAsync(
+            "TypingChanged",
+            me.ToString("D"),
+            isTyping,
+            Context.ConnectionAborted);
+    }
+
+    public Task TypingStarted(Guid targetUserId) => SetTyping(targetUserId, true);
+    public Task TypingStopped(Guid targetUserId) => SetTyping(targetUserId, false);
+    public Task UserTyping(Guid targetUserId) => SetTyping(targetUserId, true);
+    public Task UserStoppedTyping(Guid targetUserId) => SetTyping(targetUserId, false);
+    public Task SendTyping(Guid targetUserId, bool isTyping) => SetTyping(targetUserId, isTyping);
+    public Task NotifyTyping(Guid targetUserId, bool isTyping) => SetTyping(targetUserId, isTyping);
+    public Task UpdateTyping(Guid targetUserId, bool isTyping) => SetTyping(targetUserId, isTyping);
+    public Task SendTypingStatus(Guid targetUserId, bool isTyping) => SetTyping(targetUserId, isTyping);
+    public Task TypingChanged(Guid targetUserId, bool isTyping) => SetTyping(targetUserId, isTyping);
+    public Task Typing(Guid targetUserId, bool isTyping) => SetTyping(targetUserId, isTyping);
+    public Task DirectTyping(Guid targetUserId, bool isTyping) => SetTyping(targetUserId, isTyping);
+    public Task SendDirectTyping(Guid targetUserId, bool isTyping) => SetTyping(targetUserId, isTyping);
+
+    public async Task SetGroupTyping(Guid groupId, bool isTyping)
+    {
+        var me = MeId;
+        if (groupId == Guid.Empty)
+            return;
+
+        if (!await _groupChats.IsMemberAsync(groupId, me, Context.ConnectionAborted))
+            throw new HubException("Групповой чат не найден.");
+
+        var meUser = await _db.Users.AsNoTracking()
+            .Where(u => u.Id == me)
+            .Select(u => new { u.DisplayName, u.UserName })
+            .FirstOrDefaultAsync(Context.ConnectionAborted);
+
+        var displayName = meUser is null
+            ? "пользователь"
+            : (string.IsNullOrWhiteSpace(meUser.DisplayName) ? meUser.UserName : meUser.DisplayName!);
+
+        if (string.IsNullOrWhiteSpace(displayName))
+            displayName = "пользователь";
+
+        var memberIds = await _db.GroupChatMembers.AsNoTracking()
+            .Where(m => m.GroupChatId == groupId && m.UserId != me)
+            .Select(m => m.UserId)
+            .ToListAsync(Context.ConnectionAborted);
+
+        foreach (var memberId in memberIds)
+        {
+            await Clients.User(memberId.ToString()).SendAsync(
+                "GroupTypingChanged",
+                groupId.ToString("D"),
+                me.ToString("D"),
+                displayName,
+                isTyping,
+                Context.ConnectionAborted);
+        }
+    }
+
+    public Task GroupTypingStarted(Guid groupId) => SetGroupTyping(groupId, true);
+    public Task GroupTypingStopped(Guid groupId) => SetGroupTyping(groupId, false);
+    public Task GroupUserTyping(Guid groupId) => SetGroupTyping(groupId, true);
+    public Task GroupUserStoppedTyping(Guid groupId) => SetGroupTyping(groupId, false);
+    public Task SendGroupTyping(Guid groupId, bool isTyping) => SetGroupTyping(groupId, isTyping);
+    public Task NotifyGroupTyping(Guid groupId, bool isTyping) => SetGroupTyping(groupId, isTyping);
+    public Task GroupTypingChanged(Guid groupId, bool isTyping) => SetGroupTyping(groupId, isTyping);
+    public Task GroupTyping(Guid groupId, bool isTyping) => SetGroupTyping(groupId, isTyping);
+    public Task SendGroupTypingStatus(Guid groupId, bool isTyping) => SetGroupTyping(groupId, isTyping);
+
     public async Task ForwardMessages(Guid targetUserId, ForwardMessagesRequest request)
     {
         try
