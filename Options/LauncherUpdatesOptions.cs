@@ -16,7 +16,9 @@ public sealed class LauncherUpdatesOptions
     public string? ClientManifestKey { get; set; }
     public string? LauncherManifestKey { get; set; }
 
-    // CDN package delivery for setup/bootstrap.
+    // CDN package delivery for setup/bootstrap. If disabled or not configured,
+    // package endpoints return an S3 pre-signed URL instead of a CDN token URL.
+    public bool UseCdnForPackages { get; set; } = false;
     public string CdnBaseUrl { get; set; } = string.Empty;
     public string CdnSecureKey { get; set; } = string.Empty;
     public string? PackageKey { get; set; }

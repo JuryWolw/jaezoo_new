@@ -77,14 +77,24 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
     {
         _ = cancellationToken;
 
-        if (string.IsNullOrWhiteSpace(_options.CdnBaseUrl))
-            throw new InvalidOperationException("LauncherUpdates:CdnBaseUrl is missing.");
-
-        if (string.IsNullOrWhiteSpace(_options.CdnSecureKey))
-            throw new InvalidOperationException("LauncherUpdates:CdnSecureKey is missing.");
-
         var normalizedChannel = NormalizeChannel(channel);
-        var packagePath = "/" + BuildPackageKey(target, normalizedChannel).TrimStart('/');
+        var packageKey = BuildPackageKey(target, normalizedChannel);
+
+        if (!_options.UseCdnForPackages || string.IsNullOrWhiteSpace(_options.CdnBaseUrl) || string.IsNullOrWhiteSpace(_options.CdnSecureKey))
+        {
+            var request = new GetPreSignedUrlRequest
+            {
+                BucketName = _options.Bucket,
+                Key = packageKey,
+                Expires = DateTime.UtcNow.AddSeconds(Math.Max(30, _options.PackageUrlTtlSeconds)),
+                Verb = HttpVerb.GET,
+                Protocol = Protocol.HTTPS
+            };
+
+            return Task.FromResult(_s3.GetPreSignedURL(request));
+        }
+
+        var packagePath = "/" + packageKey.TrimStart('/');
         var baseUrl = _options.CdnBaseUrl.TrimEnd('/');
         var expires = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + Math.Max(30, _options.PackageUrlTtlSeconds);
 
