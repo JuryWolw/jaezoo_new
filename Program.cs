@@ -13,6 +13,7 @@ using System.Threading.RateLimiting;
 using Amazon.Runtime;
 using Amazon.S3;
 using JaeZoo.Server.Services.Storage;
+using JaeZoo.Server.Services.Ads;
 using JaeZoo.Server.Services.Calls;
 using JaeZoo.Server.Services.Chat;
 using JaeZoo.Server.Options;
@@ -84,6 +85,10 @@ builder.Services.AddScoped<GroupChatService>();
 builder.Services.Configure<LauncherUpdatesOptions>(
     builder.Configuration.GetSection("LauncherUpdates"));
 builder.Services.AddSingleton<ILauncherUpdateService, LauncherUpdateService>();
+
+// ---------- Ads ----------
+builder.Services.Configure<AdsOptions>(builder.Configuration.GetSection("Ads"));
+builder.Services.AddSingleton<IAdsService, AdsService>();
 
 // ---------- MVC + SignalR ----------
 builder.Services.AddControllers()
