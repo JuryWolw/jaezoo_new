@@ -1,4 +1,5 @@
-﻿using JaeZoo.Server.Data;
+﻿using System.ComponentModel.DataAnnotations;
+using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -17,56 +18,138 @@ public class AuthController(AppDbContext db, TokenService tokens) : ControllerBa
     private readonly PasswordHasher<User> _hasher = new();
 
     [HttpPost("register")]
-    public async Task<IActionResult> Register([FromBody] RegisterRequest r)
+    public async Task<IActionResult> Register([FromBody] RegisterRequest r, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(r.UserName) || string.IsNullOrWhiteSpace(r.Email) ||
-            string.IsNullOrWhiteSpace(r.Password) || string.IsNullOrWhiteSpace(r.ConfirmPassword))
-            return BadRequest("Заполните все поля.");
+        var login = (r.Login ?? r.UserName ?? string.Empty).Trim();
+        var email = (r.Email ?? string.Empty).Trim();
+        var password = r.Password ?? string.Empty;
+        var confirmPassword = r.ConfirmPassword ?? string.Empty;
 
-        if (r.Password != r.ConfirmPassword)
+        if (string.IsNullOrWhiteSpace(login) || string.IsNullOrWhiteSpace(email) ||
+            string.IsNullOrWhiteSpace(password) || string.IsNullOrWhiteSpace(confirmPassword))
+            return BadRequest("Заполните логин, почту и пароль.");
+
+        if (!UserIdentityService.IsValidLogin(login))
+            return BadRequest("Логин должен быть 3-32 символа: латиница, цифры, точка, дефис или подчёркивание.");
+
+        if (!new EmailAddressAttribute().IsValid(email))
+            return BadRequest("Некорректный адрес почты.");
+
+        if (password.Length < 8)
+            return BadRequest("Пароль должен быть не короче 8 символов.");
+
+        if (password != confirmPassword)
             return BadRequest("Пароли не совпадают.");
 
-        if (await db.Users.AnyAsync(u => u.UserName == r.UserName))
+        var loginNormalized = UserIdentityService.NormalizeLogin(login);
+        var emailNormalized = UserIdentityService.NormalizeEmail(email);
+
+        if (await db.Users.AnyAsync(u => u.LoginNormalized == loginNormalized || u.UserName.ToUpper() == loginNormalized, ct))
             return Conflict("Пользователь с таким логином уже существует.");
 
-        if (await db.Users.AnyAsync(u => u.Email == r.Email))
+        if (await db.Users.AnyAsync(u => u.EmailNormalized == emailNormalized || u.Email.ToUpper() == emailNormalized, ct))
             return Conflict("Пользователь с такой почтой уже существует.");
 
-        var user = new User { UserName = r.UserName.Trim(), Email = r.Email.Trim() };
-        user.PasswordHash = _hasher.HashPassword(user, r.Password);
-        db.Users.Add(user);
-        await db.SaveChangesAsync();
+        var now = DateTime.UtcNow;
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            UserName = login, // legacy поле: пока держим приватный login для старого кода/миграций
+            Login = login,
+            LoginNormalized = loginNormalized,
+            Email = email,
+            EmailNormalized = emailNormalized,
+            EmailConfirmed = false,
+            EmailVerifiedAt = null,
+            PublicId = await UserIdentityService.CreateUniquePublicIdAsync(db, ct),
+            DisplayName = UserIdentityService.CreateRandomDisplayName(),
+            AvatarUrl = null,
+            CreatedAt = now,
+            UpdatedAt = now,
+            SecurityStamp = UserIdentityService.NewSecurityStamp(),
+            TokenVersion = 0,
+            IsDisabled = false
+        };
 
-        return Created("", new { message = "Регистрация успешна. Теперь войдите." });
+        user.PasswordHash = _hasher.HashPassword(user, password);
+        db.Users.Add(user);
+        await db.SaveChangesAsync(ct);
+
+        return Created("", new
+        {
+            message = "Регистрация успешна. Войдите и подтвердите почту.",
+            publicId = user.PublicId,
+            displayName = user.DisplayName,
+            emailConfirmed = user.EmailConfirmed
+        });
     }
 
     [HttpPost("login")]
-    public async Task<ActionResult<TokenResponse>> Login([FromBody] LoginRequest r)
+    public async Task<ActionResult<TokenResponse>> Login([FromBody] LoginRequest r, CancellationToken ct)
     {
-        var login = (r.LoginOrEmail ?? "").Trim();
+        var loginOrEmail = r.GetLoginOrEmail();
+        var password = r.Password ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(loginOrEmail) || string.IsNullOrWhiteSpace(password))
+            return Unauthorized("Неверный логин/почта или пароль.");
+
+        var normalized = loginOrEmail.Contains('@')
+            ? UserIdentityService.NormalizeEmail(loginOrEmail)
+            : UserIdentityService.NormalizeLogin(loginOrEmail);
+
         var user = await db.Users.FirstOrDefaultAsync(u =>
-            u.UserName == login || u.Email == login);
+            u.LoginNormalized == normalized ||
+            u.EmailNormalized == normalized ||
+            u.UserName.ToUpper() == normalized ||
+            u.Email.ToUpper() == normalized, ct);
 
         if (user is null)
             return Unauthorized("Неверный логин/почта или пароль.");
 
-        var result = _hasher.VerifyHashedPassword(user, user.PasswordHash, r.Password);
-        if (result is not PasswordVerificationResult.Success)
+        if (user.IsDisabled)
+            return StatusCode(StatusCodes.Status403Forbidden, string.IsNullOrWhiteSpace(user.DisabledReason)
+                ? "Аккаунт отключён."
+                : user.DisabledReason);
+
+        var result = _hasher.VerifyHashedPassword(user, user.PasswordHash, password);
+        if (result is PasswordVerificationResult.Failed)
             return Unauthorized("Неверный логин/почта или пароль.");
 
+        if (result == PasswordVerificationResult.SuccessRehashNeeded)
+            user.PasswordHash = _hasher.HashPassword(user, password);
+
+        user.Login = string.IsNullOrWhiteSpace(user.Login) ? user.UserName : user.Login;
+        user.LoginNormalized = string.IsNullOrWhiteSpace(user.LoginNormalized) ? UserIdentityService.NormalizeLogin(user.Login) : user.LoginNormalized;
+        user.EmailNormalized = string.IsNullOrWhiteSpace(user.EmailNormalized) ? UserIdentityService.NormalizeEmail(user.Email) : user.EmailNormalized;
+        user.DisplayName = string.IsNullOrWhiteSpace(user.DisplayName) ? UserIdentityService.CreateRandomDisplayName() : user.DisplayName;
+        user.PublicId = string.IsNullOrWhiteSpace(user.PublicId) ? await UserIdentityService.CreateUniquePublicIdAsync(db, ct) : user.PublicId;
+        user.SecurityStamp = string.IsNullOrWhiteSpace(user.SecurityStamp) ? UserIdentityService.NewSecurityStamp() : user.SecurityStamp;
+        user.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
         var token = tokens.Create(user);
-        var dto = new UserDto(user.Id, user.UserName, user.Email, user.CreatedAt);
-        return new TokenResponse(token, dto);
+        return new TokenResponse(token, ToUserDto(user));
     }
 
     [Authorize]
     [HttpGet("me")]
-    public async Task<ActionResult<UserDto>> Me([FromServices] AppDbContext db)
+    public async Task<ActionResult<UserDto>> Me(CancellationToken ct)
     {
         var idStr = User.Claims.First(c => c.Type == "sub").Value;
         var id = Guid.Parse(idStr);
-        var u = await db.Users.FindAsync(id);
+        var u = await db.Users.FindAsync(new object?[] { id }, ct);
         if (u is null) return NotFound();
-        return new UserDto(u.Id, u.UserName, u.Email, u.CreatedAt);
+        return ToUserDto(u);
     }
+
+    private static UserDto ToUserDto(User u) => new(
+        u.Id,
+        UserIdentityService.GetPublicName(u),
+        u.Email,
+        u.CreatedAt,
+        UserIdentityService.GetLogin(u),
+        UserIdentityService.GetPublicName(u),
+        u.PublicId,
+        u.EmailConfirmed,
+        u.EmailVerifiedAt,
+        UserIdentityService.GetAvatarUrl(u));
 }

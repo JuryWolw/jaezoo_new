@@ -24,8 +24,22 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     {
         base.OnModelCreating(b);
 
+        b.Entity<User>().Property(u => u.UserName).HasMaxLength(64);
+        b.Entity<User>().Property(u => u.Login).HasMaxLength(64);
+        b.Entity<User>().Property(u => u.LoginNormalized).HasMaxLength(64);
+        b.Entity<User>().Property(u => u.Email).HasMaxLength(128);
+        b.Entity<User>().Property(u => u.EmailNormalized).HasMaxLength(128);
+        b.Entity<User>().Property(u => u.PublicId).HasMaxLength(32);
+        b.Entity<User>().Property(u => u.SecurityStamp).HasMaxLength(64);
+        b.Entity<User>().Property(u => u.DisabledReason).HasMaxLength(256);
+
+        // Старые индексы оставляем, чтобы не ломать существующую схему и код.
+        // Новые проверки уникальности идут по нормализованным полям.
         b.Entity<User>().HasIndex(u => u.UserName).IsUnique();
         b.Entity<User>().HasIndex(u => u.Email).IsUnique();
+        b.Entity<User>().HasIndex(u => u.LoginNormalized).IsUnique();
+        b.Entity<User>().HasIndex(u => u.EmailNormalized).IsUnique();
+        b.Entity<User>().HasIndex(u => u.PublicId).IsUnique();
 
         b.Entity<Friendship>()
             .HasIndex(f => new { f.RequesterId, f.AddresseeId })

@@ -1,7 +1,8 @@
-﻿using System.Security.Claims;
+using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
@@ -67,12 +68,20 @@ public class FriendsController : ControllerBase
             .Distinct()
             .ToListAsync(ct);
 
-        var friends = await _db.Users
+        var users = await _db.Users
             .AsNoTracking()
             .Where(u => friendIds.Contains(u.Id))
-            .OrderBy(u => u.UserName)
-            .Select(u => new FriendDto(u.Id, u.UserName, u.Email, u.AvatarUrl))
+            .OrderBy(u => u.DisplayName)
             .ToListAsync(ct);
+
+        var friends = users.Select(u => new FriendDto(
+                u.Id,
+                UserIdentityService.GetPublicName(u),
+                string.Empty,
+                UserIdentityService.GetAvatarUrl(u),
+                UserIdentityService.GetPublicName(u),
+                u.PublicId))
+            .ToList();
 
         return Ok(friends);
     }
@@ -201,21 +210,26 @@ public class FriendsController : ControllerBase
     {
         var me = MeId;
 
-        var list = await _db.Friendships
+        var rows = await _db.Friendships
             .AsNoTracking()
             .Where(f => f.Status == FriendshipStatus.Pending && f.AddresseeId == me)
             .OrderByDescending(f => f.CreatedAt)
             .Join(_db.Users.AsNoTracking(),
                   f => f.RequesterId,
                   u => u.Id,
-                  (f, u) => new FriendRequestDto(
-                      f.Id,
-                      u.Id,
-                      u.UserName,
-                      u.Email,
-                      f.CreatedAt,
-                      "incoming"))
+                  (f, u) => new { Friendship = f, User = u })
             .ToListAsync(ct);
+
+        var list = rows.Select(x => new FriendRequestDto(
+                x.Friendship.Id,
+                x.User.Id,
+                UserIdentityService.GetPublicName(x.User),
+                string.Empty,
+                x.Friendship.CreatedAt,
+                "incoming",
+                UserIdentityService.GetPublicName(x.User),
+                x.User.PublicId))
+            .ToList();
 
         return Ok(list);
     }
@@ -229,21 +243,26 @@ public class FriendsController : ControllerBase
     {
         var me = MeId;
 
-        var list = await _db.Friendships
+        var rows = await _db.Friendships
             .AsNoTracking()
             .Where(f => f.Status == FriendshipStatus.Pending && f.RequesterId == me)
             .OrderByDescending(f => f.CreatedAt)
             .Join(_db.Users.AsNoTracking(),
                   f => f.AddresseeId,
                   u => u.Id,
-                  (f, u) => new FriendRequestDto(
-                      f.Id,
-                      u.Id,
-                      u.UserName,
-                      u.Email,
-                      f.CreatedAt,
-                      "outgoing"))
+                  (f, u) => new { Friendship = f, User = u })
             .ToListAsync(ct);
+
+        var list = rows.Select(x => new FriendRequestDto(
+                x.Friendship.Id,
+                x.User.Id,
+                UserIdentityService.GetPublicName(x.User),
+                string.Empty,
+                x.Friendship.CreatedAt,
+                "outgoing",
+                UserIdentityService.GetPublicName(x.User),
+                x.User.PublicId))
+            .ToList();
 
         return Ok(list);
     }

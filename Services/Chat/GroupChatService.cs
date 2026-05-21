@@ -1,5 +1,6 @@
-using JaeZoo.Server.Data;
+﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Services;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Services.Chat;
@@ -334,25 +335,33 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
     public async Task<List<GroupChatMemberDto>> GetMemberDtosAsync(Guid groupId, CancellationToken ct = default)
     {
-        return await (
+        var rows = await (
             from m in db.GroupChatMembers.AsNoTracking()
             join u in db.Users.AsNoTracking() on m.UserId equals u.Id
             join g in db.GroupChats.AsNoTracking() on m.GroupChatId equals g.Id
             where m.GroupChatId == groupId
             orderby m.JoinedAt, m.Id
-            select new GroupChatMemberDto(
-                u.Id,
-                u.UserName,
-                u.Email,
-                u.AvatarUrl,
-                m.JoinedAt,
-                g.OwnerId == u.Id,
-                g.OwnerId == u.Id ? GroupChatRole.Admin : m.Role,
-                GroupChatRoleInfo.GetDisplayName(g.OwnerId == u.Id ? GroupChatRole.Admin : m.Role),
-                GroupChatRoleInfo.GetColorHex(g.OwnerId == u.Id ? GroupChatRole.Admin : m.Role),
-                GroupChatRoleInfo.GetColorName(g.OwnerId == u.Id ? GroupChatRole.Admin : m.Role)
-            )
+            select new { Member = m, User = u, Group = g }
         ).ToListAsync(ct);
+
+        return rows.Select(x =>
+        {
+            var role = x.Group.OwnerId == x.User.Id ? GroupChatRole.Admin : x.Member.Role;
+            var publicName = UserIdentityService.GetPublicName(x.User);
+            return new GroupChatMemberDto(
+                x.User.Id,
+                publicName,
+                string.Empty,
+                UserIdentityService.GetAvatarUrl(x.User),
+                x.Member.JoinedAt,
+                x.Group.OwnerId == x.User.Id,
+                role,
+                GroupChatRoleInfo.GetDisplayName(role),
+                GroupChatRoleInfo.GetColorHex(role),
+                GroupChatRoleInfo.GetColorName(role),
+                publicName,
+                x.User.PublicId);
+        }).ToList();
     }
 
     public async Task<GroupChatSummaryDto?> GetSummaryAsync(Guid groupId, Guid me, CancellationToken ct = default)

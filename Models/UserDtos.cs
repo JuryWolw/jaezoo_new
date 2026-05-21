@@ -1,11 +1,11 @@
-﻿using System;
+using System;
 
 namespace JaeZoo.Server.Models
 {
     // Приватный профиль (для себя)
     public record UserProfileDto(
         Guid Id,
-        string UserName,
+        string Login,
         string Email,
         string? DisplayName,
         string? AvatarUrl,
@@ -13,18 +13,23 @@ namespace JaeZoo.Server.Models
         UserStatus Status,
         string? CustomStatus,
         DateTime CreatedAt,
-        DateTime? LastSeen
+        DateTime? LastSeen,
+        string PublicId,
+        bool EmailConfirmed,
+        DateTime? EmailVerifiedAt,
+        string? ProfileBannerUrl = null
     );
 
     // Публичный профиль (для других)
     public record PublicUserDto(
         Guid Id,
-        string UserName,
+        string PublicId,
         string? DisplayName,
         string? AvatarUrl,
         UserStatus Status,
         string? CustomStatus,
-        DateTime? LastSeen
+        DateTime? LastSeen,
+        string? ProfileBannerUrl = null
     );
 
     // Обновления профиля

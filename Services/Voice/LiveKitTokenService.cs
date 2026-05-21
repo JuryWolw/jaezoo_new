@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Services;
 using JaeZoo.Server.Options;
 using Microsoft.Extensions.Options;
 
@@ -33,14 +34,15 @@ public sealed class LiveKitTokenService(IOptions<LiveKitOptions> options)
         {
             ["iss"] = _options.ApiKey,
             ["sub"] = user.Id.ToString(),
-            ["name"] = user.UserName,
+            ["name"] = UserIdentityService.GetPublicName(user),
             ["iat"] = now.ToUnixTimeSeconds(),
             ["nbf"] = now.AddSeconds(-10).ToUnixTimeSeconds(),
             ["exp"] = now.Add(ttl).ToUnixTimeSeconds(),
             ["metadata"] = JsonSerializer.Serialize(new
             {
                 userId = user.Id,
-                userName = user.UserName,
+                userName = UserIdentityService.GetPublicName(user),
+                publicId = user.PublicId,
                 groupId,
                 sessionId
             }, JsonOptions),

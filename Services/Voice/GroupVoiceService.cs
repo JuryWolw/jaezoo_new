@@ -1,5 +1,6 @@
 ﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Services;
 using JaeZoo.Server.Options;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -201,19 +202,27 @@ public sealed class GroupVoiceService(
                 Array.Empty<GroupVoiceParticipantDto>());
         }
 
-        var participantRows = await (
+        var participantRowsData = await (
             from p in db.GroupVoiceParticipants.AsNoTracking()
             join u in db.Users.AsNoTracking() on p.UserId equals u.Id
             where p.SessionId == session.Id && p.IsActive
-            orderby p.JoinedAt, u.UserName
-            select new GroupVoiceParticipantDto(
-                u.Id,
-                u.UserName,
-                string.IsNullOrWhiteSpace(u.AvatarUrl) ? $"/avatars/{u.Id}" : u.AvatarUrl,
-                p.JoinedAt,
-                p.LastSeenAt,
-                p.IsActive)
+            orderby p.JoinedAt, u.DisplayName
+            select new { Participant = p, User = u }
         ).ToListAsync(ct);
+
+        var participantRows = participantRowsData.Select(x =>
+        {
+            var publicName = UserIdentityService.GetPublicName(x.User);
+            return new GroupVoiceParticipantDto(
+                x.User.Id,
+                publicName,
+                UserIdentityService.GetAvatarUrl(x.User),
+                x.Participant.JoinedAt,
+                x.Participant.LastSeenAt,
+                x.Participant.IsActive,
+                publicName,
+                x.User.PublicId);
+        }).ToList();
 
         var participants = participantRows
             .GroupBy(p => p.UserId)

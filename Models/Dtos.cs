@@ -1,12 +1,62 @@
-namespace JaeZoo.Server.Models;
+﻿namespace JaeZoo.Server.Models;
 
-public record RegisterRequest(string UserName, string Email, string Password, string ConfirmPassword);
-public record LoginRequest(string LoginOrEmail, string Password);
-public record UserDto(Guid Id, string UserName, string Email, DateTime CreatedAt);
+public sealed class RegisterRequest
+{
+    // Новый контракт: Login + Email + Password.
+    // UserName оставлен как legacy alias, чтобы старый WPF-клиент не умер до обновления формы.
+    public string? Login { get; set; }
+    public string? UserName { get; set; }
+    public string? Email { get; set; }
+    public string? Password { get; set; }
+    public string? ConfirmPassword { get; set; }
+}
+
+public sealed class LoginRequest
+{
+    // Новый контракт: LoginOrEmail + Password.
+    // Legacy aliases оставлены, чтобы старые утилиты/клиенты не падали после патча.
+    public string? LoginOrEmail { get; set; }
+    public string? Login { get; set; }
+    public string? UserName { get; set; }
+    public string? Email { get; set; }
+    public string? Password { get; set; }
+
+    public string GetLoginOrEmail() =>
+        (LoginOrEmail ?? Login ?? UserName ?? Email ?? string.Empty).Trim();
+}
+
+public record UserDto(
+    Guid Id,
+    string UserName,          // публичное имя для старого клиента
+    string Email,
+    DateTime CreatedAt,
+    string? Login = null,     // приватный логин, отдаётся только самому себе
+    string? DisplayName = null,
+    string? PublicId = null,
+    bool EmailConfirmed = false,
+    DateTime? EmailVerifiedAt = null,
+    string? AvatarUrl = null
+);
+
 public record TokenResponse(string Token, UserDto User);
 
-public record UserSearchDto(Guid Id, string UserName, string Email, string? AvatarUrl);
-public record FriendDto(Guid Id, string UserName, string Email, string? AvatarUrl);
+public record UserSearchDto(
+    Guid Id,
+    string UserName,          // публичное имя для старого клиента
+    string Email,             // больше не заполняем публично, оставлено для совместимости клиента
+    string? AvatarUrl,
+    string? DisplayName = null,
+    string? PublicId = null
+);
+
+public record FriendDto(
+    Guid Id,
+    string UserName,          // публичное имя для старого клиента
+    string Email,             // больше не заполняем публично, оставлено для совместимости клиента
+    string? AvatarUrl,
+    string? DisplayName = null,
+    string? PublicId = null
+);
 
 public record AttachmentDto(
     Guid Id,
@@ -63,7 +113,9 @@ public record FriendRequestDto(
     string UserName,
     string Email,
     DateTime CreatedAt,
-    string Direction
+    string Direction,
+    string? DisplayName = null,
+    string? PublicId = null
 );
 
 public record FileUploadResponse(
@@ -92,7 +144,9 @@ public record GroupChatMemberDto(
     GroupChatRole Role,
     string RoleName,
     string RoleColorHex,
-    string RoleColorName
+    string RoleColorName,
+    string? DisplayName = null,
+    string? PublicId = null
 );
 
 public record GroupChatSummaryDto(
@@ -141,7 +195,9 @@ public record GroupVoiceParticipantDto(
     string? AvatarUrl,
     DateTime JoinedAt,
     DateTime LastSeenAt,
-    bool IsActive
+    bool IsActive,
+    string? DisplayName = null,
+    string? PublicId = null
 );
 
 public record GroupVoiceStateDto(

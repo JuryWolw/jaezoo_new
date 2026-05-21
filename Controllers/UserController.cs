@@ -5,6 +5,7 @@ using System.Linq;
 using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Services;
 using JaeZoo.Server.Hubs;
 using Microsoft.AspNetCore.SignalR;
 
@@ -51,8 +52,9 @@ namespace JaeZoo.Server.Controllers
                 await _hub.Clients.Users(targets)
                     .SendAsync("UserAvatarChanged", new { userId = userId.ToString(), avatarUrl }, ct);
             }
-            catch
+            catch (Exception ex)
             {
+                _log.LogWarning(ex, "Failed to notify friends about avatar change for user {UserId}.", userId);
                 // не валим запрос из-за уведомлений
             }
         }
@@ -73,30 +75,46 @@ namespace JaeZoo.Server.Controllers
         public async Task<ActionResult<IEnumerable<UserSearchDto>>> Search([FromQuery] string q, CancellationToken ct)
         {
             var meId = MeId;
-            var qLower = (q ?? "").Trim().ToLowerInvariant();
+            var query = (q ?? string.Empty).Trim();
+
+            if (query.Length < 2)
+                return Ok(Array.Empty<UserSearchDto>());
+
+            var qLower = query.ToLowerInvariant();
+            var qUpper = query.ToUpperInvariant();
 
             var prov = _db.Database.ProviderName ?? string.Empty;
-            IQueryable<User> baseQuery = _db.Users.Where(u => u.Id != meId);
+            IQueryable<User> baseQuery = _db.Users.Where(u => u.Id != meId && !u.IsDisabled);
 
+            // В публичном поиске больше нет login/email. Ищем только по нику и PublicId.
             if (prov.Contains("Npgsql", StringComparison.OrdinalIgnoreCase))
             {
                 baseQuery = baseQuery.Where(u =>
-                    EF.Functions.ILike(u.UserName!, $"%{qLower}%") ||
-                    EF.Functions.ILike(u.Email!, $"%{qLower}%"));
+                    EF.Functions.ILike(u.DisplayName!, $"%{query}%") ||
+                    EF.Functions.ILike(u.PublicId!, $"%{query}%"));
             }
             else
             {
                 baseQuery = baseQuery.Where(u =>
-                    (u.UserName ?? "").ToLower().Contains(qLower) ||
-                    (u.Email ?? "").ToLower().Contains(qLower));
+                    (u.DisplayName ?? "").ToLower().Contains(qLower) ||
+                    (u.PublicId ?? "").ToUpper().Contains(qUpper));
             }
 
-            var res = await baseQuery
+            var users = await baseQuery
                 .AsNoTracking()
-                .OrderBy(u => u.UserName)
-                .Select(u => new UserSearchDto(u.Id, u.UserName, u.Email, u.AvatarUrl))
+                .OrderBy(u => u.DisplayName)
                 .Take(25)
                 .ToListAsync(ct);
+
+            var res = users
+                .Select(u => new UserSearchDto(
+                    u.Id,
+                    UserIdentityService.GetPublicName(u),
+                    string.Empty,
+                    UserIdentityService.GetAvatarUrl(u),
+                    UserIdentityService.GetPublicName(u),
+                    u.PublicId))
+                .ToList();
 
             return Ok(res);
         }
@@ -129,12 +147,16 @@ namespace JaeZoo.Server.Controllers
             if (body.DisplayName != null)
             {
                 me.DisplayName = body.DisplayName.Trim();
-                if (me.DisplayName.Length == 0) me.DisplayName = null;
+                if (me.DisplayName.Length == 0) me.DisplayName = UserIdentityService.CreateRandomDisplayName();
+                if (me.DisplayName.Length > 64) return BadRequest("Никнейм не должен быть длиннее 64 символов.");
+                me.UpdatedAt = DateTime.UtcNow;
             }
             if (body.About != null)
             {
                 me.About = body.About.Trim();
                 if (me.About.Length == 0) me.About = null;
+                if (me.About?.Length > 256) return BadRequest("Описание не должно быть длиннее 256 символов.");
+                me.UpdatedAt = DateTime.UtcNow;
             }
 
             await _db.SaveChangesAsync(ct);
@@ -149,6 +171,8 @@ namespace JaeZoo.Server.Controllers
 
             me.Status = body.Status;
             me.CustomStatus = string.IsNullOrWhiteSpace(body.CustomStatus) ? null : body.CustomStatus.Trim();
+            if (me.CustomStatus?.Length > 64) return BadRequest("Статус не должен быть длиннее 64 символов.");
+            me.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync(ct);
             return Ok(ToProfileDto(me));
@@ -160,6 +184,7 @@ namespace JaeZoo.Server.Controllers
         {
             var me = await _db.Users.FirstAsync(u => u.Id == MeId, ct);
             me.AvatarUrl = string.IsNullOrWhiteSpace(body.AvatarUrl) ? null : body.AvatarUrl.Trim();
+            me.UpdatedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync(ct);
 
             await NotifyAvatarChangedAsync(me.Id, string.IsNullOrWhiteSpace(me.AvatarUrl) ? $"/avatars/{me.Id}" : me.AvatarUrl, ct);
@@ -207,6 +232,7 @@ namespace JaeZoo.Server.Controllers
 
             var me = await _db.Users.FirstAsync(u => u.Id == uid, ct);
             me.AvatarUrl = url;
+            me.UpdatedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync(ct);
 
             await NotifyAvatarChangedAsync(uid, url, ct);
@@ -247,19 +273,26 @@ namespace JaeZoo.Server.Controllers
         // ===== helpers =====
         private static UserProfileDto ToProfileDto(User u) =>
             new UserProfileDto(
-                u.Id, u.UserName, u.Email,
-                u.DisplayName,
-                string.IsNullOrWhiteSpace(u.AvatarUrl) ? $"/avatars/{u.Id}" : u.AvatarUrl,
+                u.Id,
+                UserIdentityService.GetLogin(u),
+                u.Email,
+                UserIdentityService.GetPublicName(u),
+                UserIdentityService.GetAvatarUrl(u),
                 u.About,
                 u.Status, u.CustomStatus,
-                u.CreatedAt, u.LastSeen
+                u.CreatedAt, u.LastSeen,
+                u.PublicId,
+                u.EmailConfirmed,
+                u.EmailVerifiedAt
             );
 
         private static PublicUserDto ToPublicDto(User u) =>
             new PublicUserDto(
-                u.Id, u.UserName, u.DisplayName,
-                string.IsNullOrWhiteSpace(u.AvatarUrl) ? $"/avatars/{u.Id}" : u.AvatarUrl,
-                u.Status, u.CustomStatus, u.LastSeen
+                u.Id,
+                u.PublicId,
+                UserIdentityService.GetPublicName(u),
+                UserIdentityService.GetAvatarUrl(u),
+                u.Status, u.CustomStatus, u.ShowOnline ? u.LastSeen : null
             );
     }
 }
