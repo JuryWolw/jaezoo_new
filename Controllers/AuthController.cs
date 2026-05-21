@@ -332,60 +332,6 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
 
 
     [Authorize]
-    [HttpGet("email/status")]
-    [HttpGet("/api/auth/email/status")]
-    public async Task<ActionResult<EmailVerificationStatusDto>> EmailStatus(CancellationToken ct)
-    {
-        if (!TryGetCurrentUserId(out var id))
-            return Unauthorized("Не удалось определить пользователя по токену.");
-
-        var user = await db.Users.FindAsync(new object?[] { id }, ct);
-        if (user is null) return NotFound();
-        return new EmailVerificationStatusDto(user.Email, user.EmailConfirmed, user.EmailVerifiedAt);
-    }
-
-    [Authorize]
-    [HttpPost("email/resend")]
-    [HttpPost("/api/auth/email/resend")]
-    public async Task<ActionResult<ResendEmailConfirmationResponse>> ResendEmailConfirmation(CancellationToken ct)
-    {
-        if (!TryGetCurrentUserId(out var id))
-            return Unauthorized("Не удалось определить пользователя по токену.");
-
-        var user = await db.Users.FindAsync(new object?[] { id }, ct);
-        if (user is null) return NotFound();
-
-        if (user.EmailConfirmed)
-            return BadRequest("Почта уже подтверждена.");
-
-        var result = await emailVerification.SendConfirmationCodeAsync(user, HttpContext, ct);
-        var response = new ResendEmailConfirmationResponse(result.Sent, result.Cooldown, result.RetryAfterSeconds, result.ExpiresAt, result.Message);
-        if (result.Cooldown)
-            return StatusCode(StatusCodes.Status429TooManyRequests, response);
-
-        return response;
-    }
-
-    [Authorize]
-    [HttpPost("email/confirm")]
-    [HttpPost("/api/auth/email/confirm")]
-    public async Task<ActionResult<UserDto>> ConfirmEmail([FromBody] ConfirmEmailRequest r, CancellationToken ct)
-    {
-        try
-        {
-            if (!TryGetCurrentUserId(out var id))
-                return Unauthorized("Не удалось определить пользователя по токену.");
-
-            var user = await emailVerification.ConfirmEmailAsync(id, r.Code ?? string.Empty, ct);
-            return ToUserDto(user);
-        }
-        catch (InvalidOperationException ex)
-        {
-            return BadRequest(ex.Message);
-        }
-    }
-
-    [Authorize]
     [HttpGet("me")]
     public async Task<ActionResult<UserDto>> Me(CancellationToken ct)
     {
