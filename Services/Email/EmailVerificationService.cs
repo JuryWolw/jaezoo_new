@@ -63,14 +63,26 @@ public sealed class EmailVerificationService(
 
         try
         {
-            await emailSender.SendEmailConfirmationCodeAsync(user, code, ct);
+            // Не привязываем SMTP-отправку к RequestAborted: WPF-клиент может отвалиться по таймауту,
+            // а сервер всё равно должен либо нормально отправить письмо, либо очистить созданный код.
+            using var sendCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            await emailSender.SendEmailConfirmationCodeAsync(user, code, sendCts.Token);
+
             logger.LogInformation("Email confirmation code sent. UserId={UserId} Email={Email}", user.Id, user.Email);
             return new EmailVerificationSendResult(true, false, 0, entity.ExpiresAt, "Код отправлен на почту.");
         }
         catch (Exception ex)
         {
-            db.EmailVerificationCodes.Remove(entity);
-            await db.SaveChangesAsync(ct);
+            try
+            {
+                db.EmailVerificationCodes.Remove(entity);
+                await db.SaveChangesAsync(CancellationToken.None);
+            }
+            catch (Exception cleanupEx)
+            {
+                logger.LogWarning(cleanupEx, "Failed to cleanup unsent email confirmation code. CodeId={CodeId} UserId={UserId}", entity.Id, user.Id);
+            }
+
             logger.LogError(ex, "Failed to send email confirmation code. UserId={UserId} Email={Email}", user.Id, user.Email);
             throw;
         }

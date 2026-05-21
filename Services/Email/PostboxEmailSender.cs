@@ -64,7 +64,7 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
             EnableSsl = _options.EnableSsl,
             Credentials = new NetworkCredential(_options.UserName, _options.Password),
             DeliveryMethod = SmtpDeliveryMethod.Network,
-            Timeout = 15000
+            Timeout = 60000
         };
 
         using var reg = ct.Register(() =>
