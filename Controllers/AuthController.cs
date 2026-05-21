@@ -241,7 +241,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     [HttpPost("logout")]
     public async Task<IActionResult> Logout([FromBody] LogoutRequest? r, CancellationToken ct)
     {
-        var uid = GetCurrentUserId();
+        if (!TryGetCurrentUserId(out var uid)) return Unauthorized("Некорректный токен.");
         var refreshToken = (r?.RefreshToken ?? string.Empty).Trim();
         var sid = GetCurrentSessionId();
 
@@ -274,7 +274,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     [HttpPost("logout-all")]
     public async Task<IActionResult> LogoutAll(CancellationToken ct)
     {
-        var uid = GetCurrentUserId();
+        if (!TryGetCurrentUserId(out var uid)) return Unauthorized("Некорректный токен.");
         var currentSid = GetCurrentSessionId();
         var now = DateTime.UtcNow;
 
@@ -293,7 +293,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     [HttpGet("sessions")]
     public async Task<ActionResult<IReadOnlyList<UserSessionDto>>> Sessions(CancellationToken ct)
     {
-        var uid = GetCurrentUserId();
+        if (!TryGetCurrentUserId(out var uid)) return Unauthorized("Некорректный токен.");
         var currentSid = GetCurrentSessionId();
         var now = DateTime.UtcNow;
 
@@ -320,7 +320,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     [HttpDelete("sessions/{sessionId:guid}")]
     public async Task<IActionResult> RevokeSession(Guid sessionId, CancellationToken ct)
     {
-        var uid = GetCurrentUserId();
+        if (!TryGetCurrentUserId(out var uid)) return Unauthorized("Некорректный токен.");
         var session = await db.UserSessions.FirstOrDefaultAsync(s => s.Id == sessionId && s.UserId == uid && s.RevokedAt == null, ct);
         if (session is null)
             return NotFound();
@@ -335,7 +335,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     [HttpGet("email/status")]
     public async Task<ActionResult<EmailVerificationStatusDto>> EmailStatus(CancellationToken ct)
     {
-        var id = GetCurrentUserId();
+        if (!TryGetCurrentUserId(out var id)) return Unauthorized("Некорректный токен.");
         var user = await db.Users.FindAsync(new object?[] { id }, ct);
         if (user is null) return NotFound();
         return new EmailVerificationStatusDto(user.Email, user.EmailConfirmed, user.EmailVerifiedAt);
@@ -345,7 +345,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     [HttpPost("email/resend")]
     public async Task<ActionResult<ResendEmailConfirmationResponse>> ResendEmailConfirmation(CancellationToken ct)
     {
-        var id = GetCurrentUserId();
+        if (!TryGetCurrentUserId(out var id)) return Unauthorized("Некорректный токен.");
         var user = await db.Users.FindAsync(new object?[] { id }, ct);
         if (user is null) return NotFound();
 
@@ -366,7 +366,8 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     {
         try
         {
-            var user = await emailVerification.ConfirmEmailAsync(GetCurrentUserId(), r.Code ?? string.Empty, ct);
+            if (!TryGetCurrentUserId(out var id)) return Unauthorized("Некорректный токен.");
+            var user = await emailVerification.ConfirmEmailAsync(id, r.Code ?? string.Empty, ct);
             return ToUserDto(user);
         }
         catch (InvalidOperationException ex)
@@ -379,16 +380,20 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     [HttpGet("me")]
     public async Task<ActionResult<UserDto>> Me(CancellationToken ct)
     {
-        var id = GetCurrentUserId();
+        if (!TryGetCurrentUserId(out var id)) return Unauthorized("Некорректный токен.");
         var u = await db.Users.FindAsync(new object?[] { id }, ct);
         if (u is null) return NotFound();
         return ToUserDto(u);
     }
 
-    private Guid GetCurrentUserId()
+    private bool TryGetCurrentUserId(out Guid id)
     {
-        var idStr = User.Claims.First(c => c.Type == "sub").Value;
-        return Guid.Parse(idStr);
+        id = Guid.Empty;
+        var idStr = User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? User.FindFirstValue("sub")
+            ?? User.FindFirstValue("nameid");
+
+        return Guid.TryParse(idStr, out id);
     }
 
     private Guid? GetCurrentSessionId()
