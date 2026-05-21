@@ -33,6 +33,25 @@ public sealed class LogoutRequest
     public string? RefreshToken { get; set; }
 }
 
+public sealed class ConfirmEmailRequest
+{
+    public string? Code { get; set; }
+}
+
+public record EmailVerificationStatusDto(
+    string Email,
+    bool EmailConfirmed,
+    DateTime? EmailVerifiedAt
+);
+
+public record ResendEmailConfirmationResponse(
+    bool Sent,
+    bool Cooldown,
+    int RetryAfterSeconds,
+    DateTime? ExpiresAt,
+    string Message
+);
+
 public record UserSessionDto(
     Guid Id,
     DateTime CreatedAt,

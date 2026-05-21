@@ -21,6 +21,7 @@ using JaeZoo.Server.Services.Launcher;
 using JaeZoo.Server.Services.Voice;
 using JaeZoo.Server.Security;
 using JaeZoo.Server.Services.Admin;
+using JaeZoo.Server.Services.Email;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -101,6 +102,12 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy(AuthPolicies.ManageAds, policy => policy.RequireRole(AuthPolicies.AdsManagerRoles));
     options.AddPolicy(AuthPolicies.ViewAdminAudit, policy => policy.RequireRole(AuthPolicies.AuditViewerRoles));
 });
+
+// ---------- Email / Yandex Cloud Postbox ----------
+builder.Services.Configure<PostboxOptions>(builder.Configuration.GetSection("Postbox"));
+builder.Services.AddScoped<IEmailSender, PostboxEmailSender>();
+builder.Services.AddScoped<EmailVerificationService>();
+
 builder.Services.AddScoped<TokenService>();
 builder.Services.AddScoped<DirectChatService>();
 builder.Services.AddScoped<GroupChatService>();

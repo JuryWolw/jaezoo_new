@@ -3,6 +3,7 @@ using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
+using JaeZoo.Server.Services.Email;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -14,7 +15,7 @@ namespace JaeZoo.Server.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [EnableRateLimiting("auth")]
-public class AuthController(AppDbContext db, TokenService tokens) : ControllerBase
+public class AuthController(AppDbContext db, TokenService tokens, EmailVerificationService emailVerification, ILogger<AuthController> log) : ControllerBase
 {
     private readonly PasswordHasher<User> _hasher = new();
 
@@ -76,12 +77,29 @@ public class AuthController(AppDbContext db, TokenService tokens) : ControllerBa
         db.Users.Add(user);
         await db.SaveChangesAsync(ct);
 
+        var emailCodeSent = false;
+        var emailMessage = "Код подтверждения будет отправлен после входа.";
+        try
+        {
+            var send = await emailVerification.SendConfirmationCodeAsync(user, HttpContext, ct);
+            emailCodeSent = send.Sent;
+            emailMessage = send.Message;
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "Failed to send initial email confirmation code. UserId={UserId} Email={Email}", user.Id, user.Email);
+        }
+
         return Created("", new
         {
-            message = "Регистрация успешна. Войдите и подтвердите почту.",
+            message = emailCodeSent
+                ? "Регистрация успешна. Код подтверждения отправлен на почту."
+                : "Регистрация успешна. Войдите и запросите код подтверждения почты.",
             publicId = user.PublicId,
             displayName = user.DisplayName,
-            emailConfirmed = user.EmailConfirmed
+            emailConfirmed = user.EmailConfirmed,
+            emailCodeSent,
+            emailMessage
         });
     }
 
@@ -310,6 +328,51 @@ public class AuthController(AppDbContext db, TokenService tokens) : ControllerBa
         session.RevokedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         return NoContent();
+    }
+
+
+    [Authorize]
+    [HttpGet("email/status")]
+    public async Task<ActionResult<EmailVerificationStatusDto>> EmailStatus(CancellationToken ct)
+    {
+        var id = GetCurrentUserId();
+        var user = await db.Users.FindAsync(new object?[] { id }, ct);
+        if (user is null) return NotFound();
+        return new EmailVerificationStatusDto(user.Email, user.EmailConfirmed, user.EmailVerifiedAt);
+    }
+
+    [Authorize]
+    [HttpPost("email/resend")]
+    public async Task<ActionResult<ResendEmailConfirmationResponse>> ResendEmailConfirmation(CancellationToken ct)
+    {
+        var id = GetCurrentUserId();
+        var user = await db.Users.FindAsync(new object?[] { id }, ct);
+        if (user is null) return NotFound();
+
+        if (user.EmailConfirmed)
+            return BadRequest("Почта уже подтверждена.");
+
+        var result = await emailVerification.SendConfirmationCodeAsync(user, HttpContext, ct);
+        var response = new ResendEmailConfirmationResponse(result.Sent, result.Cooldown, result.RetryAfterSeconds, result.ExpiresAt, result.Message);
+        if (result.Cooldown)
+            return StatusCode(StatusCodes.Status429TooManyRequests, response);
+
+        return response;
+    }
+
+    [Authorize]
+    [HttpPost("email/confirm")]
+    public async Task<ActionResult<UserDto>> ConfirmEmail([FromBody] ConfirmEmailRequest r, CancellationToken ct)
+    {
+        try
+        {
+            var user = await emailVerification.ConfirmEmailAsync(GetCurrentUserId(), r.Code ?? string.Empty, ct);
+            return ToUserDto(user);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ex.Message);
+        }
     }
 
     [Authorize]

@@ -22,6 +22,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<UserRole> UserRoles => Set<UserRole>();
     public DbSet<AdminAuditLog> AdminAuditLogs => Set<AdminAuditLog>();
     public DbSet<UserSession> UserSessions => Set<UserSession>();
+    public DbSet<EmailVerificationCode> EmailVerificationCodes => Set<EmailVerificationCode>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -143,6 +144,35 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .HasOne(s => s.User)
             .WithMany()
             .HasForeignKey(s => s.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<EmailVerificationCode>()
+            .Property(c => c.Purpose)
+            .HasConversion<int>();
+
+        b.Entity<EmailVerificationCode>()
+            .Property(c => c.CodeHash)
+            .HasMaxLength(128);
+
+        b.Entity<EmailVerificationCode>()
+            .Property(c => c.Salt)
+            .HasMaxLength(64);
+
+        b.Entity<EmailVerificationCode>()
+            .Property(c => c.IpAddress)
+            .HasMaxLength(64);
+
+        b.Entity<EmailVerificationCode>()
+            .Property(c => c.UserAgent)
+            .HasMaxLength(256);
+
+        b.Entity<EmailVerificationCode>()
+            .HasIndex(c => new { c.UserId, c.Purpose, c.ConsumedAt, c.ExpiresAt });
+
+        b.Entity<EmailVerificationCode>()
+            .HasOne(c => c.User)
+            .WithMany()
+            .HasForeignKey(c => c.UserId)
             .OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<Friendship>()
