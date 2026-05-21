@@ -7,6 +7,7 @@ using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Hubs;
+using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.SignalR;
 
 namespace JaeZoo.Server.Controllers
@@ -140,6 +141,7 @@ namespace JaeZoo.Server.Controllers
 
         // ===== Обновить профиль =====
         [HttpPut("profile")]
+        [RequireVerifiedEmail]
         public async Task<ActionResult<UserProfileDto>> UpdateProfile([FromBody] UpdateProfileRequest body, CancellationToken ct)
         {
             var me = await _db.Users.FirstAsync(u => u.Id == MeId, ct);
@@ -165,6 +167,7 @@ namespace JaeZoo.Server.Controllers
 
         // ===== Статус =====
         [HttpPut("status")]
+        [RequireVerifiedEmail]
         public async Task<ActionResult<UserProfileDto>> UpdateStatus([FromBody] UpdateStatusRequest body, CancellationToken ct)
         {
             var me = await _db.Users.FirstAsync(u => u.Id == MeId, ct);
@@ -180,6 +183,7 @@ namespace JaeZoo.Server.Controllers
 
         // ===== Установить URL аватара вручную =====
         [HttpPut("avatar/url")]
+        [RequireVerifiedEmail]
         public async Task<ActionResult<UserProfileDto>> SetAvatarUrl([FromBody] SetAvatarUrlRequest body, CancellationToken ct)
         {
             var me = await _db.Users.FirstAsync(u => u.Id == MeId, ct);
@@ -195,6 +199,7 @@ namespace JaeZoo.Server.Controllers
         [Authorize]
         [RequestSizeLimit(5 * 1024 * 1024)] // 5MB
         [HttpPost("avatar/upload")]
+        [RequireVerifiedEmail]
         public async Task<IActionResult> UploadAvatar(IFormFile file, CancellationToken ct)
         {
             if (file == null || file.Length == 0)

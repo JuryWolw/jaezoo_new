@@ -2,6 +2,7 @@ using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services.Chat;
+using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
@@ -44,6 +45,30 @@ public class ChatController(
             return groupDefault;
 
         return Path.Combine(root, "avatars", "default.png");
+    }
+
+    private async Task<bool> IsEmailConfirmedAsync(Guid userId, CancellationToken ct)
+        => await db.Users.AsNoTracking()
+            .Where(u => u.Id == userId)
+            .Select(u => u.EmailConfirmed)
+            .FirstOrDefaultAsync(ct);
+
+    private async Task<ActionResult?> RequireUsersVerifiedAsync(IEnumerable<Guid> userIds, string message, CancellationToken ct)
+    {
+        var ids = userIds.Where(x => x != Guid.Empty).Distinct().ToList();
+        if (ids.Count == 0) return null;
+
+        var confirmedCount = await db.Users.AsNoTracking()
+            .Where(u => ids.Contains(u.Id) && u.EmailConfirmed)
+            .CountAsync(ct);
+
+        if (confirmedCount == ids.Count) return null;
+
+        return StatusCode(StatusCodes.Status403Forbidden, new
+        {
+            code = "email_not_verified",
+            message
+        });
     }
 
     private async Task BroadcastGroupSummaryChanged(Guid groupId, CancellationToken ct)
@@ -201,12 +226,15 @@ public class ChatController(
     }
 
     [HttpPost("send/{friendId:guid}")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<MessageDto>> SendMessage(Guid friendId, [FromBody] SendMessageRequest body, CancellationToken ct)
     {
         try
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
             if (!await chat.AreFriends(MeId, friendId, ct)) return Forbid();
+            var peerVerified = await IsEmailConfirmedAsync(friendId, ct);
+            if (!peerVerified) return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Переписка пока недоступна." });
 
             var created = await chat.CreateMessageAsync(
                 MeId,
@@ -302,6 +330,8 @@ public class ChatController(
                 return BadRequest(new { error = "SystemKey is required." });
 
             if (!await chat.AreFriends(MeId, friendId, ct)) return Forbid();
+            var peerVerified = await IsEmailConfirmedAsync(friendId, ct);
+            if (!peerVerified) return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Переписка пока недоступна." });
 
             var created = await chat.CreateMessageAsync(MeId, friendId, body.Text, null, DirectMessageKind.System, body.SystemKey, null, ct);
             var dto = await chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, ct);
@@ -318,6 +348,7 @@ public class ChatController(
     }
 
     [HttpPost("messages/{messageId:guid}/edit")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<MessageDto>> EditMessage(Guid messageId, [FromBody] EditMessageRequest body, CancellationToken ct)
     {
         try
@@ -362,6 +393,7 @@ public class ChatController(
     }
 
     [HttpPost("messages/{messageId:guid}/delete")]
+    [RequireVerifiedEmail]
     public async Task<IActionResult> DeleteMessage(Guid messageId, CancellationToken ct)
     {
         try
@@ -394,6 +426,7 @@ public class ChatController(
     }
 
     [HttpPost("forward/{friendId:guid}")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<IEnumerable<MessageDto>>> ForwardMessages(Guid friendId, [FromBody] ForwardMessagesRequest body, CancellationToken ct)
     {
         try
@@ -401,6 +434,8 @@ public class ChatController(
             if (body?.MessageIds is null || body.MessageIds.Count == 0)
                 return BadRequest(new { error = "MessageIds are required." });
             if (!await chat.AreFriends(MeId, friendId, ct)) return Forbid();
+            var peerVerified = await IsEmailConfirmedAsync(friendId, ct);
+            if (!peerVerified) return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Пересылка пока недоступна." });
 
             var ids = body.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
             var sources = await (
@@ -499,11 +534,16 @@ public class ChatController(
     }
 
     [HttpPost("groups")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<GroupChatDetailsDto>> CreateGroup([FromBody] CreateGroupChatRequest body, CancellationToken ct)
     {
         try
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
+
+            var memberIds = body.MemberIds ?? Array.Empty<Guid>();
+            var verifyMembers = await RequireUsersVerifiedAsync(memberIds, "В группу можно добавлять только пользователей с подтверждённой почтой.", ct);
+            if (verifyMembers is not null) return verifyMembers;
 
             var group = await groupChats.CreateChatAsync(MeId, body.Title, body.Description, body.MemberIds, ct);
             var details = await BuildGroupDetailsAsync(group.Id, ct);
@@ -537,6 +577,7 @@ public class ChatController(
     }
 
     [HttpPost("groups/{groupId:guid}/title")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<GroupChatSummaryDto>> UpdateGroupTitle(Guid groupId, [FromBody] UpdateGroupChatRequest body, CancellationToken ct)
     {
         try
@@ -558,12 +599,16 @@ public class ChatController(
     }
 
     [HttpPost("groups/{groupId:guid}/members")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<IReadOnlyList<GroupChatMemberDto>>> AddGroupMembers(Guid groupId, [FromBody] UpdateGroupMembersRequest body, CancellationToken ct)
     {
         try
         {
             if (body?.UserIds is null || body.UserIds.Count == 0)
                 return BadRequest(new { error = "UserIds are required." });
+
+            var verifyMembers = await RequireUsersVerifiedAsync(body.UserIds, "В группу можно добавлять только пользователей с подтверждённой почтой.", ct);
+            if (verifyMembers is not null) return verifyMembers;
 
             await groupChats.AddMembersAsync(groupId, MeId, body.UserIds, ct);
             var members = await groupChats.GetMemberDtosAsync(groupId, ct);
@@ -605,6 +650,7 @@ public class ChatController(
     }
 
     [HttpPost("groups/{groupId:guid}/members/{userId:guid}/role")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<IReadOnlyList<GroupChatMemberDto>>> UpdateGroupMemberRole(Guid groupId, Guid userId, [FromBody] UpdateGroupMemberRoleRequest body, CancellationToken ct)
     {
         try
@@ -653,6 +699,7 @@ public class ChatController(
     }
 
     [HttpPut("groups/{groupId:guid}/avatar/url")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<GroupChatSummaryDto>> SetGroupAvatarUrl(Guid groupId, [FromBody] SetGroupAvatarUrlRequest body, CancellationToken ct)
     {
         try
@@ -675,6 +722,7 @@ public class ChatController(
 
     [RequestSizeLimit(5 * 1024 * 1024)]
     [HttpPost("groups/{groupId:guid}/avatar/upload")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<object>> UploadGroupAvatar(Guid groupId, IFormFile file, CancellationToken ct)
     {
         try
@@ -825,6 +873,7 @@ public class ChatController(
     }
 
     [HttpPost("groups/{groupId:guid}/messages/send")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<MessageDto>> SendGroupMessage(Guid groupId, [FromBody] SendMessageRequest body, CancellationToken ct)
     {
         try
@@ -917,6 +966,7 @@ public class ChatController(
     }
 
     [HttpPost("groups/messages/{messageId:guid}/edit")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<MessageDto>> EditGroupMessage(Guid messageId, [FromBody] EditMessageRequest body, CancellationToken ct)
     {
         try
@@ -959,6 +1009,7 @@ public class ChatController(
     }
 
     [HttpPost("groups/messages/{messageId:guid}/delete")]
+    [RequireVerifiedEmail]
     public async Task<IActionResult> DeleteGroupMessage(Guid messageId, CancellationToken ct)
     {
         try
@@ -987,6 +1038,7 @@ public class ChatController(
     }
 
     [HttpPost("groups/{groupId:guid}/forward")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<IEnumerable<MessageDto>>> ForwardGroupMessages(Guid groupId, [FromBody] ForwardMessagesRequest body, CancellationToken ct)
     {
         try
@@ -1028,6 +1080,7 @@ public class ChatController(
     }
 
     [HttpPost("forward/direct/{friendId:guid}")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<IEnumerable<MessageDto>>> ForwardMessagesToDirect(Guid friendId, [FromBody] CrossChatForwardRequest body, CancellationToken ct)
     {
         try
@@ -1035,6 +1088,8 @@ public class ChatController(
             if (body?.MessageIds is null || body.MessageIds.Count == 0)
                 return BadRequest(new { error = "MessageIds are required." });
             if (!await chat.AreFriends(MeId, friendId, ct)) return Forbid();
+            var peerVerified = await IsEmailConfirmedAsync(friendId, ct);
+            if (!peerVerified) return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Пересылка пока недоступна." });
 
             var ids = body.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
             var source = (body.Source ?? string.Empty).Trim().ToLowerInvariant();
@@ -1097,6 +1152,7 @@ public class ChatController(
     }
 
     [HttpPost("forward/group/{groupId:guid}")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<IEnumerable<MessageDto>>> ForwardMessagesToGroup(Guid groupId, [FromBody] CrossChatForwardRequest body, CancellationToken ct)
     {
         try

@@ -4,6 +4,7 @@ using Amazon.S3.Model;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services.Storage;
+using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -100,6 +101,7 @@ public class FilesController(
     }
 
     [HttpPost("upload")]
+    [RequireVerifiedEmail]
     [RequestSizeLimit(long.MaxValue)]
     public async Task<ActionResult<FileUploadResponse>> Upload(IFormFile file, CancellationToken ct)
     {

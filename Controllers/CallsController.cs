@@ -4,6 +4,7 @@ using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Calls;
 using JaeZoo.Server.Services.Calls;
+using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
@@ -84,6 +85,7 @@ public sealed class CallsController : ControllerBase
     }
 
     [HttpPost("start")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<StartCallResponse>> Start([FromBody] StartCallRequest request, CancellationToken ct)
     {
         var me = MeId;
@@ -101,6 +103,13 @@ public sealed class CallsController : ControllerBase
 
         if (!areFriends)
             return Forbid();
+
+        var calleeVerified = await _db.Users.AsNoTracking()
+            .Where(u => u.Id == request.PeerUserId)
+            .Select(u => u.EmailConfirmed)
+            .FirstOrDefaultAsync(ct);
+        if (!calleeVerified)
+            return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Звонок пока недоступен." });
 
         var turnDiagnostics = _turn.GetDiagnostics();
         if (!turnDiagnostics.Configured)

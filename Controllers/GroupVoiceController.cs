@@ -3,6 +3,7 @@ using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Options;
 using JaeZoo.Server.Services.Voice;
+using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
@@ -89,6 +90,7 @@ public sealed class GroupVoiceController(
 
     [HttpPost("/api/chat/groups/{groupId:guid}/voice/join")]
     [HttpPost("/api/groups/{groupId:guid}/voice/join")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<GroupVoiceJoinResponse>> Join(Guid groupId, [FromBody] GroupVoiceJoinRequest? request, CancellationToken ct)
     {
         var userId = MeId;

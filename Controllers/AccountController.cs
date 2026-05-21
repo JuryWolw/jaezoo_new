@@ -3,6 +3,7 @@ using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
+using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -34,6 +35,7 @@ namespace JaeZoo.Server.Controllers
         // PUT /api/users/account/username
         // Legacy route: фактически меняет приватный login. Публичный ник меняется через PUT /api/users/profile.
         [HttpPut("username")]
+        [RequireVerifiedEmail]
         public async Task<IActionResult> ChangeUserName([FromBody] ChangeUserNameRequest body, CancellationToken ct)
         {
             if (body == null) return BadRequest(new { message = "Body is required." });
@@ -73,6 +75,7 @@ namespace JaeZoo.Server.Controllers
 
         // PUT /api/users/account/email
         [HttpPut("email")]
+        [RequireVerifiedEmail]
         public async Task<IActionResult> ChangeEmail([FromBody] ChangeEmailRequest body, CancellationToken ct)
         {
             if (body == null) return BadRequest(new { message = "Body is required." });
@@ -112,6 +115,7 @@ namespace JaeZoo.Server.Controllers
 
         // PUT /api/users/account/password
         [HttpPut("password")]
+        [RequireVerifiedEmail]
         public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest body, CancellationToken ct)
         {
             if (body == null) return BadRequest(new { message = "Body is required." });

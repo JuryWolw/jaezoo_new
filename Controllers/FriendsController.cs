@@ -3,6 +3,7 @@ using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
+using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
@@ -91,13 +92,16 @@ public class FriendsController : ControllerBase
     // POST /api/friends/request/{userId}
     // --------------------------------------------------
     [HttpPost("request/{userId:guid}")]
+    [RequireVerifiedEmail]
     public async Task<IActionResult> SendRequest(Guid userId, CancellationToken ct)
     {
         var me = MeId;
         if (me == userId) return BadRequest(new { error = "Cannot befriend yourself." });
 
-        var userExists = await _db.Users.AsNoTracking().AnyAsync(u => u.Id == userId, ct);
-        if (!userExists) return NotFound(new { error = "User not found." });
+        var target = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId, ct);
+        if (target is null) return NotFound(new { error = "User not found." });
+        if (!target.EmailConfirmed)
+            return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Этот пользователь ещё не подтвердил почту, поэтому пока недоступен для добавления в друзья." });
 
         var existing = await _db.Friendships
             .Where(f =>
@@ -272,6 +276,7 @@ public class FriendsController : ControllerBase
     // POST /api/friends/requests/{requestId}/accept
     // --------------------------------------------------
     [HttpPost("requests/{requestId:guid}/accept")]
+    [RequireVerifiedEmail]
     public async Task<IActionResult> Accept(Guid requestId, CancellationToken ct)
     {
         var me = MeId;
@@ -282,6 +287,13 @@ public class FriendsController : ControllerBase
             f.AddresseeId == me, ct);
 
         if (req is null) return NotFound(new { error = "Request not found." });
+
+        var requesterVerified = await _db.Users.AsNoTracking()
+            .Where(u => u.Id == req.RequesterId)
+            .Select(u => u.EmailConfirmed)
+            .FirstOrDefaultAsync(ct);
+        if (!requesterVerified)
+            return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Этот пользователь ещё не подтвердил почту. Принять заявку пока нельзя." });
 
         req.Status = FriendshipStatus.Accepted;
         await _db.SaveChangesAsync(ct);
