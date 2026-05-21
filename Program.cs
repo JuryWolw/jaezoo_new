@@ -1,4 +1,4 @@
-﻿using JaeZoo.Server.Data;
+using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Middleware;
@@ -238,6 +238,7 @@ using (var scope = app.Services.CreateScope())
     await db.Database.MigrateAsync();
 
     await EnsureGroupVoiceTablesAsync(db, logger);
+    await EnsureEmailVerificationTablesAsync(db, logger);
     await RoleBootstrapService.EnsureOwnerAsync(db, app.Configuration, logger);
 
     if (db.Database.IsNpgsql())
@@ -327,6 +328,67 @@ app.MapHub<CallsHub>("/hubs/calls");
 app.MapGet("/", () => Results.Redirect("/swagger"));
 
 app.Run();
+
+static async Task EnsureEmailVerificationTablesAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "EmailVerificationCodes" (
+                    "Id" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "Purpose" integer NOT NULL,
+                    "CodeHash" character varying(128) NOT NULL,
+                    "Salt" character varying(64) NOT NULL,
+                    "CreatedAt" timestamp with time zone NOT NULL,
+                    "ExpiresAt" timestamp with time zone NOT NULL,
+                    "ConsumedAt" timestamp with time zone NULL,
+                    "AttemptCount" integer NOT NULL,
+                    "LastSentAt" timestamp with time zone NOT NULL,
+                    "IpAddress" character varying(64) NULL,
+                    "UserAgent" character varying(256) NULL,
+                    CONSTRAINT "PK_EmailVerificationCodes" PRIMARY KEY ("Id"),
+                    CONSTRAINT "FK_EmailVerificationCodes_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS "IX_EmailVerificationCodes_UserId_Purpose_ConsumedAt_ExpiresAt"
+                    ON "EmailVerificationCodes" ("UserId", "Purpose", "ConsumedAt", "ExpiresAt");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "EmailVerificationCodes" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_EmailVerificationCodes" PRIMARY KEY,
+                    "UserId" TEXT NOT NULL,
+                    "Purpose" INTEGER NOT NULL,
+                    "CodeHash" TEXT NOT NULL,
+                    "Salt" TEXT NOT NULL,
+                    "CreatedAt" TEXT NOT NULL,
+                    "ExpiresAt" TEXT NOT NULL,
+                    "ConsumedAt" TEXT NULL,
+                    "AttemptCount" INTEGER NOT NULL,
+                    "LastSentAt" TEXT NOT NULL,
+                    "IpAddress" TEXT NULL,
+                    "UserAgent" TEXT NULL,
+                    CONSTRAINT "FK_EmailVerificationCodes_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS "IX_EmailVerificationCodes_UserId_Purpose_ConsumedAt_ExpiresAt"
+                    ON "EmailVerificationCodes" ("UserId", "Purpose", "ConsumedAt", "ExpiresAt");
+                """);
+        }
+
+        logger.LogInformation("Email verification schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure email verification schema.");
+        throw;
+    }
+}
 
 static async Task EnsureGroupVoiceTablesAsync(AppDbContext db, ILogger logger)
 {
