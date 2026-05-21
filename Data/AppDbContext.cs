@@ -19,6 +19,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GroupAvatar> GroupAvatars => Set<GroupAvatar>();
     public DbSet<GroupVoiceSession> GroupVoiceSessions => Set<GroupVoiceSession>();
     public DbSet<GroupVoiceParticipant> GroupVoiceParticipants => Set<GroupVoiceParticipant>();
+    public DbSet<UserRole> UserRoles => Set<UserRole>();
+    public DbSet<AdminAuditLog> AdminAuditLogs => Set<AdminAuditLog>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -40,6 +42,66 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<User>().HasIndex(u => u.LoginNormalized).IsUnique();
         b.Entity<User>().HasIndex(u => u.EmailNormalized).IsUnique();
         b.Entity<User>().HasIndex(u => u.PublicId).IsUnique();
+
+
+        b.Entity<UserRole>()
+            .Property(r => r.Role)
+            .HasConversion<int>();
+
+        b.Entity<UserRole>()
+            .Property(r => r.Reason)
+            .HasMaxLength(256);
+
+        b.Entity<UserRole>()
+            .Property(r => r.RevokeReason)
+            .HasMaxLength(256);
+
+        b.Entity<UserRole>()
+            .HasIndex(r => new { r.UserId, r.Role, r.RevokedAt });
+
+        b.Entity<UserRole>()
+            .HasOne(r => r.User)
+            .WithMany()
+            .HasForeignKey(r => r.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<AdminAuditLog>()
+            .Property(a => a.ActorPublicId)
+            .HasMaxLength(64);
+
+        b.Entity<AdminAuditLog>()
+            .Property(a => a.ActorDisplayName)
+            .HasMaxLength(64);
+
+        b.Entity<AdminAuditLog>()
+            .Property(a => a.Action)
+            .HasMaxLength(80);
+
+        b.Entity<AdminAuditLog>()
+            .Property(a => a.TargetType)
+            .HasMaxLength(64);
+
+        b.Entity<AdminAuditLog>()
+            .Property(a => a.TargetId)
+            .HasMaxLength(128);
+
+        b.Entity<AdminAuditLog>()
+            .Property(a => a.Summary)
+            .HasMaxLength(512);
+
+        b.Entity<AdminAuditLog>()
+            .Property(a => a.IpAddress)
+            .HasMaxLength(64);
+
+        b.Entity<AdminAuditLog>()
+            .Property(a => a.UserAgent)
+            .HasMaxLength(256);
+
+        b.Entity<AdminAuditLog>()
+            .HasIndex(a => new { a.CreatedAt, a.Action });
+
+        b.Entity<AdminAuditLog>()
+            .HasIndex(a => a.ActorUserId);
 
         b.Entity<Friendship>()
             .HasIndex(f => new { f.RequesterId, f.AddresseeId })

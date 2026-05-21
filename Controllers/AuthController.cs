@@ -20,7 +20,7 @@ public class AuthController(AppDbContext db, TokenService tokens) : ControllerBa
     [HttpPost("register")]
     public async Task<IActionResult> Register([FromBody] RegisterRequest r, CancellationToken ct)
     {
-        var login = (r.Login ?? r.UserName ?? string.Empty).Trim();
+        var login = (r.Login ?? string.Empty).Trim();
         var email = (r.Email ?? string.Empty).Trim();
         var password = r.Password ?? string.Empty;
         var confirmPassword = r.ConfirmPassword ?? string.Empty;
@@ -44,10 +44,10 @@ public class AuthController(AppDbContext db, TokenService tokens) : ControllerBa
         var loginNormalized = UserIdentityService.NormalizeLogin(login);
         var emailNormalized = UserIdentityService.NormalizeEmail(email);
 
-        if (await db.Users.AnyAsync(u => u.LoginNormalized == loginNormalized || u.UserName.ToUpper() == loginNormalized, ct))
+        if (await db.Users.AnyAsync(u => u.LoginNormalized == loginNormalized, ct))
             return Conflict("Пользователь с таким логином уже существует.");
 
-        if (await db.Users.AnyAsync(u => u.EmailNormalized == emailNormalized || u.Email.ToUpper() == emailNormalized, ct))
+        if (await db.Users.AnyAsync(u => u.EmailNormalized == emailNormalized, ct))
             return Conflict("Пользователь с такой почтой уже существует.");
 
         var now = DateTime.UtcNow;
@@ -98,9 +98,7 @@ public class AuthController(AppDbContext db, TokenService tokens) : ControllerBa
 
         var user = await db.Users.FirstOrDefaultAsync(u =>
             u.LoginNormalized == normalized ||
-            u.EmailNormalized == normalized ||
-            u.UserName.ToUpper() == normalized ||
-            u.Email.ToUpper() == normalized, ct);
+            u.EmailNormalized == normalized, ct);
 
         if (user is null)
             return Unauthorized("Неверный логин/почта или пароль.");
@@ -126,8 +124,13 @@ public class AuthController(AppDbContext db, TokenService tokens) : ControllerBa
         user.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
 
-        var token = tokens.Create(user);
-        return new TokenResponse(token, ToUserDto(user));
+        var roles = await db.UserRoles
+            .Where(r => r.UserId == user.Id && r.RevokedAt == null)
+            .Select(r => r.Role)
+            .ToListAsync(ct);
+
+        var token = tokens.Create(user, roles);
+        return new TokenResponse(token, ToUserDto(user), roles.Select(r => r.ToString()).ToList());
     }
 
     [Authorize]

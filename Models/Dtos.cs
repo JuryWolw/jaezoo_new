@@ -2,10 +2,7 @@
 
 public sealed class RegisterRequest
 {
-    // Новый контракт: Login + Email + Password.
-    // UserName оставлен как legacy alias, чтобы старый WPF-клиент не умер до обновления формы.
     public string? Login { get; set; }
-    public string? UserName { get; set; }
     public string? Email { get; set; }
     public string? Password { get; set; }
     public string? ConfirmPassword { get; set; }
@@ -13,16 +10,13 @@ public sealed class RegisterRequest
 
 public sealed class LoginRequest
 {
-    // Новый контракт: LoginOrEmail + Password.
-    // Legacy aliases оставлены, чтобы старые утилиты/клиенты не падали после патча.
     public string? LoginOrEmail { get; set; }
     public string? Login { get; set; }
-    public string? UserName { get; set; }
     public string? Email { get; set; }
     public string? Password { get; set; }
 
     public string GetLoginOrEmail() =>
-        (LoginOrEmail ?? Login ?? UserName ?? Email ?? string.Empty).Trim();
+        (LoginOrEmail ?? Login ?? Email ?? string.Empty).Trim();
 }
 
 public record UserDto(
@@ -38,7 +32,7 @@ public record UserDto(
     string? AvatarUrl = null
 );
 
-public record TokenResponse(string Token, UserDto User);
+public record TokenResponse(string Token, UserDto User, IReadOnlyList<string>? Roles = null);
 
 public record UserSearchDto(
     Guid Id,
@@ -222,3 +216,18 @@ public record GroupVoiceJoinResponse(
 
 public record GroupVoiceStateChangedDto(Guid GroupId, GroupVoiceStateDto State);
 public record GroupVoiceParticipantChangedDto(Guid GroupId, Guid SessionId, Guid UserId, GroupVoiceStateDto State);
+
+
+public record GrantUserRoleRequest(Guid UserId, string Role, string? Reason = null);
+public record RevokeUserRoleRequest(Guid UserId, string Role, string? Reason = null);
+
+public record UserRoleDto(
+    Guid Id,
+    Guid UserId,
+    GlobalRole Role,
+    DateTime GrantedAt,
+    Guid? GrantedByUserId,
+    string? Reason,
+    DateTime? RevokedAt,
+    Guid? RevokedByUserId,
+    string? RevokeReason);

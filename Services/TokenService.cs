@@ -19,9 +19,9 @@ public class TokenService(IOptions<JwtOptions> opts)
 {
     private readonly JwtOptions _o = opts.Value;
 
-    public string Create(User u)
+    public string Create(User u, IEnumerable<GlobalRole>? roles = null)
     {
-        var claims = new[]
+        var claims = new List<Claim>
         {
             new Claim(JwtRegisteredClaimNames.Sub, u.Id.ToString()),
             new Claim(ClaimTypes.NameIdentifier, u.Id.ToString()),     // <= важно для Clients.User(...)
@@ -33,6 +33,9 @@ public class TokenService(IOptions<JwtOptions> opts)
             new Claim("security_stamp", u.SecurityStamp ?? string.Empty),
             new Claim(JwtRegisteredClaimNames.Email, u.Email)
         };
+
+        foreach (var role in (roles ?? Enumerable.Empty<GlobalRole>()).Distinct())
+            claims.Add(new Claim(ClaimTypes.Role, role.ToString()));
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_o.Key));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);

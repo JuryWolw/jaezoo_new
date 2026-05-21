@@ -19,6 +19,8 @@ using JaeZoo.Server.Services.Chat;
 using JaeZoo.Server.Options;
 using JaeZoo.Server.Services.Launcher;
 using JaeZoo.Server.Services.Voice;
+using JaeZoo.Server.Security;
+using JaeZoo.Server.Services.Admin;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -76,10 +78,17 @@ builder.Services
         };
     });
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(AuthPolicies.OwnerOnly, policy => policy.RequireRole(AuthPolicies.OwnerRoles));
+    options.AddPolicy(AuthPolicies.AdminAccess, policy => policy.RequireRole(AuthPolicies.AdminRoles));
+    options.AddPolicy(AuthPolicies.ManageAds, policy => policy.RequireRole(AuthPolicies.AdsManagerRoles));
+    options.AddPolicy(AuthPolicies.ViewAdminAudit, policy => policy.RequireRole(AuthPolicies.AuditViewerRoles));
+});
 builder.Services.AddScoped<TokenService>();
 builder.Services.AddScoped<DirectChatService>();
 builder.Services.AddScoped<GroupChatService>();
+builder.Services.AddScoped<AdminAuditService>();
 
 // ---------- Launcher updates ----------
 builder.Services.Configure<LauncherUpdatesOptions>(
@@ -206,6 +215,7 @@ using (var scope = app.Services.CreateScope())
     await db.Database.MigrateAsync();
 
     await EnsureGroupVoiceTablesAsync(db, logger);
+    await RoleBootstrapService.EnsureOwnerAsync(db, app.Configuration, logger);
 
     if (db.Database.IsNpgsql())
     {
