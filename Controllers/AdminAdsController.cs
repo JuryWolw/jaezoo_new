@@ -36,8 +36,9 @@ public sealed class AdminAdsController(IAdsService ads, AdminAuditService audit)
     }
 
     [HttpPost("images")]
+    [Consumes("multipart/form-data")]
     [RequestSizeLimit(16 * 1024 * 1024)]
-    public async Task<IActionResult> UploadImage([FromForm] IFormFile file, CancellationToken cancellationToken)
+    public async Task<IActionResult> UploadImage(IFormFile file, CancellationToken cancellationToken)
     {
         try
         {
