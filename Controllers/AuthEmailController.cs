@@ -5,15 +5,14 @@ using JaeZoo.Server.Services;
 using JaeZoo.Server.Services.Email;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Controllers;
 
 [ApiController]
 [Authorize]
 [Route("api/auth/email")]
-[Route("api/Auth/email")]
 [EnableRateLimiting("auth")]
 public sealed class AuthEmailController(
     AppDbContext db,
@@ -26,22 +25,14 @@ public sealed class AuthEmailController(
         if (!TryGetCurrentUserId(out var userId))
             return Unauthorized("Не удалось определить пользователя по токену.");
 
-        try
-        {
-            var user = await db.Users
-                .AsNoTracking()
-                .FirstOrDefaultAsync(u => u.Id == userId, ct);
+        var user = await db.Users
+            .AsNoTracking()
+            .FirstOrDefaultAsync(u => u.Id == userId, ct);
 
-            if (user is null)
-                return NotFound("Пользователь не найден.");
+        if (user is null)
+            return NotFound("Пользователь не найден.");
 
-            return new EmailVerificationStatusDto(user.Email, user.EmailConfirmed, user.EmailVerifiedAt);
-        }
-        catch (Exception ex)
-        {
-            log.LogError(ex, "Failed to read email verification status. UserId={UserId}", userId);
-            return StatusCode(StatusCodes.Status500InternalServerError, "Ошибка получения статуса подтверждения почты.");
-        }
+        return new EmailVerificationStatusDto(user.Email, user.EmailConfirmed, user.EmailVerifiedAt);
     }
 
     [HttpPost("resend")]
@@ -50,15 +41,15 @@ public sealed class AuthEmailController(
         if (!TryGetCurrentUserId(out var userId))
             return Unauthorized("Не удалось определить пользователя по токену.");
 
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId, ct);
+        if (user is null)
+            return NotFound("Пользователь не найден.");
+
+        if (user.EmailConfirmed)
+            return BadRequest("Почта уже подтверждена.");
+
         try
         {
-            var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId, ct);
-            if (user is null)
-                return NotFound("Пользователь не найден.");
-
-            if (user.EmailConfirmed)
-                return BadRequest("Почта уже подтверждена.");
-
             var result = await emailVerification.SendConfirmationCodeAsync(user, HttpContext, ct);
             var response = new ResendEmailConfirmationResponse(
                 result.Sent,
@@ -79,7 +70,7 @@ public sealed class AuthEmailController(
         }
         catch (Exception ex)
         {
-            log.LogError(ex, "Failed to send email confirmation code. UserId={UserId}", userId);
+            log.LogError(ex, "Failed to send email confirmation code. UserId={UserId} Email={Email}", userId, user.Email);
             return StatusCode(StatusCodes.Status500InternalServerError,
                 "Ошибка отправки кода. Проверьте настройки Yandex Cloud Postbox и логи сервера.");
         }
