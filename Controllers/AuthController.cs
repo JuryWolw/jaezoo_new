@@ -241,7 +241,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     [HttpPost("logout")]
     public async Task<IActionResult> Logout([FromBody] LogoutRequest? r, CancellationToken ct)
     {
-        if (!TryGetCurrentUserId(out var uid)) return Unauthorized("Некорректный токен.");
+        var uid = GetCurrentUserId();
         var refreshToken = (r?.RefreshToken ?? string.Empty).Trim();
         var sid = GetCurrentSessionId();
 
@@ -274,7 +274,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     [HttpPost("logout-all")]
     public async Task<IActionResult> LogoutAll(CancellationToken ct)
     {
-        if (!TryGetCurrentUserId(out var uid)) return Unauthorized("Некорректный токен.");
+        var uid = GetCurrentUserId();
         var currentSid = GetCurrentSessionId();
         var now = DateTime.UtcNow;
 
@@ -293,7 +293,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     [HttpGet("sessions")]
     public async Task<ActionResult<IReadOnlyList<UserSessionDto>>> Sessions(CancellationToken ct)
     {
-        if (!TryGetCurrentUserId(out var uid)) return Unauthorized("Некорректный токен.");
+        var uid = GetCurrentUserId();
         var currentSid = GetCurrentSessionId();
         var now = DateTime.UtcNow;
 
@@ -320,7 +320,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     [HttpDelete("sessions/{sessionId:guid}")]
     public async Task<IActionResult> RevokeSession(Guid sessionId, CancellationToken ct)
     {
-        if (!TryGetCurrentUserId(out var uid)) return Unauthorized("Некорректный токен.");
+        var uid = GetCurrentUserId();
         var session = await db.UserSessions.FirstOrDefaultAsync(s => s.Id == sessionId && s.UserId == uid && s.RevokedAt == null, ct);
         if (session is null)
             return NotFound();
@@ -333,9 +333,12 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
 
     [Authorize]
     [HttpGet("email/status")]
+    [HttpGet("/api/auth/email/status")]
     public async Task<ActionResult<EmailVerificationStatusDto>> EmailStatus(CancellationToken ct)
     {
-        if (!TryGetCurrentUserId(out var id)) return Unauthorized("Некорректный токен.");
+        if (!TryGetCurrentUserId(out var id))
+            return Unauthorized("Не удалось определить пользователя по токену.");
+
         var user = await db.Users.FindAsync(new object?[] { id }, ct);
         if (user is null) return NotFound();
         return new EmailVerificationStatusDto(user.Email, user.EmailConfirmed, user.EmailVerifiedAt);
@@ -343,9 +346,12 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
 
     [Authorize]
     [HttpPost("email/resend")]
+    [HttpPost("/api/auth/email/resend")]
     public async Task<ActionResult<ResendEmailConfirmationResponse>> ResendEmailConfirmation(CancellationToken ct)
     {
-        if (!TryGetCurrentUserId(out var id)) return Unauthorized("Некорректный токен.");
+        if (!TryGetCurrentUserId(out var id))
+            return Unauthorized("Не удалось определить пользователя по токену.");
+
         var user = await db.Users.FindAsync(new object?[] { id }, ct);
         if (user is null) return NotFound();
 
@@ -362,11 +368,14 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
 
     [Authorize]
     [HttpPost("email/confirm")]
+    [HttpPost("/api/auth/email/confirm")]
     public async Task<ActionResult<UserDto>> ConfirmEmail([FromBody] ConfirmEmailRequest r, CancellationToken ct)
     {
         try
         {
-            if (!TryGetCurrentUserId(out var id)) return Unauthorized("Некорректный токен.");
+            if (!TryGetCurrentUserId(out var id))
+                return Unauthorized("Не удалось определить пользователя по токену.");
+
             var user = await emailVerification.ConfirmEmailAsync(id, r.Code ?? string.Empty, ct);
             return ToUserDto(user);
         }
@@ -380,18 +389,25 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     [HttpGet("me")]
     public async Task<ActionResult<UserDto>> Me(CancellationToken ct)
     {
-        if (!TryGetCurrentUserId(out var id)) return Unauthorized("Некорректный токен.");
+        var id = GetCurrentUserId();
         var u = await db.Users.FindAsync(new object?[] { id }, ct);
         if (u is null) return NotFound();
         return ToUserDto(u);
     }
 
+    private Guid GetCurrentUserId()
+    {
+        if (TryGetCurrentUserId(out var id))
+            return id;
+
+        throw new InvalidOperationException("Current user id claim is missing or invalid.");
+    }
+
     private bool TryGetCurrentUserId(out Guid id)
     {
-        id = Guid.Empty;
         var idStr = User.FindFirstValue(ClaimTypes.NameIdentifier)
-            ?? User.FindFirstValue("sub")
-            ?? User.FindFirstValue("nameid");
+                    ?? User.FindFirstValue("sub")
+                    ?? User.FindFirstValue("nameid");
 
         return Guid.TryParse(idStr, out id);
     }
