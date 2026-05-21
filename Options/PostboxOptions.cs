@@ -4,25 +4,25 @@ public sealed class PostboxOptions
 {
     public bool Enabled { get; set; }
 
-    // Http = Yandex Cloud Postbox HTTPS API with AWS Signature V4.
-    // Smtp = legacy SMTP mode. Render/PaaS often block SMTP ports, so Http is the safe default.
-    public string Transport { get; set; } = "Http";
+    // HttpSdk = Yandex Cloud Postbox HTTPS API through official AWS SESv2 SDK signing.
+    // Smtp = legacy SMTP mode. Render/PaaS can block or stall SMTP ports, so HttpSdk is the safe default.
+    public string Transport { get; set; } = "HttpSdk";
 
     public string Host { get; set; } = "postbox.cloud.yandex.net";
     public int Port { get; set; } = 587;
     public bool EnableSsl { get; set; } = true;
 
-    // For Transport=Http: static access key ID / static secret access key.
-    // For Transport=Smtp: API key ID / API key secret.
+    // Transport=HttpSdk: static access key ID / static secret access key.
+    // Transport=Smtp: API key ID / API key secret, or static key ID / generated SMTP password.
     public string UserName { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
 
     public string FromEmail { get; set; } = "noreply@jaezoo.ru";
     public string FromName { get; set; } = "JaeZoo";
 
-    public string ApiEndpoint { get; set; } = "https://postbox.cloud.yandex.net/v2/email/outbound-emails";
+    // For HttpSdk use the root endpoint, without /v2/...
+    public string ApiEndpoint { get; set; } = "https://postbox.cloud.yandex.net";
     public string Region { get; set; } = "ru-central1";
-    public string Service { get; set; } = "ses";
     public int SendTimeoutSeconds { get; set; } = 30;
 
     public int CodeLifetimeMinutes { get; set; } = 15;

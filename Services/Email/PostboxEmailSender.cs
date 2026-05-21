@@ -1,10 +1,9 @@
-using System.Globalization;
 using System.Net;
-using System.Net.Http.Headers;
 using System.Net.Mail;
-using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
+using Amazon.Runtime;
+using Amazon.SimpleEmailV2;
+using Amazon.SimpleEmailV2.Model;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Options;
 using Microsoft.Extensions.Options;
@@ -26,77 +25,103 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
         if (string.IsNullOrWhiteSpace(_options.FromEmail))
             throw new InvalidOperationException("Postbox:FromEmail is not configured.");
 
-        var transport = string.IsNullOrWhiteSpace(_options.Transport) ? "Http" : _options.Transport.Trim();
+        var transport = string.IsNullOrWhiteSpace(_options.Transport) ? "HttpSdk" : _options.Transport.Trim();
         return transport.Equals("Smtp", StringComparison.OrdinalIgnoreCase)
             ? SendViaSmtpAsync(user, code, ct)
-            : SendViaHttpApiAsync(user, code, ct);
+            : SendViaAwsSesV2SdkAsync(user, code, ct);
     }
 
-    private async Task SendViaHttpApiAsync(User user, string code, CancellationToken ct)
+    private async Task SendViaAwsSesV2SdkAsync(User user, string code, CancellationToken ct)
     {
         var (subject, text, html) = BuildMessage(user, code);
 
-        var payload = new
+        var endpoint = NormalizeServiceEndpoint(_options.ApiEndpoint);
+        var timeout = TimeSpan.FromSeconds(Math.Clamp(_options.SendTimeoutSeconds, 5, 90));
+
+        var credentials = new BasicAWSCredentials(_options.UserName.Trim(), _options.Password.Trim());
+        var config = new AmazonSimpleEmailServiceV2Config
+        {
+            ServiceURL = endpoint,
+            AuthenticationRegion = string.IsNullOrWhiteSpace(_options.Region) ? "ru-central1" : _options.Region.Trim(),
+            Timeout = timeout,
+            MaxErrorRetry = 0,
+            UseHttp = endpoint.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+        };
+
+        using var client = new AmazonSimpleEmailServiceV2Client(credentials, config);
+
+        var request = new SendEmailRequest
         {
             FromEmailAddress = _options.FromEmail,
-            Destination = new
+            Destination = new Destination
             {
-                ToAddresses = new[] { user.Email }
+                ToAddresses = new List<string> { user.Email }
             },
-            Content = new
+            Content = new EmailContent
             {
-                Simple = new
+                Simple = new Message
                 {
-                    Subject = new
+                    Subject = new Content
                     {
-                        Data = subject,
-                        Charset = "UTF-8"
+                        Charset = "UTF-8",
+                        Data = subject
                     },
-                    Body = new
+                    Body = new Amazon.SimpleEmailV2.Model.Body
                     {
-                        Text = new
+                        Text = new Content
                         {
-                            Data = text,
-                            Charset = "UTF-8"
+                            Charset = "UTF-8",
+                            Data = text
                         },
-                        Html = new
+                        Html = new Content
                         {
-                            Data = html,
-                            Charset = "UTF-8"
+                            Charset = "UTF-8",
+                            Data = html
                         }
                     }
                 }
             }
         };
 
-        var json = JsonSerializer.Serialize(payload);
-        var endpoint = new Uri(_options.ApiEndpoint);
-        var timeout = TimeSpan.FromSeconds(Math.Clamp(_options.SendTimeoutSeconds, 5, 90));
-
-        using var http = new HttpClient { Timeout = timeout };
-        using var req = new HttpRequestMessage(HttpMethod.Post, endpoint)
-        {
-            Content = new StringContent(json, Encoding.UTF8, "application/json")
-        };
-
-        SignAwsV4(req, endpoint, json, _options.UserName, _options.Password, _options.Region, _options.Service);
-
         logger.LogInformation(
-            "Sending email confirmation via Yandex Postbox HTTP API. Endpoint={Endpoint} From={From} To={To} KeyId={KeyId}",
-            endpoint.GetLeftPart(UriPartial.Authority), _options.FromEmail, user.Email, MaskKey(_options.UserName));
+            "Sending email confirmation via Yandex Postbox HTTPS API. Endpoint={Endpoint} Region={Region} From={From} To={To} KeyId={KeyId} Timeout={TimeoutSeconds}s",
+            endpoint,
+            config.AuthenticationRegion,
+            _options.FromEmail,
+            user.Email,
+            MaskKey(_options.UserName),
+            timeout.TotalSeconds);
 
-        using var res = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-        if (res.IsSuccessStatusCode)
+        try
         {
-            logger.LogInformation("Yandex Postbox HTTP API accepted email. StatusCode={StatusCode}", (int)res.StatusCode);
-            return;
+            var response = await client.SendEmailAsync(request, ct);
+            logger.LogInformation(
+                "Yandex Postbox HTTPS API accepted email. MessageId={MessageId} HttpStatusCode={StatusCode}",
+                response.MessageId,
+                (int)response.HttpStatusCode);
         }
+        catch (AmazonServiceException ex)
+        {
+            logger.LogError(ex,
+                "Yandex Postbox HTTPS API rejected email. StatusCode={StatusCode} ErrorCode={ErrorCode} RequestId={RequestId} Message={Message}",
+                (int)ex.StatusCode,
+                ex.ErrorCode,
+                ex.RequestId,
+                ex.Message);
 
-        var body = await res.Content.ReadAsStringAsync(ct);
-        if (body.Length > 1200) body = body[..1200];
+            throw new InvalidOperationException(
+                $"Yandex Postbox HTTPS API rejected email: HTTP {(int)ex.StatusCode}, {ex.ErrorCode}, {ex.Message}",
+                ex);
+        }
+        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogError(ex,
+                "Yandex Postbox HTTPS API timed out after {TimeoutSeconds}s. Endpoint={Endpoint}",
+                timeout.TotalSeconds,
+                endpoint);
 
-        throw new InvalidOperationException(
-            $"Yandex Postbox HTTP API failed: HTTP {(int)res.StatusCode} {res.ReasonPhrase}. {body}");
+            throw new TimeoutException($"Yandex Postbox HTTPS API timed out after {timeout.TotalSeconds:0}s.", ex);
+        }
     }
 
     private async Task SendViaSmtpAsync(User user, string code, CancellationToken ct)
@@ -130,8 +155,13 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
         });
 
         logger.LogInformation(
-            "Sending email confirmation via Yandex Postbox SMTP. Host={Host} Port={Port} From={From} To={To} KeyId={KeyId}",
-            _options.Host, _options.Port, _options.FromEmail, user.Email, MaskKey(_options.UserName));
+            "Sending email confirmation via Yandex Postbox SMTP. Host={Host} Port={Port} From={From} To={To} KeyId={KeyId} Timeout={TimeoutSeconds}s",
+            _options.Host,
+            _options.Port,
+            _options.FromEmail,
+            user.Email,
+            MaskKey(_options.UserName),
+            Math.Clamp(_options.SendTimeoutSeconds, 5, 90));
 
         await smtp.SendMailAsync(msg);
     }
@@ -166,46 +196,16 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
         return (subject, text, html);
     }
 
-    private static void SignAwsV4(HttpRequestMessage req, Uri endpoint, string payload, string accessKeyId, string secretKey, string region, string service)
+    private static string NormalizeServiceEndpoint(string value)
     {
-        var now = DateTimeOffset.UtcNow;
-        var amzDate = now.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
-        var dateStamp = now.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
-        var host = endpoint.Host;
-        var canonicalUri = string.IsNullOrWhiteSpace(endpoint.AbsolutePath) ? "/" : endpoint.AbsolutePath;
-        var canonicalQuery = endpoint.Query.TrimStart('?');
-        var payloadHash = Sha256Hex(payload);
+        value = string.IsNullOrWhiteSpace(value) ? "https://postbox.cloud.yandex.net" : value.Trim();
 
-        const string signedHeaders = "content-type;host;x-amz-date";
-        var canonicalHeaders = $"content-type:application/json; charset=utf-8\nhost:{host}\nx-amz-date:{amzDate}\n";
-        var canonicalRequest = $"POST\n{canonicalUri}\n{canonicalQuery}\n{canonicalHeaders}\n{signedHeaders}\n{payloadHash}";
+        // AWS SDK itself appends the SESv2 operation path. If an old patch/env contains
+        // /v2/email/outbound-emails, strip it to the service root.
+        value = value.Replace("/v2/email/outbound-emails", string.Empty, StringComparison.OrdinalIgnoreCase).TrimEnd('/');
 
-        var credentialScope = $"{dateStamp}/{region}/{service}/aws4_request";
-        var stringToSign = $"AWS4-HMAC-SHA256\n{amzDate}\n{credentialScope}\n{Sha256Hex(canonicalRequest)}";
-        var signingKey = GetSignatureKey(secretKey, dateStamp, region, service);
-        var signature = ToHex(HmacSha256(signingKey, stringToSign));
-
-        req.Headers.TryAddWithoutValidation("X-Amz-Date", amzDate);
-        req.Headers.Authorization = AuthenticationHeaderValue.Parse(
-            $"AWS4-HMAC-SHA256 Credential={accessKeyId}/{credentialScope}, SignedHeaders={signedHeaders}, Signature={signature}");
+        return value;
     }
-
-    private static byte[] GetSignatureKey(string secretKey, string dateStamp, string regionName, string serviceName)
-    {
-        var kDate = HmacSha256(Encoding.UTF8.GetBytes("AWS4" + secretKey), dateStamp);
-        var kRegion = HmacSha256(kDate, regionName);
-        var kService = HmacSha256(kRegion, serviceName);
-        return HmacSha256(kService, "aws4_request");
-    }
-
-    private static byte[] HmacSha256(byte[] key, string data)
-        => HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(data));
-
-    private static string Sha256Hex(string data)
-        => ToHex(SHA256.HashData(Encoding.UTF8.GetBytes(data)));
-
-    private static string ToHex(byte[] bytes)
-        => Convert.ToHexString(bytes).ToLowerInvariant();
 
     private static string MaskKey(string value)
     {

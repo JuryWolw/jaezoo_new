@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
@@ -71,8 +71,15 @@ public sealed class AuthEmailController(
         catch (Exception ex)
         {
             log.LogError(ex, "Failed to send email confirmation code. UserId={UserId} Email={Email}", userId, user.Email);
-            return StatusCode(StatusCodes.Status500InternalServerError,
-                "Ошибка отправки кода. Проверьте настройки Yandex Cloud Postbox и логи сервера.");
+
+            var message = ex is TimeoutException
+                ? "Ошибка отправки кода: Yandex Cloud Postbox не ответил за отведённое время."
+                : $"Ошибка отправки кода: {ex.Message}";
+
+            if (message.Length > 500)
+                message = message[..500];
+
+            return StatusCode(StatusCodes.Status500InternalServerError, message);
         }
     }
 
