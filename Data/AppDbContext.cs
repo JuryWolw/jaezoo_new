@@ -1,4 +1,4 @@
-using JaeZoo.Server.Models;
+﻿using JaeZoo.Server.Models;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Data;
@@ -21,6 +21,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GroupVoiceParticipant> GroupVoiceParticipants => Set<GroupVoiceParticipant>();
     public DbSet<UserRole> UserRoles => Set<UserRole>();
     public DbSet<AdminAuditLog> AdminAuditLogs => Set<AdminAuditLog>();
+    public DbSet<UserSession> UserSessions => Set<UserSession>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -102,6 +103,47 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<AdminAuditLog>()
             .HasIndex(a => a.ActorUserId);
+
+        b.Entity<UserSession>()
+            .Property(s => s.RefreshTokenHash)
+            .HasMaxLength(128);
+
+        b.Entity<UserSession>()
+            .Property(s => s.IpAddress)
+            .HasMaxLength(64);
+
+        b.Entity<UserSession>()
+            .Property(s => s.UserAgent)
+            .HasMaxLength(256);
+
+        b.Entity<UserSession>()
+            .Property(s => s.DeviceName)
+            .HasMaxLength(128);
+
+        b.Entity<UserSession>()
+            .Property(s => s.Platform)
+            .HasMaxLength(64);
+
+        b.Entity<UserSession>()
+            .Property(s => s.ClientVersion)
+            .HasMaxLength(32);
+
+        b.Entity<UserSession>()
+            .Property(s => s.FingerprintHash)
+            .HasMaxLength(128);
+
+        b.Entity<UserSession>()
+            .HasIndex(s => s.RefreshTokenHash)
+            .IsUnique();
+
+        b.Entity<UserSession>()
+            .HasIndex(s => new { s.UserId, s.RevokedAt, s.ExpiresAt });
+
+        b.Entity<UserSession>()
+            .HasOne(s => s.User)
+            .WithMany()
+            .HasForeignKey(s => s.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<Friendship>()
             .HasIndex(f => new { f.RequesterId, f.AddresseeId })

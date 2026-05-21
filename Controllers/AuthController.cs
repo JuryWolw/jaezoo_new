@@ -1,4 +1,5 @@
 ﻿using System.ComponentModel.DataAnnotations;
+using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
@@ -54,7 +55,7 @@ public class AuthController(AppDbContext db, TokenService tokens) : ControllerBa
         var user = new User
         {
             Id = Guid.NewGuid(),
-            UserName = login, // legacy поле: пока держим приватный login для старого кода/миграций
+            UserName = login,
             Login = login,
             LoginNormalized = loginNormalized,
             Email = email,
@@ -122,26 +123,215 @@ public class AuthController(AppDbContext db, TokenService tokens) : ControllerBa
         user.PublicId = string.IsNullOrWhiteSpace(user.PublicId) ? await UserIdentityService.CreateUniquePublicIdAsync(db, ct) : user.PublicId;
         user.SecurityStamp = string.IsNullOrWhiteSpace(user.SecurityStamp) ? UserIdentityService.NewSecurityStamp() : user.SecurityStamp;
         user.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(ct);
 
         var roles = await db.UserRoles
-            .Where(r => r.UserId == user.Id && r.RevokedAt == null)
-            .Select(r => r.Role)
+            .Where(role => role.UserId == user.Id && role.RevokedAt == null)
+            .Select(role => role.Role)
             .ToListAsync(ct);
 
-        var token = tokens.Create(user, roles);
-        return new TokenResponse(token, ToUserDto(user), roles.Select(r => r.ToString()).ToList());
+        UserSession? session = null;
+        string? refreshToken = null;
+        DateTime? refreshExpiresAt = null;
+
+        if (r.RememberMe)
+        {
+            refreshToken = UserSessionService.NewRefreshToken();
+            refreshExpiresAt = DateTime.UtcNow.AddDays(30);
+            session = new UserSession
+            {
+                Id = Guid.NewGuid(),
+                UserId = user.Id,
+                RefreshTokenHash = UserSessionService.HashRefreshToken(refreshToken),
+                CreatedAt = DateTime.UtcNow,
+                ExpiresAt = refreshExpiresAt.Value,
+                LastSeenAt = DateTime.UtcNow,
+                IpAddress = UserSessionService.GetRemoteIp(HttpContext),
+                UserAgent = UserSessionService.CleanHeader(Request.Headers.UserAgent.ToString(), 256),
+                DeviceName = UserSessionService.CleanHeader(r.DeviceName, 128),
+                Platform = UserSessionService.CleanHeader(r.Platform, 64),
+                ClientVersion = UserSessionService.CleanHeader(r.ClientVersion, 32),
+                IsTrusted = false
+            };
+            db.UserSessions.Add(session);
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        var accessExpiresAt = DateTime.UtcNow.AddMinutes(60);
+        var token = tokens.Create(user, roles, session?.Id, accessExpiresAt);
+        return new TokenResponse(
+            token,
+            ToUserDto(user),
+            roles.Select(role => role.ToString()).ToList(),
+            refreshToken,
+            session?.Id,
+            accessExpiresAt,
+            refreshExpiresAt);
+    }
+
+    [HttpPost("refresh")]
+    public async Task<ActionResult<TokenResponse>> Refresh([FromBody] RefreshTokenRequest r, CancellationToken ct)
+    {
+        var refreshToken = (r.RefreshToken ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(refreshToken))
+            return Unauthorized("Refresh token отсутствует.");
+
+        var tokenHash = UserSessionService.HashRefreshToken(refreshToken);
+        var now = DateTime.UtcNow;
+
+        var session = await db.UserSessions
+            .Include(s => s.User)
+            .FirstOrDefaultAsync(s => s.RefreshTokenHash == tokenHash, ct);
+
+        if (session is null || !UserSessionService.IsActive(session, now) || session.User is null)
+            return Unauthorized("Сессия недействительна.");
+
+        var user = session.User;
+        if (user.IsDisabled)
+            return StatusCode(StatusCodes.Status403Forbidden, string.IsNullOrWhiteSpace(user.DisabledReason)
+                ? "Аккаунт отключён."
+                : user.DisabledReason);
+
+        var roles = await db.UserRoles
+            .Where(role => role.UserId == user.Id && role.RevokedAt == null)
+            .Select(role => role.Role)
+            .ToListAsync(ct);
+
+        var newRefreshToken = UserSessionService.NewRefreshToken();
+        session.RefreshTokenHash = UserSessionService.HashRefreshToken(newRefreshToken);
+        session.LastRefreshAt = now;
+        session.LastSeenAt = now;
+        session.ExpiresAt = now.AddDays(30);
+        session.IpAddress = UserSessionService.GetRemoteIp(HttpContext);
+        session.UserAgent = UserSessionService.CleanHeader(Request.Headers.UserAgent.ToString(), 256);
+        user.UpdatedAt = now;
+        await db.SaveChangesAsync(ct);
+
+        var accessExpiresAt = now.AddMinutes(60);
+        var token = tokens.Create(user, roles, session.Id, accessExpiresAt);
+        return new TokenResponse(
+            token,
+            ToUserDto(user),
+            roles.Select(role => role.ToString()).ToList(),
+            newRefreshToken,
+            session.Id,
+            accessExpiresAt,
+            session.ExpiresAt);
+    }
+
+    [Authorize]
+    [HttpPost("logout")]
+    public async Task<IActionResult> Logout([FromBody] LogoutRequest? r, CancellationToken ct)
+    {
+        var uid = GetCurrentUserId();
+        var refreshToken = (r?.RefreshToken ?? string.Empty).Trim();
+        var sid = GetCurrentSessionId();
+
+        IQueryable<UserSession> query = db.UserSessions.Where(s => s.UserId == uid && s.RevokedAt == null);
+        if (!string.IsNullOrWhiteSpace(refreshToken))
+        {
+            var tokenHash = UserSessionService.HashRefreshToken(refreshToken);
+            query = query.Where(s => s.RefreshTokenHash == tokenHash);
+        }
+        else if (sid.HasValue)
+        {
+            query = query.Where(s => s.Id == sid.Value);
+        }
+        else
+        {
+            return NoContent();
+        }
+
+        var session = await query.FirstOrDefaultAsync(ct);
+        if (session != null)
+        {
+            session.RevokedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+        }
+
+        return NoContent();
+    }
+
+    [Authorize]
+    [HttpPost("logout-all")]
+    public async Task<IActionResult> LogoutAll(CancellationToken ct)
+    {
+        var uid = GetCurrentUserId();
+        var currentSid = GetCurrentSessionId();
+        var now = DateTime.UtcNow;
+
+        var sessions = await db.UserSessions
+            .Where(s => s.UserId == uid && s.RevokedAt == null && (!currentSid.HasValue || s.Id != currentSid.Value))
+            .ToListAsync(ct);
+
+        foreach (var session in sessions)
+            session.RevokedAt = now;
+
+        await db.SaveChangesAsync(ct);
+        return NoContent();
+    }
+
+    [Authorize]
+    [HttpGet("sessions")]
+    public async Task<ActionResult<IReadOnlyList<UserSessionDto>>> Sessions(CancellationToken ct)
+    {
+        var uid = GetCurrentUserId();
+        var currentSid = GetCurrentSessionId();
+        var now = DateTime.UtcNow;
+
+        var sessions = await db.UserSessions
+            .Where(s => s.UserId == uid && s.RevokedAt == null && s.ExpiresAt > now)
+            .OrderByDescending(s => s.LastSeenAt ?? s.CreatedAt)
+            .Select(s => new UserSessionDto(
+                s.Id,
+                s.CreatedAt,
+                s.ExpiresAt,
+                s.LastSeenAt,
+                s.LastRefreshAt,
+                s.DeviceName,
+                s.Platform,
+                s.ClientVersion,
+                s.IpAddress,
+                currentSid.HasValue && s.Id == currentSid.Value))
+            .ToListAsync(ct);
+
+        return sessions;
+    }
+
+    [Authorize]
+    [HttpDelete("sessions/{sessionId:guid}")]
+    public async Task<IActionResult> RevokeSession(Guid sessionId, CancellationToken ct)
+    {
+        var uid = GetCurrentUserId();
+        var session = await db.UserSessions.FirstOrDefaultAsync(s => s.Id == sessionId && s.UserId == uid && s.RevokedAt == null, ct);
+        if (session is null)
+            return NotFound();
+
+        session.RevokedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return NoContent();
     }
 
     [Authorize]
     [HttpGet("me")]
     public async Task<ActionResult<UserDto>> Me(CancellationToken ct)
     {
-        var idStr = User.Claims.First(c => c.Type == "sub").Value;
-        var id = Guid.Parse(idStr);
+        var id = GetCurrentUserId();
         var u = await db.Users.FindAsync(new object?[] { id }, ct);
         if (u is null) return NotFound();
         return ToUserDto(u);
+    }
+
+    private Guid GetCurrentUserId()
+    {
+        var idStr = User.Claims.First(c => c.Type == "sub").Value;
+        return Guid.Parse(idStr);
+    }
+
+    private Guid? GetCurrentSessionId()
+    {
+        var sid = User.FindFirstValue("sid");
+        return Guid.TryParse(sid, out var id) ? id : null;
     }
 
     private static UserDto ToUserDto(User u) => new(

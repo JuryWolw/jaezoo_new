@@ -19,7 +19,7 @@ public class TokenService(IOptions<JwtOptions> opts)
 {
     private readonly JwtOptions _o = opts.Value;
 
-    public string Create(User u, IEnumerable<GlobalRole>? roles = null)
+    public string Create(User u, IEnumerable<GlobalRole>? roles = null, Guid? sessionId = null, DateTime? expiresUtc = null)
     {
         var claims = new List<Claim>
         {
@@ -34,6 +34,9 @@ public class TokenService(IOptions<JwtOptions> opts)
             new Claim(JwtRegisteredClaimNames.Email, u.Email)
         };
 
+        if (sessionId.HasValue)
+            claims.Add(new Claim("sid", sessionId.Value.ToString()));
+
         foreach (var role in (roles ?? Enumerable.Empty<GlobalRole>()).Distinct())
             claims.Add(new Claim(ClaimTypes.Role, role.ToString()));
 
@@ -44,7 +47,7 @@ public class TokenService(IOptions<JwtOptions> opts)
             audience: _o.Audience,
             claims: claims,
             notBefore: DateTime.UtcNow,
-            expires: DateTime.UtcNow.AddMinutes(_o.ExpiresMinutes),
+            expires: expiresUtc ?? DateTime.UtcNow.AddMinutes(_o.ExpiresMinutes),
             signingCredentials: creds);
 
         return new JwtSecurityTokenHandler().WriteToken(jwt);

@@ -74,6 +74,22 @@ builder.Services
                     context.Token = accessToken;
                 }
                 return Task.CompletedTask;
+            },
+            OnTokenValidated = async context =>
+            {
+                var sidValue = context.Principal?.FindFirst("sid")?.Value;
+                if (!Guid.TryParse(sidValue, out var sessionId))
+                    return;
+
+                var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
+                var now = DateTime.UtcNow;
+                var active = await db.UserSessions.AnyAsync(s =>
+                    s.Id == sessionId &&
+                    s.RevokedAt == null &&
+                    s.ExpiresAt > now);
+
+                if (!active)
+                    context.Fail("Session revoked or expired.");
             }
         };
     });

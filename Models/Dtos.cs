@@ -14,10 +14,37 @@ public sealed class LoginRequest
     public string? Login { get; set; }
     public string? Email { get; set; }
     public string? Password { get; set; }
+    public bool RememberMe { get; set; }
+    public string? DeviceName { get; set; }
+    public string? Platform { get; set; }
+    public string? ClientVersion { get; set; }
 
     public string GetLoginOrEmail() =>
         (LoginOrEmail ?? Login ?? Email ?? string.Empty).Trim();
 }
+
+public sealed class RefreshTokenRequest
+{
+    public string? RefreshToken { get; set; }
+}
+
+public sealed class LogoutRequest
+{
+    public string? RefreshToken { get; set; }
+}
+
+public record UserSessionDto(
+    Guid Id,
+    DateTime CreatedAt,
+    DateTime ExpiresAt,
+    DateTime? LastSeenAt,
+    DateTime? LastRefreshAt,
+    string DeviceName,
+    string Platform,
+    string ClientVersion,
+    string IpAddress,
+    bool IsCurrent
+);
 
 public record UserDto(
     Guid Id,
@@ -32,7 +59,15 @@ public record UserDto(
     string? AvatarUrl = null
 );
 
-public record TokenResponse(string Token, UserDto User, IReadOnlyList<string>? Roles = null);
+public record TokenResponse(
+    string Token,
+    UserDto User,
+    IReadOnlyList<string>? Roles = null,
+    string? RefreshToken = null,
+    Guid? SessionId = null,
+    DateTime? AccessTokenExpiresAt = null,
+    DateTime? RefreshTokenExpiresAt = null
+);
 
 public record UserSearchDto(
     Guid Id,
