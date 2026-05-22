@@ -1,4 +1,4 @@
-using JaeZoo.Server.Data;
+﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Middleware;
@@ -22,6 +22,7 @@ using JaeZoo.Server.Services.Voice;
 using JaeZoo.Server.Security;
 using JaeZoo.Server.Services.Admin;
 using JaeZoo.Server.Services.Email;
+using JaeZoo.Server.Services.Security;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -103,6 +104,12 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy(AuthPolicies.ViewAdminAudit, policy => policy.RequireRole(AuthPolicies.AuditViewerRoles));
 });
 
+
+
+// ---------- Yandex SmartCaptcha ----------
+builder.Services.Configure<SmartCaptchaOptions>(builder.Configuration.GetSection("SmartCaptcha"));
+builder.Services.AddHttpClient<SmartCaptchaService>();
+
 // ---------- Email / Yandex Cloud Postbox ----------
 builder.Services.Configure<PostboxOptions>(builder.Configuration.GetSection("Postbox"));
 builder.Services.AddScoped<IEmailSender, PostboxEmailSender>();
@@ -175,6 +182,45 @@ builder.Services.AddRateLimiter(options =>
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+
+    options.AddPolicy("chat-write", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.User.FindFirst("sub")?.Value
+                          ?? httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                          ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                          ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 25,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+
+    options.AddPolicy("file-upload", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.User.FindFirst("sub")?.Value
+                          ?? httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                          ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                          ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+
+    options.AddPolicy("friend-actions", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.User.FindFirst("sub")?.Value
+                          ?? httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                          ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                          ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 20,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0
             }));

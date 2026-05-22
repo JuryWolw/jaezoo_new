@@ -7,6 +7,7 @@ using JaeZoo.Server.Services.Storage;
 using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Controllers;
@@ -101,6 +102,7 @@ public class FilesController(
     }
 
     [HttpPost("upload")]
+    [EnableRateLimiting("file-upload")]
     [RequireVerifiedEmail]
     [RequestSizeLimit(long.MaxValue)]
     public async Task<ActionResult<FileUploadResponse>> Upload(IFormFile file, CancellationToken ct)

@@ -1,10 +1,11 @@
-using JaeZoo.Server.Data;
+﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services.Chat;
 using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
@@ -226,6 +227,7 @@ public class ChatController(
     }
 
     [HttpPost("send/{friendId:guid}")]
+    [EnableRateLimiting("chat-write")]
     [RequireVerifiedEmail]
     public async Task<ActionResult<MessageDto>> SendMessage(Guid friendId, [FromBody] SendMessageRequest body, CancellationToken ct)
     {
@@ -873,6 +875,7 @@ public class ChatController(
     }
 
     [HttpPost("groups/{groupId:guid}/messages/send")]
+    [EnableRateLimiting("chat-write")]
     [RequireVerifiedEmail]
     public async Task<ActionResult<MessageDto>> SendGroupMessage(Guid groupId, [FromBody] SendMessageRequest body, CancellationToken ct)
     {

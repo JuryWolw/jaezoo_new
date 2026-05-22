@@ -4,6 +4,7 @@ using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Services.Email;
+using JaeZoo.Server.Services.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -15,7 +16,7 @@ namespace JaeZoo.Server.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [EnableRateLimiting("auth")]
-public class AuthController(AppDbContext db, TokenService tokens, EmailVerificationService emailVerification, ILogger<AuthController> log) : ControllerBase
+public class AuthController(AppDbContext db, TokenService tokens, EmailVerificationService emailVerification, SmartCaptchaService captcha, ILogger<AuthController> log) : ControllerBase
 {
     private readonly PasswordHasher<User> _hasher = new();
 
@@ -42,6 +43,14 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
 
         if (password != confirmPassword)
             return BadRequest("Пароли не совпадают.");
+
+        var captchaResult = await captcha.ValidateAsync(r.CaptchaToken, HttpContext, ct);
+        if (!captchaResult.Success)
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                code = "captcha_required",
+                message = captchaResult.Message
+            });
 
         var loginNormalized = UserIdentityService.NormalizeLogin(login);
         var emailNormalized = UserIdentityService.NormalizeEmail(email);

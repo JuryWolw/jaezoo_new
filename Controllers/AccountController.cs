@@ -1,8 +1,9 @@
-using System.ComponentModel.DataAnnotations;
+﻿using System.ComponentModel.DataAnnotations;
 using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
+using JaeZoo.Server.Services.Security;
 using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
@@ -17,10 +18,24 @@ namespace JaeZoo.Server.Controllers
     public class AccountController : ControllerBase
     {
         private readonly AppDbContext _db;
+        private readonly SmartCaptchaService _captcha;
 
-        public AccountController(AppDbContext db)
+        public AccountController(AppDbContext db, SmartCaptchaService captcha)
         {
             _db = db;
+            _captcha = captcha;
+        }
+
+        private async Task<IActionResult?> RequireCaptchaAsync(string? token, CancellationToken ct)
+        {
+            var result = await _captcha.ValidateAsync(token, HttpContext, ct);
+            if (result.Success) return null;
+
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                code = "captcha_required",
+                message = result.Message
+            });
         }
 
         private Guid MeId
@@ -39,6 +54,9 @@ namespace JaeZoo.Server.Controllers
         public async Task<IActionResult> ChangeUserName([FromBody] ChangeUserNameRequest body, CancellationToken ct)
         {
             if (body == null) return BadRequest(new { message = "Body is required." });
+            var captchaError = await RequireCaptchaAsync(body.CaptchaToken, ct);
+            if (captchaError != null) return captchaError;
+
             var current = (body.CurrentUserName ?? string.Empty).Trim();
             var next = (body.NewUserName ?? string.Empty).Trim();
 
@@ -79,6 +97,9 @@ namespace JaeZoo.Server.Controllers
         public async Task<IActionResult> ChangeEmail([FromBody] ChangeEmailRequest body, CancellationToken ct)
         {
             if (body == null) return BadRequest(new { message = "Body is required." });
+            var captchaError = await RequireCaptchaAsync(body.CaptchaToken, ct);
+            if (captchaError != null) return captchaError;
+
             var current = (body.CurrentEmail ?? string.Empty).Trim();
             var next = (body.NewEmail ?? string.Empty).Trim();
 
@@ -119,6 +140,9 @@ namespace JaeZoo.Server.Controllers
         public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest body, CancellationToken ct)
         {
             if (body == null) return BadRequest(new { message = "Body is required." });
+            var captchaError = await RequireCaptchaAsync(body.CaptchaToken, ct);
+            if (captchaError != null) return captchaError;
+
             var current = body.CurrentPassword ?? string.Empty;
             var next = body.NewPassword ?? string.Empty;
 
@@ -171,17 +195,20 @@ namespace JaeZoo.Server.Controllers
     {
         public string? CurrentUserName { get; set; }
         public string? NewUserName { get; set; }
+        public string? CaptchaToken { get; set; }
     }
 
     public class ChangeEmailRequest
     {
         public string? CurrentEmail { get; set; }
         public string? NewEmail { get; set; }
+        public string? CaptchaToken { get; set; }
     }
 
     public class ChangePasswordRequest
     {
         public string? CurrentPassword { get; set; }
         public string? NewPassword { get; set; }
+        public string? CaptchaToken { get; set; }
     }
 }

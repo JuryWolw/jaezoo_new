@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
@@ -6,6 +6,7 @@ using JaeZoo.Server.Services;
 using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 
@@ -92,6 +93,7 @@ public class FriendsController : ControllerBase
     // POST /api/friends/request/{userId}
     // --------------------------------------------------
     [HttpPost("request/{userId:guid}")]
+    [EnableRateLimiting("friend-actions")]
     [RequireVerifiedEmail]
     public async Task<IActionResult> SendRequest(Guid userId, CancellationToken ct)
     {
@@ -276,6 +278,7 @@ public class FriendsController : ControllerBase
     // POST /api/friends/requests/{requestId}/accept
     // --------------------------------------------------
     [HttpPost("requests/{requestId:guid}/accept")]
+    [EnableRateLimiting("friend-actions")]
     [RequireVerifiedEmail]
     public async Task<IActionResult> Accept(Guid requestId, CancellationToken ct)
     {
