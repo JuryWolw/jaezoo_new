@@ -104,6 +104,7 @@ public class FilesController(
     [HttpPost("upload")]
     [EnableRateLimiting("file-upload")]
     [RequireVerifiedEmail]
+    [RequireRiskCaptcha("file-upload", 5, 60)]
     [RequestSizeLimit(long.MaxValue)]
     public async Task<ActionResult<FileUploadResponse>> Upload(IFormFile file, CancellationToken ct)
     {

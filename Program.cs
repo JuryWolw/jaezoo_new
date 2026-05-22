@@ -109,6 +109,7 @@ builder.Services.AddAuthorization(options =>
 // ---------- Yandex SmartCaptcha ----------
 builder.Services.Configure<SmartCaptchaOptions>(builder.Configuration.GetSection("SmartCaptcha"));
 builder.Services.AddHttpClient<SmartCaptchaService>();
+builder.Services.AddSingleton<RiskCaptchaService>();
 
 // ---------- Email / Yandex Cloud Postbox ----------
 builder.Services.Configure<PostboxOptions>(builder.Configuration.GetSection("Postbox"));

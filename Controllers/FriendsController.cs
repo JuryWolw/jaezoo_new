@@ -95,6 +95,7 @@ public class FriendsController : ControllerBase
     [HttpPost("request/{userId:guid}")]
     [EnableRateLimiting("friend-actions")]
     [RequireVerifiedEmail]
+    [RequireRiskCaptcha("friend-request", 8, 60)]
     public async Task<IActionResult> SendRequest(Guid userId, CancellationToken ct)
     {
         var me = MeId;

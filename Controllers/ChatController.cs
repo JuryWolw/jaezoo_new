@@ -229,6 +229,7 @@ public class ChatController(
     [HttpPost("send/{friendId:guid}")]
     [EnableRateLimiting("chat-write")]
     [RequireVerifiedEmail]
+    [RequireRiskCaptcha("direct-message", 12, 30)]
     public async Task<ActionResult<MessageDto>> SendMessage(Guid friendId, [FromBody] SendMessageRequest body, CancellationToken ct)
     {
         try
@@ -877,6 +878,7 @@ public class ChatController(
     [HttpPost("groups/{groupId:guid}/messages/send")]
     [EnableRateLimiting("chat-write")]
     [RequireVerifiedEmail]
+    [RequireRiskCaptcha("group-message", 12, 30)]
     public async Task<ActionResult<MessageDto>> SendGroupMessage(Guid groupId, [FromBody] SendMessageRequest body, CancellationToken ct)
     {
         try
