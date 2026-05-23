@@ -565,6 +565,12 @@ public class ChatController(
             await BroadcastGroupMembersChanged(group.Id, ct);
             return Ok(details);
         }
+        catch (DbUpdateException ex)
+        {
+            var detail = ex.InnerException?.Message ?? ex.Message;
+            log.LogError(ex, "CreateGroup db update failed: me={MeId}, detail={Detail}", MeId, detail);
+            return BadRequest(new { error = detail });
+        }
         catch (Exception ex)
         {
             log.LogError(ex, "CreateGroup failed: me={MeId}", MeId);

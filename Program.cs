@@ -319,6 +319,7 @@ using (var scope = app.Services.CreateScope())
     await EnsureMessageEncryptionSchemaAsync(db, logger);
     await EnsureIdentityPrivacySchemaAsync(db, logger);
     await EnsureE2eeKeySchemaAsync(db, logger);
+    await EnsureGroupE2eeSecuritySchemaAsync(db, logger);
 
     await IdentityDataProtector.BackfillUsersAsync(db, logger);
 
@@ -924,6 +925,89 @@ static async Task EnsureGroupVoiceTablesAsync(AppDbContext db, ILogger logger)
     }
 }
 
+
+
+
+static async Task EnsureGroupE2eeSecuritySchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                ALTER TABLE "GroupChats"
+                    ADD COLUMN IF NOT EXISTS "SecurityEpoch" integer NOT NULL DEFAULT 1,
+                    ADD COLUMN IF NOT EXISTS "SecurityEpochChangedAt" timestamptz NOT NULL DEFAULT now();
+
+                ALTER TABLE "GroupMessages"
+                    ADD COLUMN IF NOT EXISTS "GroupSecurityEpoch" integer NOT NULL DEFAULT 1;
+
+                UPDATE "GroupChats"
+                SET "SecurityEpoch" = 1
+                WHERE "SecurityEpoch" IS NULL OR "SecurityEpoch" < 1;
+
+                UPDATE "GroupMessages"
+                SET "GroupSecurityEpoch" = 1
+                WHERE "GroupSecurityEpoch" IS NULL OR "GroupSecurityEpoch" < 1;
+
+                CREATE INDEX IF NOT EXISTS "IX_GroupMessages_GroupChatId_GroupSecurityEpoch_SentAt"
+                    ON "GroupMessages" ("GroupChatId", "GroupSecurityEpoch", "SentAt");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                ALTER TABLE "GroupChats" ADD COLUMN "SecurityEpoch" INTEGER NOT NULL DEFAULT 1;
+                """);
+        }
+    }
+    catch (Exception ex) when (db.Database.IsSqlite() && ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
+    {
+        // SQLite does not support ADD COLUMN IF NOT EXISTS on older versions.
+    }
+
+    try
+    {
+        if (db.Database.IsSqlite())
+        {
+            try
+            {
+                await db.Database.ExecuteSqlRawAsync("""
+                    ALTER TABLE "GroupChats" ADD COLUMN "SecurityEpochChangedAt" TEXT NOT NULL DEFAULT '0001-01-01T00:00:00Z';
+                    """);
+            }
+            catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase)) { }
+
+            try
+            {
+                await db.Database.ExecuteSqlRawAsync("""
+                    ALTER TABLE "GroupMessages" ADD COLUMN "GroupSecurityEpoch" INTEGER NOT NULL DEFAULT 1;
+                    """);
+            }
+            catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase)) { }
+
+            await db.Database.ExecuteSqlRawAsync("""
+                UPDATE "GroupChats"
+                SET "SecurityEpoch" = 1
+                WHERE "SecurityEpoch" IS NULL OR "SecurityEpoch" < 1;
+
+                UPDATE "GroupMessages"
+                SET "GroupSecurityEpoch" = 1
+                WHERE "GroupSecurityEpoch" IS NULL OR "GroupSecurityEpoch" < 1;
+
+                CREATE INDEX IF NOT EXISTS "IX_GroupMessages_GroupChatId_GroupSecurityEpoch_SentAt"
+                    ON "GroupMessages" ("GroupChatId", "GroupSecurityEpoch", "SentAt");
+                """);
+        }
+
+        logger.LogInformation("Group E2EE security epoch schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure group E2EE security epoch schema.");
+        throw;
+    }
+}
 
 
 static async Task EnsureFileThreatSchemaAsync(AppDbContext db, ILogger logger)
