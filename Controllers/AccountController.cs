@@ -5,6 +5,7 @@ using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Services.Security;
 using JaeZoo.Server.Security;
+using JaeZoo.Server.Services.Storage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -19,11 +20,17 @@ namespace JaeZoo.Server.Controllers
     {
         private readonly AppDbContext _db;
         private readonly SmartCaptchaService _captcha;
+        private readonly IObjectStorage _storage;
+        private readonly ILogger<AccountController> _log;
+        private readonly IConfiguration _cfg;
 
-        public AccountController(AppDbContext db, SmartCaptchaService captcha)
+        public AccountController(AppDbContext db, SmartCaptchaService captcha, IObjectStorage storage, ILogger<AccountController> log, IConfiguration cfg)
         {
             _db = db;
             _captcha = captcha;
+            _storage = storage;
+            _log = log;
+            _cfg = cfg;
         }
 
         private async Task<IActionResult?> RequireCaptchaAsync(string? token, CancellationToken ct)
@@ -46,6 +53,8 @@ namespace JaeZoo.Server.Controllers
                 return Guid.TryParse(id, out var g) ? g : Guid.Empty;
             }
         }
+
+        private string AvatarBucket => _cfg["ObjectStorage:Buckets:Avatars"] ?? "jaezoo-avatars";
 
         // PUT /api/users/account/username
         // Legacy route: фактически меняет приватный login. Публичный ник меняется через PUT /api/users/profile.
@@ -92,8 +101,9 @@ namespace JaeZoo.Server.Controllers
         }
 
         // PUT /api/users/account/email
+        // Разрешено даже неподтверждённым пользователям: если человек ошибся в почте при регистрации,
+        // он должен иметь возможность исправить её и подтвердить аккаунт.
         [HttpPut("email")]
-        [RequireVerifiedEmail]
         public async Task<IActionResult> ChangeEmail([FromBody] ChangeEmailRequest body, CancellationToken ct)
         {
             if (body == null) return BadRequest(new { message = "Body is required." });
@@ -189,6 +199,133 @@ namespace JaeZoo.Server.Controllers
             await _db.SaveChangesAsync(ct);
             return NoContent();
         }
+
+        // POST /api/users/account/delete
+        [HttpPost("delete")]
+        public async Task<IActionResult> DeleteAccount([FromBody] DeleteAccountRequest body, CancellationToken ct)
+        {
+            if (MeId == Guid.Empty) return Unauthorized();
+            var captchaError = await RequireCaptchaAsync(body?.CaptchaToken, ct);
+            if (captchaError != null) return captchaError;
+
+            var uid = MeId;
+            var me = await _db.Users.FirstOrDefaultAsync(u => u.Id == uid, ct);
+            if (me == null) return NotFound(new { message = "Аккаунт уже удалён." });
+
+            var storageObjects = new List<(string Bucket, string Key, string Reason)>();
+
+            var avatars = await _db.UserAvatars.AsNoTracking()
+                .Where(a => a.UserId == uid && !string.IsNullOrWhiteSpace(a.ObjectKey))
+                .Select(a => new { a.Bucket, a.ObjectKey })
+                .ToListAsync(ct);
+            storageObjects.AddRange(avatars.Select(a => (string.IsNullOrWhiteSpace(a.Bucket) ? AvatarBucket : a.Bucket, a.ObjectKey, "avatar")));
+
+            if (TryParseStorageUrl(me.ProfileBannerUrl, out var bannerBucket, out var bannerKey))
+                storageObjects.Add((bannerBucket, bannerKey, "profile-banner"));
+
+            var uploadedFiles = await _db.ChatFiles.AsNoTracking()
+                .Where(f => f.UploaderId == uid && !string.IsNullOrWhiteSpace(f.ObjectKey))
+                .Select(f => new { f.Bucket, f.ObjectKey, f.StoredPath })
+                .ToListAsync(ct);
+            storageObjects.AddRange(uploadedFiles.Select(f => (
+                string.IsNullOrWhiteSpace(f.Bucket) ? "jaezoo-files" : f.Bucket,
+                string.IsNullOrWhiteSpace(f.ObjectKey) ? f.StoredPath : f.ObjectKey,
+                "chat-file")));
+
+            foreach (var (bucket, key, reason) in storageObjects.Distinct())
+            {
+                if (string.IsNullOrWhiteSpace(bucket) || string.IsNullOrWhiteSpace(key)) continue;
+                try
+                {
+                    await _storage.DeleteAsync(bucket, key, ct);
+                    _log.LogInformation("Deleted account storage object. UserId={UserId} Bucket={Bucket} Key={Key} Reason={Reason}", uid, bucket, key, reason);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "Failed to delete account storage object. UserId={UserId} Bucket={Bucket} Key={Key} Reason={Reason}", uid, bucket, key, reason);
+                }
+            }
+
+            var ownedGroupIds = await _db.GroupChats.AsNoTracking()
+                .Where(g => g.OwnerId == uid)
+                .Select(g => g.Id)
+                .ToListAsync(ct);
+
+            var directDialogIds = await _db.DirectDialogs.AsNoTracking()
+                .Where(d => d.User1Id == uid || d.User2Id == uid)
+                .Select(d => d.Id)
+                .ToListAsync(ct);
+
+            var directMessageIds = await _db.DirectMessages.AsNoTracking()
+                .Where(m => m.SenderId == uid || directDialogIds.Contains(m.DialogId))
+                .Select(m => m.Id)
+                .ToListAsync(ct);
+
+            var groupMessageIds = await _db.GroupMessages.AsNoTracking()
+                .Where(m => m.SenderId == uid || ownedGroupIds.Contains(m.GroupChatId))
+                .Select(m => m.Id)
+                .ToListAsync(ct);
+
+            await using var tx = await _db.Database.BeginTransactionAsync(ct);
+
+            await _db.DirectMessageAttachments.Where(a => directMessageIds.Contains(a.MessageId)).ExecuteDeleteAsync(ct);
+            await _db.GroupMessageAttachments.Where(a => groupMessageIds.Contains(a.MessageId)).ExecuteDeleteAsync(ct);
+
+            await _db.DirectMessages.Where(m => directMessageIds.Contains(m.Id)).ExecuteDeleteAsync(ct);
+            await _db.GroupMessages.Where(m => groupMessageIds.Contains(m.Id)).ExecuteDeleteAsync(ct);
+            await _db.DirectDialogs.Where(d => directDialogIds.Contains(d.Id)).ExecuteDeleteAsync(ct);
+
+            await _db.GroupVoiceParticipants.Where(p => p.UserId == uid || ownedGroupIds.Contains(p.GroupChatId)).ExecuteDeleteAsync(ct);
+            await _db.GroupVoiceSessions.Where(s => ownedGroupIds.Contains(s.GroupChatId)).ExecuteDeleteAsync(ct);
+            await _db.GroupChatMembers.Where(m => m.UserId == uid || ownedGroupIds.Contains(m.GroupChatId)).ExecuteDeleteAsync(ct);
+            await _db.GroupAvatars.Where(a => ownedGroupIds.Contains(a.GroupChatId)).ExecuteDeleteAsync(ct);
+            await _db.GroupChats.Where(g => ownedGroupIds.Contains(g.Id)).ExecuteDeleteAsync(ct);
+
+            await _db.Friendships.Where(f => f.RequesterId == uid || f.AddresseeId == uid).ExecuteDeleteAsync(ct);
+            await _db.UserRoles.Where(r => r.UserId == uid).ExecuteDeleteAsync(ct);
+            await _db.AdminAuditLogs.Where(a => a.ActorUserId == uid).ExecuteDeleteAsync(ct);
+            await _db.UserSessions.Where(s => s.UserId == uid).ExecuteDeleteAsync(ct);
+            await _db.EmailVerificationCodes.Where(c => c.UserId == uid).ExecuteDeleteAsync(ct);
+            await _db.Avatars.Where(a => a.UserId == uid).ExecuteDeleteAsync(ct);
+            await _db.UserAvatars.Where(a => a.UserId == uid).ExecuteDeleteAsync(ct);
+            await _db.ChatFiles.Where(f => f.UploaderId == uid).ExecuteDeleteAsync(ct);
+            await _db.Users.Where(u => u.Id == uid).ExecuteDeleteAsync(ct);
+
+            await tx.CommitAsync(ct);
+
+            _log.LogWarning("User account deleted completely. UserId={UserId} Login={Login} Email={Email}", uid, me.Login, me.Email);
+            return Ok(new { message = "Аккаунт удалён." });
+        }
+
+        private bool TryParseStorageUrl(string? url, out string bucket, out string key)
+        {
+            bucket = AvatarBucket;
+            key = string.Empty;
+            if (string.IsNullOrWhiteSpace(url)) return false;
+
+            var value = url.Trim();
+            if (value.StartsWith("s3://", StringComparison.OrdinalIgnoreCase))
+            {
+                var rest = value[5..];
+                var slash = rest.IndexOf('/');
+                if (slash <= 0 || slash >= rest.Length - 1) return false;
+                bucket = rest[..slash];
+                key = rest[(slash + 1)..];
+                return true;
+            }
+
+            if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)) return false;
+            var parts = uri.AbsolutePath.Trim('/').Split('/', 2, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 2)
+            {
+                bucket = Uri.UnescapeDataString(parts[0]);
+                key = Uri.UnescapeDataString(parts[1]);
+                var q = key.IndexOf('?');
+                if (q >= 0) key = key[..q];
+                return !string.IsNullOrWhiteSpace(bucket) && !string.IsNullOrWhiteSpace(key);
+            }
+            return false;
+        }
     }
 
     public class ChangeUserNameRequest
@@ -209,6 +346,11 @@ namespace JaeZoo.Server.Controllers
     {
         public string? CurrentPassword { get; set; }
         public string? NewPassword { get; set; }
+        public string? CaptchaToken { get; set; }
+    }
+
+    public class DeleteAccountRequest
+    {
         public string? CaptchaToken { get; set; }
     }
 }
