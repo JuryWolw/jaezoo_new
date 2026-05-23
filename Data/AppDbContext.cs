@@ -1,4 +1,5 @@
 ﻿using JaeZoo.Server.Models;
+using JaeZoo.Server.Models.Files;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Data;
@@ -221,6 +222,44 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<ChatFile>()
             .Property(f => f.StoredPath)
             .HasMaxLength(512);
+
+        b.Entity<ChatFile>()
+            .Property(f => f.SafeFileName)
+            .HasMaxLength(256);
+
+        b.Entity<ChatFile>()
+            .Property(f => f.DetectedContentType)
+            .HasMaxLength(128);
+
+        b.Entity<ChatFile>()
+            .Property(f => f.Bucket)
+            .HasMaxLength(128);
+
+        b.Entity<ChatFile>()
+            .Property(f => f.ObjectKey)
+            .HasMaxLength(512);
+
+        b.Entity<ChatFile>()
+            .Property(f => f.Sha256)
+            .HasMaxLength(64);
+
+        b.Entity<ChatFile>()
+            .Property(f => f.Kind)
+            .HasConversion<int>();
+
+        b.Entity<ChatFile>()
+            .Property(f => f.ScanStatus)
+            .HasConversion<int>();
+
+        b.Entity<ChatFile>()
+            .Property(f => f.RiskNote)
+            .HasMaxLength(512);
+
+        b.Entity<ChatFile>()
+            .HasIndex(f => new { f.Bucket, f.ObjectKey });
+
+        b.Entity<ChatFile>()
+            .HasIndex(f => f.Sha256);
 
         b.Entity<DirectMessageAttachment>()
             .HasIndex(a => new { a.MessageId, a.FileId })

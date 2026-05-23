@@ -23,6 +23,7 @@ using JaeZoo.Server.Security;
 using JaeZoo.Server.Services.Admin;
 using JaeZoo.Server.Services.Email;
 using JaeZoo.Server.Services.Security;
+using JaeZoo.Server.Services.Files;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -36,7 +37,7 @@ if (isPg) builder.Services.AddDbContext<AppDbContext>(o => o.UseNpgsql(conn));
 else builder.Services.AddDbContext<AppDbContext>(o => o.UseSqlite(conn));
 
 // ---------- Files / multipart limits ----------
-var maxUploadBytes = builder.Configuration.GetValue<long?>("Files:MaxUploadBytes") ?? (50L * 1024 * 1024);
+var maxUploadBytes = builder.Configuration.GetValue<long?>("Files:MaxUploadBytes") ?? (2L * 1024 * 1024 * 1024);
 builder.Services.Configure<FormOptions>(o =>
 {
     o.MultipartBodyLengthLimit = maxUploadBytes;
@@ -110,6 +111,8 @@ builder.Services.AddAuthorization(options =>
 builder.Services.Configure<SmartCaptchaOptions>(builder.Configuration.GetSection("SmartCaptcha"));
 builder.Services.AddHttpClient<SmartCaptchaService>();
 builder.Services.AddSingleton<RiskCaptchaService>();
+builder.Services.AddSingleton<FileInspectionService>();
+builder.Services.AddSingleton<FileBucketRouter>();
 
 // ---------- Email / Yandex Cloud Postbox ----------
 builder.Services.Configure<PostboxOptions>(builder.Configuration.GetSection("Postbox"));
@@ -286,6 +289,7 @@ using (var scope = app.Services.CreateScope())
 
     await EnsureGroupVoiceTablesAsync(db, logger);
     await EnsureEmailVerificationTablesAsync(db, logger);
+    await EnsureChatFileMetadataColumnsAsync(db, logger);
     await RoleBootstrapService.EnsureOwnerAsync(db, app.Configuration, logger);
 
     if (db.Database.IsNpgsql())
@@ -375,6 +379,85 @@ app.MapHub<CallsHub>("/hubs/calls");
 app.MapGet("/", () => Results.Redirect("/swagger"));
 
 app.Run();
+
+static async Task EnsureChatFileMetadataColumnsAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                ALTER TABLE "ChatFiles"
+                    ADD COLUMN IF NOT EXISTS "SafeFileName" character varying(256) NOT NULL DEFAULT '',
+                    ADD COLUMN IF NOT EXISTS "DetectedContentType" character varying(128) NOT NULL DEFAULT 'application/octet-stream',
+                    ADD COLUMN IF NOT EXISTS "Bucket" character varying(128) NOT NULL DEFAULT 'jaezoo-files',
+                    ADD COLUMN IF NOT EXISTS "ObjectKey" character varying(512) NOT NULL DEFAULT '',
+                    ADD COLUMN IF NOT EXISTS "Sha256" character varying(64) NOT NULL DEFAULT '',
+                    ADD COLUMN IF NOT EXISTS "Kind" integer NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS "ScanStatus" integer NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS "IsPotentiallyDangerous" boolean NOT NULL DEFAULT false,
+                    ADD COLUMN IF NOT EXISTS "RiskNote" character varying(512) NULL,
+                    ADD COLUMN IF NOT EXISTS "DeletedAt" timestamp with time zone NULL,
+                    ADD COLUMN IF NOT EXISTS "BlockedAt" timestamp with time zone NULL;
+
+                UPDATE "ChatFiles"
+                SET "ObjectKey" = "StoredPath"
+                WHERE "ObjectKey" = '' AND "StoredPath" <> '';
+
+                UPDATE "ChatFiles"
+                SET "SafeFileName" = "OriginalFileName"
+                WHERE "SafeFileName" = '';
+
+                UPDATE "ChatFiles"
+                SET "DetectedContentType" = "ContentType"
+                WHERE "DetectedContentType" = 'application/octet-stream' AND "ContentType" <> '';
+
+                CREATE INDEX IF NOT EXISTS "IX_ChatFiles_Bucket_ObjectKey" ON "ChatFiles" ("Bucket", "ObjectKey");
+                CREATE INDEX IF NOT EXISTS "IX_ChatFiles_Sha256" ON "ChatFiles" ("Sha256");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            var columns = new Dictionary<string, string>
+            {
+                ["SafeFileName"] = "TEXT NOT NULL DEFAULT ''",
+                ["DetectedContentType"] = "TEXT NOT NULL DEFAULT 'application/octet-stream'",
+                ["Bucket"] = "TEXT NOT NULL DEFAULT 'jaezoo-files'",
+                ["ObjectKey"] = "TEXT NOT NULL DEFAULT ''",
+                ["Sha256"] = "TEXT NOT NULL DEFAULT ''",
+                ["Kind"] = "INTEGER NOT NULL DEFAULT 0",
+                ["ScanStatus"] = "INTEGER NOT NULL DEFAULT 0",
+                ["IsPotentiallyDangerous"] = "INTEGER NOT NULL DEFAULT 0",
+                ["RiskNote"] = "TEXT NULL",
+                ["DeletedAt"] = "TEXT NULL",
+                ["BlockedAt"] = "TEXT NULL"
+            };
+
+            foreach (var (name, definition) in columns)
+            {
+                var existing = await db.Database.SqlQueryRaw<int>(
+                    $"SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('ChatFiles') WHERE name = '{name.Replace("'", "''")}'").SingleAsync();
+                if (existing == 0)
+                    await db.Database.ExecuteSqlRawAsync($"ALTER TABLE \"ChatFiles\" ADD COLUMN \"{name}\" {definition};");
+            }
+
+            await db.Database.ExecuteSqlRawAsync("""
+                UPDATE "ChatFiles" SET "ObjectKey" = "StoredPath" WHERE "ObjectKey" = '' AND "StoredPath" <> '';
+                UPDATE "ChatFiles" SET "SafeFileName" = "OriginalFileName" WHERE "SafeFileName" = '';
+                UPDATE "ChatFiles" SET "DetectedContentType" = "ContentType" WHERE "DetectedContentType" = 'application/octet-stream' AND "ContentType" <> '';
+                CREATE INDEX IF NOT EXISTS "IX_ChatFiles_Bucket_ObjectKey" ON "ChatFiles" ("Bucket", "ObjectKey");
+                CREATE INDEX IF NOT EXISTS "IX_ChatFiles_Sha256" ON "ChatFiles" ("Sha256");
+                """);
+        }
+
+        logger.LogInformation("Chat file metadata schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure chat file metadata schema.");
+        throw;
+    }
+}
 
 static async Task EnsureEmailVerificationTablesAsync(AppDbContext db, ILogger logger)
 {
