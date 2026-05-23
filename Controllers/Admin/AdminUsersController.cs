@@ -30,10 +30,10 @@ public sealed class AdminUsersController(AppDbContext db, IObjectStorage storage
         {
             var nq = q.ToUpperInvariant();
             query = query.Where(u =>
-                u.PublicId.ToUpper().Contains(nq) ||
-                u.DisplayName.ToUpper().Contains(nq) ||
-                u.Email.ToUpper().Contains(nq) ||
-                u.Login.ToUpper().Contains(nq));
+                ((u.PublicId ?? string.Empty).ToUpper()).Contains(nq) ||
+                ((u.DisplayName ?? string.Empty).ToUpper()).Contains(nq) ||
+                ((u.Email ?? string.Empty).ToUpper()).Contains(nq) ||
+                ((u.Login ?? string.Empty).ToUpper()).Contains(nq));
         }
 
         var total = await query.CountAsync(ct);
@@ -59,18 +59,23 @@ public sealed class AdminUsersController(AppDbContext db, IObjectStorage storage
             .ToListAsync(ct);
 
         var ids = rows.Select(x => x.Id).ToList();
-        var roles = await db.UserRoles.AsNoTracking()
+        var roleRows = await db.UserRoles.AsNoTracking()
             .Where(r => ids.Contains(r.UserId) && r.RevokedAt == null)
+            .Select(r => new { r.UserId, r.Role })
+            .ToListAsync(ct);
+
+        var roles = roleRows
             .GroupBy(r => r.UserId)
-            .Select(g => new { UserId = g.Key, Roles = g.Select(r => r.Role.ToString()).ToList() })
-            .ToDictionaryAsync(x => x.UserId, x => (IReadOnlyList<string>)x.Roles, ct);
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyList<string>)g.Select(x => x.Role.ToString()).OrderBy(x => x).ToArray());
 
         var items = rows.Select(u => new AdminUserListItemDto(
             u.Id,
-            u.PublicId,
-            u.DisplayName,
-            u.Login,
-            u.Email,
+            u.PublicId ?? string.Empty,
+            string.IsNullOrWhiteSpace(u.DisplayName) ? u.Login ?? string.Empty : u.DisplayName,
+            u.Login ?? string.Empty,
+            u.Email ?? string.Empty,
             u.EmailConfirmed,
             u.IsDisabled,
             u.DisabledReason,

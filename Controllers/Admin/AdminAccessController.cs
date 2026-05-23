@@ -1,10 +1,10 @@
 using System.Security.Claims;
 using JaeZoo.Server.Data;
+using JaeZoo.Server.Models;
 using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using JaeZoo.Server.Models;
 
 namespace JaeZoo.Server.Controllers.Admin;
 
@@ -22,12 +22,21 @@ public sealed class AdminAccessController(AppDbContext db) : ControllerBase
         var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId, ct);
         if (user is null) return Unauthorized();
 
-        var roles = await db.UserRoles.AsNoTracking()
+        var roleValues = await db.UserRoles.AsNoTracking()
             .Where(r => r.UserId == userId && r.RevokedAt == null)
-            .Select(r => r.Role.ToString())
-            .OrderBy(x => x)
+            .Select(r => r.Role)
             .ToListAsync(ct);
 
-        return new AdminMeDto(user.Id, user.PublicId, user.DisplayName, user.Email, roles);
+        var roles = roleValues
+            .Select(r => r.ToString())
+            .OrderBy(x => x)
+            .ToArray();
+
+        return new AdminMeDto(
+            user.Id,
+            user.PublicId ?? string.Empty,
+            string.IsNullOrWhiteSpace(user.DisplayName) ? user.Login : user.DisplayName,
+            user.Email ?? string.Empty,
+            roles);
     }
 }
