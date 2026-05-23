@@ -294,3 +294,76 @@ public record UserRoleDto(
     DateTime? RevokedAt,
     Guid? RevokedByUserId,
     string? RevokeReason);
+
+public sealed record AdminMeDto(
+    Guid UserId,
+    string PublicId,
+    string DisplayName,
+    string Email,
+    IReadOnlyList<string> Roles);
+
+public sealed record AdminOverviewDto(
+    int TotalUsers,
+    int VerifiedUsers,
+    int DisabledUsers,
+    int OnlineUsers,
+    int NewUsersDay,
+    int NewUsersWeek,
+    int NewUsersMonth,
+    int NewUsersHalfYear,
+    int NewUsersYear,
+    int DirectMessages,
+    int GroupMessages,
+    int Groups,
+    int TotalFiles,
+    int PendingFiles,
+    int BlockedFiles,
+    long TotalStorageBytes,
+    IReadOnlyList<AdminRoleCounterDto> Roles,
+    DateTime GeneratedAt);
+
+public sealed record AdminRoleCounterDto(string Role, int Count);
+
+public sealed record AdminUsersPageDto(int Total, IReadOnlyList<AdminUserListItemDto> Items);
+
+public sealed record AdminUserListItemDto(
+    Guid Id,
+    string PublicId,
+    string DisplayName,
+    string Login,
+    string Email,
+    bool EmailConfirmed,
+    bool IsDisabled,
+    string? DisabledReason,
+    DateTime CreatedAt,
+    DateTime? LastSeen,
+    string? AvatarUrl,
+    string? ProfileBannerUrl,
+    IReadOnlyList<string> Roles);
+
+public sealed record AdminBanUserRequest(Guid UserId, string? Reason = null, string? Type = "Account", DateTime? ExpiresAt = null);
+public sealed record AdminRevokeBanRequest(string? Reason = null);
+
+public sealed record AdminBanDto(
+    Guid Id,
+    Guid UserId,
+    string PublicId,
+    string DisplayName,
+    string Email,
+    string Type,
+    string Reason,
+    DateTime CreatedAt,
+    DateTime? ExpiresAt,
+    DateTime? RevokedAt,
+    Guid? CreatedByUserId,
+    Guid? RevokedByUserId,
+    string? RevokeReason);
+
+public sealed record AdminReportDto(
+    Guid Id,
+    DateTime CreatedAt,
+    string Status,
+    string TargetType,
+    string TargetId,
+    string ReporterPublicId,
+    string Summary);

@@ -103,6 +103,8 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy(AuthPolicies.AdminAccess, policy => policy.RequireRole(AuthPolicies.AdminRoles));
     options.AddPolicy(AuthPolicies.ManageAds, policy => policy.RequireRole(AuthPolicies.AdsManagerRoles));
     options.AddPolicy(AuthPolicies.ViewAdminAudit, policy => policy.RequireRole(AuthPolicies.AuditViewerRoles));
+    options.AddPolicy(AuthPolicies.AdminPanelAccess, policy => policy.RequireRole(AuthPolicies.AdminPanelRoles));
+    options.AddPolicy(AuthPolicies.ModerationAccess, policy => policy.RequireRole(AuthPolicies.ModerationRoles));
 });
 
 
@@ -296,6 +298,7 @@ using (var scope = app.Services.CreateScope())
     await EnsureEmailVerificationTablesAsync(db, logger);
     await EnsureChatFileMetadataColumnsAsync(db, logger);
     await EnsureProfileMediaSchemaAsync(db, logger);
+    await EnsureModerationSchemaAsync(db, logger);
     await RoleBootstrapService.EnsureOwnerAsync(db, app.Configuration, logger);
 
     if (db.Database.IsNpgsql())
@@ -709,5 +712,58 @@ static async Task EnsureGroupVoiceTablesAsync(AppDbContext db, ILogger logger)
     {
         logger.LogError(ex, "Failed to ensure group voice schema.");
         throw;
+    }
+}
+
+static async Task EnsureModerationSchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "ModerationBans" (
+                    "Id" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "CreatedAt" timestamptz NOT NULL DEFAULT now(),
+                    "ExpiresAt" timestamptz NULL,
+                    "RevokedAt" timestamptz NULL,
+                    "CreatedByUserId" uuid NULL,
+                    "RevokedByUserId" uuid NULL,
+                    "Type" character varying(64) NOT NULL DEFAULT 'Account',
+                    "Reason" character varying(512) NOT NULL DEFAULT '',
+                    "RevokeReason" character varying(512) NULL,
+                    CONSTRAINT "PK_ModerationBans" PRIMARY KEY ("Id"),
+                    CONSTRAINT "FK_ModerationBans_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS "IX_ModerationBans_UserId_RevokedAt_ExpiresAt" ON "ModerationBans" ("UserId", "RevokedAt", "ExpiresAt");
+                CREATE INDEX IF NOT EXISTS "IX_ModerationBans_CreatedAt" ON "ModerationBans" ("CreatedAt");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "ModerationBans" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_ModerationBans" PRIMARY KEY,
+                    "UserId" TEXT NOT NULL,
+                    "CreatedAt" TEXT NOT NULL,
+                    "ExpiresAt" TEXT NULL,
+                    "RevokedAt" TEXT NULL,
+                    "CreatedByUserId" TEXT NULL,
+                    "RevokedByUserId" TEXT NULL,
+                    "Type" TEXT NOT NULL DEFAULT 'Account',
+                    "Reason" TEXT NOT NULL DEFAULT '',
+                    "RevokeReason" TEXT NULL,
+                    CONSTRAINT "FK_ModerationBans_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS "IX_ModerationBans_UserId_RevokedAt_ExpiresAt" ON "ModerationBans" ("UserId", "RevokedAt", "ExpiresAt");
+                CREATE INDEX IF NOT EXISTS "IX_ModerationBans_CreatedAt" ON "ModerationBans" ("CreatedAt");
+                """);
+        }
+        logger.LogInformation("Moderation schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure moderation schema.");
     }
 }

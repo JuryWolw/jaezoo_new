@@ -1,5 +1,6 @@
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Files;
+using JaeZoo.Server.Models.Moderation;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Data;
@@ -25,6 +26,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<AdminAuditLog> AdminAuditLogs => Set<AdminAuditLog>();
     public DbSet<UserSession> UserSessions => Set<UserSession>();
     public DbSet<EmailVerificationCode> EmailVerificationCodes => Set<EmailVerificationCode>();
+    public DbSet<ModerationBan> ModerationBans => Set<ModerationBan>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -178,6 +180,25 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .WithMany()
             .HasForeignKey(c => c.UserId)
             .OnDelete(DeleteBehavior.Cascade);
+
+
+        b.Entity<ModerationBan>()
+            .Property(ban => ban.Type)
+            .HasMaxLength(64);
+
+        b.Entity<ModerationBan>()
+            .Property(ban => ban.Reason)
+            .HasMaxLength(512);
+
+        b.Entity<ModerationBan>()
+            .Property(ban => ban.RevokeReason)
+            .HasMaxLength(512);
+
+        b.Entity<ModerationBan>()
+            .HasIndex(ban => new { ban.UserId, ban.RevokedAt, ban.ExpiresAt });
+
+        b.Entity<ModerationBan>()
+            .HasIndex(ban => ban.CreatedAt);
 
         b.Entity<Friendship>()
             .HasIndex(f => new { f.RequesterId, f.AddresseeId })

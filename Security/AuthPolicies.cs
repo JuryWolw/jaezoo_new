@@ -8,6 +8,8 @@ public static class AuthPolicies
     public const string AdminAccess = "AdminAccess";
     public const string ManageAds = "ManageAds";
     public const string ViewAdminAudit = "ViewAdminAudit";
+    public const string AdminPanelAccess = "AdminPanelAccess";
+    public const string ModerationAccess = "ModerationAccess";
 
     public static readonly string[] OwnerRoles = [GlobalRole.Owner.ToString()];
 
@@ -27,6 +29,24 @@ public static class AuthPolicies
     public static readonly string[] AuditViewerRoles =
     [
         GlobalRole.Owner.ToString(),
-        GlobalRole.Admin.ToString()
+        GlobalRole.Admin.ToString(),
+        GlobalRole.Moderator.ToString(),
+        GlobalRole.Helper.ToString()
+    ];
+
+    public static readonly string[] AdminPanelRoles =
+    [
+        GlobalRole.Owner.ToString(),
+        GlobalRole.Admin.ToString(),
+        GlobalRole.Moderator.ToString(),
+        GlobalRole.Helper.ToString()
+    ];
+
+    public static readonly string[] ModerationRoles =
+    [
+        GlobalRole.Owner.ToString(),
+        GlobalRole.Admin.ToString(),
+        GlobalRole.Moderator.ToString(),
+        GlobalRole.Helper.ToString()
     ];
 }
