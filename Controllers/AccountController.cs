@@ -9,6 +9,7 @@ using JaeZoo.Server.Services.Storage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Controllers
@@ -16,6 +17,7 @@ namespace JaeZoo.Server.Controllers
     [ApiController]
     [Route("api/users/account")]
     [Authorize]
+    [EnableRateLimiting("security-sensitive")]
     public class AccountController : ControllerBase
     {
         private readonly AppDbContext _db;
@@ -23,14 +25,16 @@ namespace JaeZoo.Server.Controllers
         private readonly IObjectStorage _storage;
         private readonly ILogger<AccountController> _log;
         private readonly IConfiguration _cfg;
+        private readonly SecurityAuditService _securityAudit;
 
-        public AccountController(AppDbContext db, SmartCaptchaService captcha, IObjectStorage storage, ILogger<AccountController> log, IConfiguration cfg)
+        public AccountController(AppDbContext db, SmartCaptchaService captcha, IObjectStorage storage, ILogger<AccountController> log, IConfiguration cfg, SecurityAuditService securityAudit)
         {
             _db = db;
             _captcha = captcha;
             _storage = storage;
             _log = log;
             _cfg = cfg;
+            _securityAudit = securityAudit;
         }
 
         private async Task<IActionResult?> RequireCaptchaAsync(string? token, CancellationToken ct)
@@ -95,6 +99,7 @@ namespace JaeZoo.Server.Controllers
             me.TokenVersion++;
             me.UpdatedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync(ct);
+            await _securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginChanged", "User", me.Id.ToString(), $"Login changed. publicId={me.PublicId}", ct);
             return NoContent();
         }
 
@@ -139,6 +144,7 @@ namespace JaeZoo.Server.Controllers
             me.TokenVersion++;
             me.UpdatedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync(ct);
+            await _securityAudit.TryWriteAsync(User, HttpContext, "Security.EmailChanged", "User", me.Id.ToString(), $"Email changed and verification reset. publicId={me.PublicId}", ct);
             return NoContent();
         }
 
@@ -195,6 +201,7 @@ namespace JaeZoo.Server.Controllers
             me.TokenVersion++;
             me.UpdatedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync(ct);
+            await _securityAudit.TryWriteAsync(User, HttpContext, "Security.PasswordChanged", "User", me.Id.ToString(), $"Password changed. publicId={me.PublicId}", ct);
             return NoContent();
         }
 
@@ -292,6 +299,7 @@ namespace JaeZoo.Server.Controllers
             await tx.CommitAsync(ct);
 
             _log.LogWarning("User account deleted completely. UserId={UserId} PublicId={PublicId}", uid, me.PublicId);
+            await _securityAudit.TryWriteAsync(User, HttpContext, "Security.AccountDeleted", "User", uid.ToString(), $"Account deleted completely. publicId={me.PublicId}; ownedGroups={ownedGroupIds.Count}; uploadedObjects={storageObjects.Count}", ct);
             return Ok(new { message = "Аккаунт удалён." });
         }
 

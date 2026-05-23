@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Linq;
 using System.Security.Claims;
@@ -100,6 +101,7 @@ namespace JaeZoo.Server.Controllers
 
         // ===== Поиск =====
         [HttpGet("search")]
+        [EnableRateLimiting("search")]
         public async Task<ActionResult<IEnumerable<UserSearchDto>>> Search([FromQuery] string q, CancellationToken ct)
         {
             var meId = MeId;

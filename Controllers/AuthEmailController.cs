@@ -3,6 +3,7 @@ using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Services.Email;
+using JaeZoo.Server.Services.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -17,6 +18,7 @@ namespace JaeZoo.Server.Controllers;
 public sealed class AuthEmailController(
     AppDbContext db,
     EmailVerificationService emailVerification,
+    SecurityAuditService securityAudit,
     ILogger<AuthEmailController> log) : ControllerBase
 {
     [HttpGet("status")]
@@ -59,8 +61,12 @@ public sealed class AuthEmailController(
                 result.Message);
 
             if (result.Cooldown)
+            {
+                await securityAudit.TryWriteAsync(User, HttpContext, "Security.EmailCodeCooldown", "User", user.Id.ToString(), $"Email confirmation resend cooldown. retryAfter={result.RetryAfterSeconds}", ct);
                 return StatusCode(StatusCodes.Status429TooManyRequests, response);
+            }
 
+            await securityAudit.TryWriteAsync(User, HttpContext, result.Sent ? "Security.EmailCodeSent" : "Security.EmailCodeNotSent", "User", user.Id.ToString(), result.Message, ct);
             return response;
         }
         catch (InvalidOperationException ex)
@@ -92,10 +98,12 @@ public sealed class AuthEmailController(
         try
         {
             var user = await emailVerification.ConfirmEmailAsync(userId, request.Code ?? string.Empty, ct);
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.EmailConfirmed", "User", user.Id.ToString(), $"Email confirmed. publicId={user.PublicId}", ct);
             return ToUserDto(user);
         }
         catch (InvalidOperationException ex)
         {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.EmailConfirmFailed", "User", userId.ToString(), ex.Message, ct);
             return BadRequest(ex.Message);
         }
         catch (Exception ex)

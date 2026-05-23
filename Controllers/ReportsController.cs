@@ -3,8 +3,10 @@ using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Moderation;
 using JaeZoo.Server.Security;
+using JaeZoo.Server.Services.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Controllers;
@@ -13,7 +15,8 @@ namespace JaeZoo.Server.Controllers;
 [Authorize]
 [RequireVerifiedEmail]
 [Route("api/reports")]
-public sealed class ReportsController(AppDbContext db, ILogger<ReportsController> log) : ControllerBase
+[EnableRateLimiting("reports")]
+public sealed class ReportsController(AppDbContext db, SecurityAuditService securityAudit, ILogger<ReportsController> log) : ControllerBase
 {
     private Guid MeId
     {
@@ -96,6 +99,7 @@ public sealed class ReportsController(AppDbContext db, ILogger<ReportsController
         db.ModerationReports.Add(report);
         await db.SaveChangesAsync(ct);
         log.LogInformation("Moderation report created. ReportId={ReportId} Reporter={ReporterId} TargetType={TargetType} TargetId={TargetId}", report.Id, MeId, report.TargetType, report.TargetId);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.ReportCreated", "Report", report.Id.ToString(), $"Report created. targetType={report.TargetType}; targetId={report.TargetId}; reason={report.Reason}", ct);
         return Ok(new ReportCreatedDto(report.Id, report.CreatedAt, report.Status));
     }
 

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Security;
+using JaeZoo.Server.Services.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -13,7 +14,7 @@ namespace JaeZoo.Server.Controllers;
 [ApiController]
 [Route("api/e2ee")]
 [Authorize]
-public sealed class E2eeKeysController(AppDbContext db, ILogger<E2eeKeysController> log) : ControllerBase
+public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService securityAudit, ILogger<E2eeKeysController> log) : ControllerBase
 {
     private Guid MeId => Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub") ?? User.FindFirstValue("nameid"), out var id)
         ? id
@@ -50,6 +51,7 @@ public sealed class E2eeKeysController(AppDbContext db, ILogger<E2eeKeysControll
         if (MeId == Guid.Empty) return Unauthorized();
         var deviceId = NormalizeDeviceId(request.DeviceId) ?? "legacy";
         var device = await UpsertDeviceInternalAsync(MeId, deviceId, request.PublicKeyBase64, request.DeviceName, request.ReplaceExisting, ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eeKeyUpserted", "E2EEDevice", device.DeviceId, $"Legacy E2EE public key upserted. fingerprint={device.Fingerprint}; replaceExisting={request.ReplaceExisting}", ct);
         return Ok(ToLegacyDto(device));
     }
 
@@ -83,6 +85,7 @@ public sealed class E2eeKeysController(AppDbContext db, ILogger<E2eeKeysControll
         var deviceId = NormalizeDeviceId(request.DeviceId);
         if (string.IsNullOrWhiteSpace(deviceId)) return BadRequest(new { message = "DeviceId is required." });
         var device = await UpsertDeviceInternalAsync(MeId, deviceId, request.PublicKeyBase64, request.DeviceName, request.ReplaceExisting, ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eeDeviceUpserted", "E2EEDevice", device.DeviceId, $"E2EE device upserted. fingerprint={device.Fingerprint}; replaceExisting={request.ReplaceExisting}; revoked=false", ct);
         return Ok(ToDeviceDto(device));
     }
 
@@ -98,6 +101,7 @@ public sealed class E2eeKeysController(AppDbContext db, ILogger<E2eeKeysControll
         key.RevokedAt = DateTime.UtcNow;
         key.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eeDeviceRevoked", "E2EEDevice", key.DeviceId, $"E2EE device revoked. fingerprint={key.Fingerprint}", ct);
         return NoContent();
     }
 

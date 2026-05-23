@@ -16,7 +16,13 @@ namespace JaeZoo.Server.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [EnableRateLimiting("auth")]
-public class AuthController(AppDbContext db, TokenService tokens, EmailVerificationService emailVerification, SmartCaptchaService captcha, ILogger<AuthController> log) : ControllerBase
+public class AuthController(
+    AppDbContext db,
+    TokenService tokens,
+    EmailVerificationService emailVerification,
+    SmartCaptchaService captcha,
+    SecurityAuditService securityAudit,
+    ILogger<AuthController> log) : ControllerBase
 {
     private readonly PasswordHasher<User> _hasher = new();
 
@@ -46,11 +52,14 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
 
         var captchaResult = await captcha.ValidateAsync(r.CaptchaToken, HttpContext, ct);
         if (!captchaResult.Success)
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.RegisterCaptchaFailed", "Identity", SecurityAuditService.HashTarget(login + "|" + email), captchaResult.Message, ct);
             return StatusCode(StatusCodes.Status403Forbidden, new
             {
                 code = "captcha_required",
                 message = captchaResult.Message
             });
+        }
 
         var loginHash = IdentityDataProtector.HashLogin(login);
         var emailHash = IdentityDataProtector.HashEmail(email);
@@ -93,6 +102,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
         user.PasswordHash = _hasher.HashPassword(user, password);
         db.Users.Add(user);
         await db.SaveChangesAsync(ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.UserRegistered", "User", user.Id.ToString(), $"Registered publicId={user.PublicId}; emailConfirmed=false", ct);
 
         var emailCodeSent = false;
         var emailMessage = "Код подтверждения будет отправлен после входа.";
@@ -126,7 +136,10 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
         var loginOrEmail = r.GetLoginOrEmail();
         var password = r.Password ?? string.Empty;
         if (string.IsNullOrWhiteSpace(loginOrEmail) || string.IsNullOrWhiteSpace(password))
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginFailed", "Identity", "empty", "Missing login/email or password.", ct);
             return Unauthorized("Неверный логин/почта или пароль.");
+        }
 
         var lookupHash = loginOrEmail.Contains('@')
             ? IdentityDataProtector.HashEmail(loginOrEmail)
@@ -137,16 +150,25 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
             u.EmailHash == lookupHash, ct);
 
         if (user is null)
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginFailed", "Identity", SecurityAuditService.HashTarget(loginOrEmail), "Unknown login/email or wrong password.", ct);
             return Unauthorized("Неверный логин/почта или пароль.");
+        }
 
         if (user.IsDisabled)
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginBlockedDisabled", "User", user.Id.ToString(), $"Disabled account login blocked. publicId={user.PublicId}", ct);
             return StatusCode(StatusCodes.Status403Forbidden, string.IsNullOrWhiteSpace(user.DisabledReason)
                 ? "Аккаунт отключён."
                 : user.DisabledReason);
+        }
 
         var result = _hasher.VerifyHashedPassword(user, user.PasswordHash, password);
         if (result is PasswordVerificationResult.Failed)
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginFailed", "User", user.Id.ToString(), $"Wrong password. publicId={user.PublicId}", ct);
             return Unauthorized("Неверный логин/почта или пароль.");
+        }
 
         if (result == PasswordVerificationResult.SuccessRehashNeeded)
             IdentityDataProtector.SetLegacyLoginPlaceholder(user);
@@ -198,6 +220,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
 
         var accessExpiresAt = DateTime.UtcNow.AddMinutes(60);
         var token = tokens.Create(user, roles, session?.Id, accessExpiresAt);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginSucceeded", "User", user.Id.ToString(), $"Login succeeded. rememberMe={r.RememberMe}; sessionId={session?.Id.ToString() ?? "none"}; publicId={user.PublicId}", ct);
         return new TokenResponse(
             token,
             ToUserDto(user),
@@ -213,7 +236,10 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     {
         var refreshToken = (r.RefreshToken ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(refreshToken))
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.RefreshFailed", "Session", "empty", "Refresh token missing.", ct);
             return Unauthorized("Refresh token отсутствует.");
+        }
 
         var tokenHash = UserSessionService.HashRefreshToken(refreshToken);
         var now = DateTime.UtcNow;
@@ -223,13 +249,19 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
             .FirstOrDefaultAsync(s => s.RefreshTokenHash == tokenHash, ct);
 
         if (session is null || !UserSessionService.IsActive(session, now) || session.User is null)
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.RefreshFailed", "Session", SecurityAuditService.HashTarget(refreshToken), "Refresh token invalid, revoked or expired.", ct);
             return Unauthorized("Сессия недействительна.");
+        }
 
         var user = session.User;
         if (user.IsDisabled)
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.RefreshBlockedDisabled", "User", user.Id.ToString(), $"Refresh blocked for disabled account. publicId={user.PublicId}; sessionId={session.Id}", ct);
             return StatusCode(StatusCodes.Status403Forbidden, string.IsNullOrWhiteSpace(user.DisabledReason)
                 ? "Аккаунт отключён."
                 : user.DisabledReason);
+        }
 
         var roles = await db.UserRoles
             .Where(role => role.UserId == user.Id && role.RevokedAt == null)
@@ -248,6 +280,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
 
         var accessExpiresAt = now.AddMinutes(60);
         var token = tokens.Create(user, roles, session.Id, accessExpiresAt);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.RefreshSucceeded", "Session", session.Id.ToString(), $"Refresh succeeded. publicId={user.PublicId}", ct);
         return new TokenResponse(
             token,
             ToUserDto(user),
@@ -286,6 +319,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
         {
             session.RevokedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(ct);
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.Logout", "Session", session.Id.ToString(), "Session revoked by logout.", ct);
         }
 
         return NoContent();
@@ -307,6 +341,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
             session.RevokedAt = now;
 
         await db.SaveChangesAsync(ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.LogoutAll", "Session", currentSid?.ToString() ?? "all", $"Revoked other sessions count={sessions.Count}.", ct);
         return NoContent();
     }
 
@@ -348,6 +383,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
 
         session.RevokedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.SessionRevoked", "Session", session.Id.ToString(), "Session revoked from account settings.", ct);
         return NoContent();
     }
 
