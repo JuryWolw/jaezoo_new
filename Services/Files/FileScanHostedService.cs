@@ -82,6 +82,17 @@ public sealed class FileScanHostedService(
 
                 if (result.IsDangerous)
                 {
+                    var sha = (file.Sha256 ?? string.Empty).Trim().ToUpperInvariant();
+                    var isAllowListed = !string.IsNullOrWhiteSpace(sha) &&
+                        await db.FileScanAllowList.AsNoTracking().AnyAsync(a => a.Sha256 == sha, ct);
+
+                    if (isAllowListed)
+                    {
+                        log.LogInformation("File scan threat ignored by allowlist. FileId={FileId} Sha256={Sha256} Reason={Reason}", file.Id, sha, result.Reason);
+                        await moderation.MarkCleanAndBroadcastAsync(file.Id, ct);
+                        continue;
+                    }
+
                     await moderation.RemoveDangerousFileAsync(file.Id, result.Reason ?? "Blocked by antivirus scanner.", ct);
                     continue;
                 }

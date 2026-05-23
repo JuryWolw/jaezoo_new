@@ -299,6 +299,7 @@ using (var scope = app.Services.CreateScope())
     await EnsureChatFileMetadataColumnsAsync(db, logger);
     await EnsureProfileMediaSchemaAsync(db, logger);
     await EnsureModerationSchemaAsync(db, logger);
+    await EnsureFileThreatSchemaAsync(db, logger);
     await RoleBootstrapService.EnsureOwnerAsync(db, app.Configuration, logger);
 
     if (db.Database.IsNpgsql())
@@ -711,6 +712,53 @@ static async Task EnsureGroupVoiceTablesAsync(AppDbContext db, ILogger logger)
     catch (Exception ex)
     {
         logger.LogError(ex, "Failed to ensure group voice schema.");
+        throw;
+    }
+}
+
+
+
+static async Task EnsureFileThreatSchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "FileScanAllowList" (
+                    "Id" uuid NOT NULL,
+                    "Sha256" character varying(64) NOT NULL,
+                    "Reason" character varying(512) NOT NULL,
+                    "ApprovedByUserId" uuid NULL,
+                    "ApprovedAt" timestamptz NOT NULL DEFAULT now(),
+                    CONSTRAINT "PK_FileScanAllowList" PRIMARY KEY ("Id")
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_FileScanAllowList_Sha256"
+                    ON "FileScanAllowList" ("Sha256");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "FileScanAllowList" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_FileScanAllowList" PRIMARY KEY,
+                    "Sha256" TEXT NOT NULL,
+                    "Reason" TEXT NOT NULL,
+                    "ApprovedByUserId" TEXT NULL,
+                    "ApprovedAt" TEXT NOT NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_FileScanAllowList_Sha256"
+                    ON "FileScanAllowList" ("Sha256");
+                """);
+        }
+
+        logger.LogInformation("File threat schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure file threat schema.");
         throw;
     }
 }

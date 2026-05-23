@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Models.Moderation;
 using JaeZoo.Server.Security;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Services.Admin;
@@ -87,6 +88,51 @@ public sealed class AdminUsersController(AppDbContext db, IObjectStorage storage
             roles.TryGetValue(u.Id, out var rs) ? rs : Array.Empty<string>())).ToList();
 
         return new AdminUsersPageDto(total, items);
+    }
+
+
+    [HttpPost("{userId:guid}/warn")]
+    public async Task<IActionResult> Warn(Guid userId, [FromBody] AdminWarnUserRequest request, CancellationToken ct)
+    {
+        var target = await db.Users.FirstOrDefaultAsync(u => u.Id == userId, ct);
+        if (target is null) return NotFound("Пользователь не найден.");
+
+        var actorId = GetActorUserId();
+        var reason = string.IsNullOrWhiteSpace(request.Reason) ? "Предупреждение администрацией JaeZoo." : request.Reason.Trim();
+
+        var warning = new ModerationWarning
+        {
+            Id = Guid.NewGuid(),
+            UserId = target.Id,
+            ReportId = request.ReportId,
+            CreatedByUserId = actorId,
+            CreatedAt = DateTime.UtcNow,
+            Reason = reason,
+            EmailSubject = request.EmailSubject?.Trim() ?? string.Empty,
+            EmailBody = request.EmailBody?.Trim() ?? string.Empty
+        };
+        db.ModerationWarnings.Add(warning);
+        await db.SaveChangesAsync(ct);
+
+        if (request.NotifyEmail)
+        {
+            var subject = string.IsNullOrWhiteSpace(request.EmailSubject) ? "Предупреждение JaeZoo" : request.EmailSubject.Trim();
+            var body = string.IsNullOrWhiteSpace(request.EmailBody)
+                ? $"""
+                  Здравствуйте, {UserIdentityService.GetPublicName(target)}.
+
+                  Администрация JaeZoo вынесла предупреждение вашему аккаунту.
+                  Причина: {reason}
+
+                  Пожалуйста, соблюдайте правила платформы.
+                  """
+                : request.EmailBody.Trim();
+            try { await emailSender.SendAccountNotificationAsync(target, subject, body, null, ct); }
+            catch (Exception ex) { log.LogWarning(ex, "Failed to send warning email to {UserId}", target.Id); }
+        }
+
+        await audit.WriteAsync(User, HttpContext, "UserWarned", "User", target.Id.ToString(), $"Warned {target.PublicId} / {UserIdentityService.GetPublicName(target)}. Reason: {reason}", ct);
+        return NoContent();
     }
 
     [HttpDelete("{userId:guid}")]

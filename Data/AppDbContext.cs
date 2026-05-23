@@ -29,6 +29,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<ModerationBan> ModerationBans => Set<ModerationBan>();
     public DbSet<ModerationReport> ModerationReports => Set<ModerationReport>();
     public DbSet<ModerationWarning> ModerationWarnings => Set<ModerationWarning>();
+    public DbSet<FileScanAllowList> FileScanAllowList => Set<FileScanAllowList>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -253,6 +254,20 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<ModerationWarning>()
             .HasIndex(w => new { w.UserId, w.CreatedAt });
 
+
+
+
+        b.Entity<FileScanAllowList>()
+            .Property(a => a.Sha256)
+            .HasMaxLength(64);
+
+        b.Entity<FileScanAllowList>()
+            .Property(a => a.Reason)
+            .HasMaxLength(512);
+
+        b.Entity<FileScanAllowList>()
+            .HasIndex(a => a.Sha256)
+            .IsUnique();
 
         b.Entity<Friendship>()
             .HasIndex(f => new { f.RequesterId, f.AddresseeId })

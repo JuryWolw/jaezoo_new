@@ -421,3 +421,28 @@ public sealed record AdminReportActionRequest(
     string? EmailBody = null,
     DateTime? ExpiresAt = null);
 
+
+
+public sealed record AdminFileThreatDto(
+    Guid Id,
+    DateTime CreatedAt,
+    Guid UploaderId,
+    string UploaderPublicId,
+    string UploaderDisplayName,
+    string Kind,
+    long SizeBytes,
+    string Bucket,
+    string Sha256,
+    string ScanStatus,
+    bool IsPotentiallyDangerous,
+    string? RiskNote,
+    DateTime? BlockedAt,
+    DateTime? DeletedAt,
+    int DirectMessageRefs,
+    int GroupMessageRefs,
+    int AgeMinutes,
+    string LocationText);
+
+public sealed record AdminFileThreatsPageDto(int Total, IReadOnlyList<AdminFileThreatDto> Items);
+
+public sealed record AdminFileThreatActionRequest(string? Reason = null);
