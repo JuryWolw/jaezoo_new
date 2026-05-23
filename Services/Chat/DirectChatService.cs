@@ -8,6 +8,7 @@ namespace JaeZoo.Server.Services.Chat;
 public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
 {
     public AppDbContext Db => db;
+    public IObjectStorage Storage => storage;
 
     public static (Guid a, Guid b) OrderPair(Guid x, Guid y) => x < y ? (x, y) : (y, x);
 

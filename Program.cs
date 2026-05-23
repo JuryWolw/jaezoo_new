@@ -440,10 +440,14 @@ static async Task EnsureChatFileMetadataColumnsAsync(AppDbContext db, ILogger lo
 
             foreach (var (name, definition) in columns)
             {
-                var existing = await db.Database.SqlQueryRaw<int>(
-                    $"SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('ChatFiles') WHERE name = '{name.Replace("'", "''")}'").SingleAsync();
+                var safeName = name.Replace("'", "''");
+                var existingSql = "SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('ChatFiles') WHERE name = '" + safeName + "'";
+                var existing = await db.Database.SqlQueryRaw<int>(existingSql).SingleAsync();
                 if (existing == 0)
-                    await db.Database.ExecuteSqlRawAsync($"ALTER TABLE \"ChatFiles\" ADD COLUMN \"{name}\" {definition};");
+                {
+                    var alterSql = "ALTER TABLE \"ChatFiles\" ADD COLUMN \"" + name + "\" " + definition + ";";
+                    await db.Database.ExecuteSqlRawAsync(alterSql);
+                }
             }
 
             await db.Database.ExecuteSqlRawAsync("""

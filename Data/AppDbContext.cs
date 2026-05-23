@@ -1,4 +1,4 @@
-﻿using JaeZoo.Server.Models;
+using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Files;
 using Microsoft.EntityFrameworkCore;
 
@@ -11,6 +11,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<DirectDialog> DirectDialogs => Set<DirectDialog>();
     public DbSet<DirectMessage> DirectMessages => Set<DirectMessage>();
     public DbSet<Avatar> Avatars => Set<Avatar>();
+    public DbSet<UserAvatar> UserAvatars => Set<UserAvatar>();
     public DbSet<ChatFile> ChatFiles => Set<ChatFile>();
     public DbSet<DirectMessageAttachment> DirectMessageAttachments => Set<DirectMessageAttachment>();
     public DbSet<GroupChat> GroupChats => Set<GroupChat>();
@@ -36,6 +37,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<User>().Property(u => u.EmailNormalized).HasMaxLength(128);
         b.Entity<User>().Property(u => u.PublicId).HasMaxLength(32);
         b.Entity<User>().Property(u => u.SecurityStamp).HasMaxLength(64);
+        b.Entity<User>().Property(u => u.ProfileBannerUrl).HasMaxLength(512);
+        b.Entity<User>().Property(u => u.ProfileTextTheme).HasMaxLength(16);
         b.Entity<User>().Property(u => u.DisabledReason).HasMaxLength(256);
 
         // Старые индексы оставляем, чтобы не ломать существующую схему и код.
@@ -207,6 +210,34 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<Avatar>()
             .HasIndex(a => a.UserId);
+
+        b.Entity<UserAvatar>()
+            .Property(a => a.Bucket)
+            .HasMaxLength(128);
+
+        b.Entity<UserAvatar>()
+            .Property(a => a.ObjectKey)
+            .HasMaxLength(512);
+
+        b.Entity<UserAvatar>()
+            .Property(a => a.Url)
+            .HasMaxLength(512);
+
+        b.Entity<UserAvatar>()
+            .Property(a => a.ContentType)
+            .HasMaxLength(128);
+
+        b.Entity<UserAvatar>()
+            .HasIndex(a => new { a.UserId, a.DeletedAt, a.CreatedAt });
+
+        b.Entity<UserAvatar>()
+            .HasIndex(a => new { a.UserId, a.IsCurrent });
+
+        b.Entity<UserAvatar>()
+            .HasOne(a => a.User)
+            .WithMany()
+            .HasForeignKey(a => a.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<ChatFile>()
             .HasIndex(f => new { f.UploaderId, f.CreatedAt });

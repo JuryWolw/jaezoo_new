@@ -60,6 +60,12 @@ namespace JaeZoo.Server.Models
         [MaxLength(256)]
         public string? AvatarUrl { get; set; }   // ссылка на картинку (абсолютная или относительная)
 
+        [MaxLength(512)]
+        public string? ProfileBannerUrl { get; set; }
+
+        [MaxLength(16)]
+        public string? ProfileTextTheme { get; set; } = "Light"; // Light/Dark для текста поверх шапки
+
         [MaxLength(256)]
         public string? About { get; set; }       // «О себе»
 

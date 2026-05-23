@@ -17,7 +17,8 @@ namespace JaeZoo.Server.Models
         string PublicId,
         bool EmailConfirmed,
         DateTime? EmailVerifiedAt,
-        string? ProfileBannerUrl = null
+        string? ProfileBannerUrl = null,
+        string? ProfileTextTheme = null
     );
 
     // Публичный профиль (для других)
@@ -29,7 +30,20 @@ namespace JaeZoo.Server.Models
         UserStatus Status,
         string? CustomStatus,
         DateTime? LastSeen,
-        string? ProfileBannerUrl = null
+        string? ProfileBannerUrl = null,
+        string? ProfileTextTheme = null
+    );
+
+    public record UserAvatarDto(
+        Guid Id,
+        string Url,
+        bool IsCurrent,
+        DateTime CreatedAt
+    );
+
+    public record ProfileBannerDto(
+        string? Url,
+        string TextTheme
     );
 
     // Обновления профиля
