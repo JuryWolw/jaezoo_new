@@ -155,6 +155,20 @@ public record EditMessageRequest(string? Text);
 public record ForwardMessagesRequest(IReadOnlyList<Guid> MessageIds, bool IncludeAttachments = true);
 public record SendSystemMessageRequest(string SystemKey, string? Text);
 
+public record E2eePublicKeyDto(
+    Guid UserId,
+    string PublicKeyBase64,
+    string Algorithm,
+    string Fingerprint,
+    DateTime UpdatedAt
+);
+
+public record UpsertE2eePublicKeyRequest(
+    string PublicKeyBase64,
+    string? DeviceName = null,
+    bool ReplaceExisting = false
+);
+
 public record ChatRealtimeMessageDto(Guid PeerId, MessageDto Message);
 public record ChatMessageUpdatedDto(Guid PeerId, MessageDto Message);
 public record ChatMessageDeletedDto(Guid PeerId, Guid MessageId, DateTime DeletedAt, Guid DeletedById);

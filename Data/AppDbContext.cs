@@ -1,6 +1,7 @@
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Files;
 using JaeZoo.Server.Models.Moderation;
+using JaeZoo.Server.Models.Security;
 using JaeZoo.Server.Services.Security;
 using Microsoft.EntityFrameworkCore;
 
@@ -31,6 +32,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<ModerationReport> ModerationReports => Set<ModerationReport>();
     public DbSet<ModerationWarning> ModerationWarnings => Set<ModerationWarning>();
     public DbSet<FileScanAllowList> FileScanAllowList => Set<FileScanAllowList>();
+    public DbSet<UserE2eeKey> UserE2eeKeys => Set<UserE2eeKey>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -54,6 +56,35 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<User>().HasIndex(u => u.LoginNormalized).IsUnique();
         b.Entity<User>().HasIndex(u => u.EmailNormalized).IsUnique();
         b.Entity<User>().HasIndex(u => u.PublicId).IsUnique();
+
+        b.Entity<UserE2eeKey>()
+            .Property(k => k.PublicKeyBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<UserE2eeKey>()
+            .Property(k => k.Algorithm)
+            .HasMaxLength(64);
+
+        b.Entity<UserE2eeKey>()
+            .Property(k => k.Fingerprint)
+            .HasMaxLength(128);
+
+        b.Entity<UserE2eeKey>()
+            .Property(k => k.DeviceName)
+            .HasMaxLength(128);
+
+        b.Entity<UserE2eeKey>()
+            .HasIndex(k => k.UserId)
+            .IsUnique();
+
+        b.Entity<UserE2eeKey>()
+            .HasIndex(k => k.Fingerprint);
+
+        b.Entity<UserE2eeKey>()
+            .HasOne(k => k.User)
+            .WithMany()
+            .HasForeignKey(k => k.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
 
 
         b.Entity<UserRole>()

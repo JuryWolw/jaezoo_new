@@ -303,6 +303,7 @@ using (var scope = app.Services.CreateScope())
     await EnsureModerationSchemaAsync(db, logger);
     await EnsureFileThreatSchemaAsync(db, logger);
     await EnsureMessageEncryptionSchemaAsync(db, logger);
+    await EnsureE2eeKeySchemaAsync(db, logger);
 
     if (MessageTextProtector.Enabled && app.Configuration.GetValue<bool>("Messages:Encryption:MigrateExistingOnStartup"))
     {
@@ -400,6 +401,70 @@ app.MapGet("/", () => Results.Redirect("/swagger"));
 app.Run();
 
 
+
+
+static async Task EnsureE2eeKeySchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "UserE2eeKeys" (
+                    "Id" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "PublicKeyBase64" character varying(8192) NOT NULL,
+                    "Algorithm" character varying(64) NOT NULL,
+                    "Fingerprint" character varying(128) NOT NULL,
+                    "DeviceName" character varying(128) NULL,
+                    "CreatedAt" timestamp with time zone NOT NULL,
+                    "UpdatedAt" timestamp with time zone NOT NULL,
+                    CONSTRAINT "PK_UserE2eeKeys" PRIMARY KEY ("Id")
+                );
+
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'FK_UserE2eeKeys_Users_UserId'
+                    ) THEN
+                        ALTER TABLE "UserE2eeKeys"
+                            ADD CONSTRAINT "FK_UserE2eeKeys_Users_UserId"
+                            FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE;
+                    END IF;
+                END $$;
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_UserE2eeKeys_UserId" ON "UserE2eeKeys" ("UserId");
+                CREATE INDEX IF NOT EXISTS "IX_UserE2eeKeys_Fingerprint" ON "UserE2eeKeys" ("Fingerprint");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "UserE2eeKeys" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_UserE2eeKeys" PRIMARY KEY,
+                    "UserId" TEXT NOT NULL,
+                    "PublicKeyBase64" TEXT NOT NULL,
+                    "Algorithm" TEXT NOT NULL,
+                    "Fingerprint" TEXT NOT NULL,
+                    "DeviceName" TEXT NULL,
+                    "CreatedAt" TEXT NOT NULL,
+                    "UpdatedAt" TEXT NOT NULL,
+                    CONSTRAINT "FK_UserE2eeKeys_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_UserE2eeKeys_UserId" ON "UserE2eeKeys" ("UserId");
+                CREATE INDEX IF NOT EXISTS "IX_UserE2eeKeys_Fingerprint" ON "UserE2eeKeys" ("Fingerprint");
+                """);
+        }
+
+        logger.LogInformation("E2EE key schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure E2EE key schema.");
+        throw;
+    }
+}
 
 static async Task EnsureMessageEncryptionSchemaAsync(AppDbContext db, ILogger logger)
 {
