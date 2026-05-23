@@ -33,12 +33,17 @@ public sealed class AdminOverviewController(AppDbContext db) : ControllerBase
         var blockedFiles = await db.ChatFiles.CountAsync(f => f.BlockedAt != null, ct);
         var totalStorageBytes = await db.ChatFiles.Where(f => f.DeletedAt == null && f.BlockedAt == null).SumAsync(f => (long?)f.SizeBytes, ct) ?? 0;
 
-        var activeRoles = await db.UserRoles
+        var roleRows = await db.UserRoles
+            .AsNoTracking()
             .Where(r => r.RevokedAt == null)
             .GroupBy(r => r.Role)
-            .Select(g => new AdminRoleCounterDto(g.Key.ToString(), g.Count()))
+            .Select(g => new { Role = g.Key, Count = g.Count() })
             .OrderByDescending(x => x.Count)
             .ToListAsync(ct);
+
+        var activeRoles = roleRows
+            .Select(x => new AdminRoleCounterDto(x.Role.ToString(), x.Count))
+            .ToList();
 
         return new AdminOverviewDto(
             totalUsers,
