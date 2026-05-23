@@ -20,7 +20,12 @@ public static partial class UserIdentityService
         => string.IsNullOrWhiteSpace(user.DisplayName) ? "Пользователь JaeZoo" : user.DisplayName!.Trim();
 
     public static string GetAvatarUrl(User user)
-        => string.IsNullOrWhiteSpace(user.AvatarUrl) ? $"/avatars/{user.Id}" : user.AvatarUrl!.Trim();
+    {
+        // Public clients should always load profile avatars through the server proxy.
+        // Direct Object Storage/CDN links can be misconfigured per-bucket and WPF may cache them too aggressively.
+        var version = user.UpdatedAt == default ? user.Id.ToString("N") : user.UpdatedAt.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return $"/avatars/{user.Id}?v={version}";
+    }
 
     public static string NewSecurityStamp() => Guid.NewGuid().ToString("N");
 

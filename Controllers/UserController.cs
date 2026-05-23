@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Linq;
@@ -88,7 +88,7 @@ namespace JaeZoo.Server.Controllers
                     userId = user.Id.ToString(),
                     displayName = UserIdentityService.GetPublicName(user),
                     avatarUrl = UserIdentityService.GetAvatarUrl(user),
-                    profileBannerUrl = user.ProfileBannerUrl,
+                    profileBannerUrl = BannerProxyUrl(user),
                     profileTextTheme = string.IsNullOrWhiteSpace(user.ProfileTextTheme) ? "Light" : user.ProfileTextTheme
                 }, ct);
             }
@@ -205,6 +205,53 @@ namespace JaeZoo.Server.Controllers
             return Ok(ToProfileDto(me));
         }
 
+        private string AvatarProxyUrl(Guid userId, DateTime? updatedAt = null)
+        {
+            var v = (updatedAt ?? DateTime.UtcNow).ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return $"/avatars/{userId:D}?v={v}";
+        }
+
+        private string AvatarGalleryImageUrl(Guid avatarId, DateTime createdAt)
+        {
+            var v = createdAt.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return $"/api/users/avatar-gallery/{avatarId:D}/image?v={v}";
+        }
+
+        private string? BannerProxyUrl(User user)
+        {
+            if (string.IsNullOrWhiteSpace(user.ProfileBannerUrl)) return null;
+            var v = user.UpdatedAt == default ? Guid.NewGuid().ToString("N") : user.UpdatedAt.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return $"/api/users/{user.Id:D}/banner?v={v}";
+        }
+
+        private bool TryParseStorageUrl(string? url, out string bucket, out string key)
+        {
+            bucket = AvatarBucket;
+            key = string.Empty;
+            if (string.IsNullOrWhiteSpace(url)) return false;
+
+            var value = url.Trim();
+            if (value.StartsWith("s3://", StringComparison.OrdinalIgnoreCase))
+            {
+                var rest = value[5..];
+                var slash = rest.IndexOf('/');
+                if (slash <= 0 || slash >= rest.Length - 1) return false;
+                bucket = rest[..slash];
+                key = rest[(slash + 1)..];
+                return true;
+            }
+
+            if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)) return false;
+            var parts = uri.AbsolutePath.Trim('/').Split('/', 2, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 2)
+            {
+                bucket = Uri.UnescapeDataString(parts[0]);
+                key = Uri.UnescapeDataString(parts[1]);
+                return !string.IsNullOrWhiteSpace(bucket) && !string.IsNullOrWhiteSpace(key);
+            }
+            return false;
+        }
+
         [HttpPut("avatar/url")]
         [RequireVerifiedEmail]
         public async Task<ActionResult<UserProfileDto>> SetAvatarUrl([FromBody] SetAvatarUrlRequest body, CancellationToken ct)
@@ -238,19 +285,20 @@ namespace JaeZoo.Server.Controllers
                 UserId = me.Id,
                 Bucket = created.Bucket,
                 ObjectKey = created.ObjectKey,
-                Url = created.Url,
+                Url = string.Empty,
                 ContentType = created.ContentType,
                 SizeBytes = created.SizeBytes,
                 IsCurrent = true,
                 CreatedAt = DateTime.UtcNow
             };
 
+            entity.Url = AvatarGalleryImageUrl(entity.Id, entity.CreatedAt);
             _db.UserAvatars.Add(entity);
-            me.AvatarUrl = created.Url;
             me.UpdatedAt = DateTime.UtcNow;
+            me.AvatarUrl = AvatarProxyUrl(me.Id, me.UpdatedAt);
             await _db.SaveChangesAsync(ct);
 
-            await NotifyAvatarChangedAsync(me.Id, me.AvatarUrl, ct);
+            await NotifyAvatarChangedAsync(me.Id, UserIdentityService.GetAvatarUrl(me), ct);
             await NotifyProfileChangedAsync(me, ct);
             return Ok(ToProfileDto(me));
         }
@@ -264,10 +312,27 @@ namespace JaeZoo.Server.Controllers
                 .Where(a => a.UserId == uid && a.DeletedAt == null)
                 .OrderByDescending(a => a.IsCurrent)
                 .ThenByDescending(a => a.CreatedAt)
-                .Select(a => new UserAvatarDto(a.Id, a.Url, a.IsCurrent, a.CreatedAt))
+                .Select(a => new { a.Id, a.Url, a.IsCurrent, a.CreatedAt })
                 .ToListAsync(ct);
-            return Ok(avatars);
+            var result = avatars
+                .Select(a => new UserAvatarDto(a.Id, string.IsNullOrWhiteSpace(a.Url) ? AvatarGalleryImageUrl(a.Id, a.CreatedAt) : AvatarGalleryImageUrl(a.Id, a.CreatedAt), a.IsCurrent, a.CreatedAt))
+                .ToList();
+            return Ok(result);
         }
+
+        [AllowAnonymous]
+        [HttpGet("avatar-gallery/{avatarId:guid}/image")]
+        public async Task<IActionResult> GetAvatarGalleryImage(Guid avatarId, CancellationToken ct)
+        {
+            var avatar = await _db.UserAvatars.AsNoTracking()
+                .FirstOrDefaultAsync(a => a.Id == avatarId && a.DeletedAt == null, ct);
+            if (avatar == null) return NotFound();
+
+            var obj = await _storage.GetAsync(avatar.Bucket, avatar.ObjectKey, ct);
+            Response.Headers.CacheControl = "public,max-age=31536000,immutable";
+            return File(obj.Stream, string.IsNullOrWhiteSpace(avatar.ContentType) ? obj.ContentType : avatar.ContentType);
+        }
+
 
         [HttpPut("avatar-gallery/{avatarId:guid}/main")]
         [RequireVerifiedEmail]
@@ -283,11 +348,11 @@ namespace JaeZoo.Server.Controllers
 
             avatar.IsCurrent = true;
             var me = await _db.Users.FirstAsync(u => u.Id == uid, ct);
-            me.AvatarUrl = avatar.Url;
             me.UpdatedAt = DateTime.UtcNow;
+            me.AvatarUrl = AvatarProxyUrl(uid, me.UpdatedAt);
             await _db.SaveChangesAsync(ct);
 
-            await NotifyAvatarChangedAsync(uid, me.AvatarUrl, ct);
+            await NotifyAvatarChangedAsync(uid, UserIdentityService.GetAvatarUrl(me), ct);
             await NotifyProfileChangedAsync(me, ct);
             return Ok(ToProfileDto(me));
         }
@@ -318,17 +383,18 @@ namespace JaeZoo.Server.Controllers
                 if (next != null)
                 {
                     next.IsCurrent = true;
-                    me.AvatarUrl = next.Url;
+                    me.UpdatedAt = DateTime.UtcNow;
+                    me.AvatarUrl = AvatarProxyUrl(uid, me.UpdatedAt);
                 }
                 else
                 {
+                    me.UpdatedAt = DateTime.UtcNow;
                     me.AvatarUrl = null;
                 }
-                me.UpdatedAt = DateTime.UtcNow;
             }
 
             await _db.SaveChangesAsync(ct);
-            await NotifyAvatarChangedAsync(uid, me.AvatarUrl ?? $"/avatars/{uid}", ct);
+            await NotifyAvatarChangedAsync(uid, UserIdentityService.GetAvatarUrl(me), ct);
             await NotifyProfileChangedAsync(me, ct);
             return Ok(ToProfileDto(me));
         }
@@ -357,6 +423,19 @@ namespace JaeZoo.Server.Controllers
             return Ok(ToProfileDto(me));
         }
 
+        [AllowAnonymous]
+        [HttpGet("{id:guid}/banner")]
+        public async Task<IActionResult> GetProfileBanner(Guid id, CancellationToken ct)
+        {
+            var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == id, ct);
+            if (user == null || string.IsNullOrWhiteSpace(user.ProfileBannerUrl)) return NotFound();
+            if (!TryParseStorageUrl(user.ProfileBannerUrl, out var bucket, out var key)) return NotFound();
+
+            var obj = await _storage.GetAsync(bucket, key, ct);
+            Response.Headers.CacheControl = "public,max-age=3600";
+            return File(obj.Stream, string.IsNullOrWhiteSpace(obj.ContentType) ? "image/jpeg" : obj.ContentType);
+        }
+
         [HttpDelete("banner")]
         [RequireVerifiedEmail]
         public async Task<ActionResult<UserProfileDto>> DeleteBanner(CancellationToken ct)
@@ -379,14 +458,11 @@ namespace JaeZoo.Server.Controllers
             {
                 try
                 {
-                    var marker = $"/{AvatarBucket}/";
-                    var idx = url.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-                    if (idx < 0) return;
-                    var key = Uri.UnescapeDataString(url[(idx + marker.Length)..]);
+                    if (!TryParseStorageUrl(url, out var bucket, out var key)) return;
                     var q = key.IndexOf('?');
                     if (q >= 0) key = key[..q];
                     if (!string.IsNullOrWhiteSpace(key))
-                        await _storage.DeleteAsync(AvatarBucket, key, CancellationToken.None);
+                        await _storage.DeleteAsync(bucket, key, CancellationToken.None);
                 }
                 catch (Exception ex)
                 {
@@ -447,6 +523,18 @@ namespace JaeZoo.Server.Controllers
         [HttpGet("/avatars/{id:guid}")]
         public async Task<IActionResult> GetAvatar(Guid id, CancellationToken ct)
         {
+            var current = await _db.UserAvatars.AsNoTracking()
+                .Where(a => a.UserId == id && a.DeletedAt == null && a.IsCurrent)
+                .OrderByDescending(a => a.CreatedAt)
+                .FirstOrDefaultAsync(ct);
+
+            if (current != null)
+            {
+                var obj = await _storage.GetAsync(current.Bucket, current.ObjectKey, ct);
+                Response.Headers.CacheControl = "public,max-age=3600";
+                return File(obj.Stream, string.IsNullOrWhiteSpace(current.ContentType) ? obj.ContentType : current.ContentType);
+            }
+
             var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == id, ct);
             if (!string.IsNullOrWhiteSpace(user?.AvatarUrl) && user.AvatarUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
                 return Redirect(user.AvatarUrl);
@@ -475,7 +563,7 @@ namespace JaeZoo.Server.Controllers
             return File(avatar.Data, avatar.ContentType ?? "image/png");
         }
 
-        private static UserProfileDto ToProfileDto(User u) =>
+        private UserProfileDto ToProfileDto(User u) =>
             new UserProfileDto(
                 u.Id,
                 UserIdentityService.GetLogin(u),
@@ -488,17 +576,17 @@ namespace JaeZoo.Server.Controllers
                 u.PublicId,
                 u.EmailConfirmed,
                 u.EmailVerifiedAt,
-                u.ProfileBannerUrl
+                BannerProxyUrl(u)
             );
 
-        private static PublicUserDto ToPublicDto(User u) =>
+        private PublicUserDto ToPublicDto(User u) =>
             new PublicUserDto(
                 u.Id,
                 u.PublicId,
                 UserIdentityService.GetPublicName(u),
                 UserIdentityService.GetAvatarUrl(u),
                 u.Status, u.CustomStatus, u.ShowOnline ? u.LastSeen : null,
-                u.ProfileBannerUrl
+                BannerProxyUrl(u)
             );
     }
 }
