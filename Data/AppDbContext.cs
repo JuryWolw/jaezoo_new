@@ -1,6 +1,7 @@
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Files;
 using JaeZoo.Server.Models.Moderation;
+using JaeZoo.Server.Services.Security;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Data;
@@ -282,7 +283,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<DirectMessage>()
             .Property(m => m.Text)
-            .HasMaxLength(4000);
+            .HasColumnType("text")
+            .HasConversion(
+                v => MessageTextProtector.ProtectForDatabase(v),
+                v => MessageTextProtector.UnprotectFromDatabase(v));
 
         b.Entity<DirectMessage>()
             .Property(m => m.SystemKey)
@@ -435,7 +439,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<GroupMessage>()
             .Property(m => m.Text)
-            .HasMaxLength(4000);
+            .HasColumnType("text")
+            .HasConversion(
+                v => MessageTextProtector.ProtectForDatabase(v),
+                v => MessageTextProtector.UnprotectFromDatabase(v));
 
         b.Entity<GroupMessage>()
             .Property(m => m.SystemKey)

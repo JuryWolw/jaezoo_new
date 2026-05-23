@@ -9,7 +9,6 @@ public class GroupMessage
     [Required] public Guid GroupChatId { get; set; }
     [Required] public Guid SenderId { get; set; }
 
-    [MaxLength(4000)]
     public string Text { get; set; } = string.Empty;
 
     public DateTime SentAt { get; set; } = DateTime.UtcNow;

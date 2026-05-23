@@ -27,6 +27,8 @@ using JaeZoo.Server.Services.Files;
 
 var builder = WebApplication.CreateBuilder(args);
 
+MessageTextProtector.Configure(builder.Configuration);
+
 // ---------- DB ----------
 var conn = builder.Configuration.GetConnectionString("DefaultConnection") ?? "Data Source=jaezoo.db";
 var isPg = conn.Contains("Host=", StringComparison.OrdinalIgnoreCase)
@@ -300,6 +302,13 @@ using (var scope = app.Services.CreateScope())
     await EnsureProfileMediaSchemaAsync(db, logger);
     await EnsureModerationSchemaAsync(db, logger);
     await EnsureFileThreatSchemaAsync(db, logger);
+    await EnsureMessageEncryptionSchemaAsync(db, logger);
+
+    if (MessageTextProtector.Enabled && app.Configuration.GetValue<bool>("Messages:Encryption:MigrateExistingOnStartup"))
+    {
+        await MessageEncryptionBackfill.EncryptExistingMessagesAsync(db, logger);
+    }
+
     await RoleBootstrapService.EnsureOwnerAsync(db, app.Configuration, logger);
 
     if (db.Database.IsNpgsql())
@@ -390,6 +399,31 @@ app.MapGet("/", () => Results.Redirect("/swagger"));
 
 app.Run();
 
+
+
+static async Task EnsureMessageEncryptionSchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                ALTER TABLE "DirectMessages"
+                    ALTER COLUMN "Text" TYPE text;
+
+                ALTER TABLE "GroupMessages"
+                    ALTER COLUMN "Text" TYPE text;
+                """);
+        }
+
+        logger.LogInformation("Message encryption schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure message encryption schema.");
+        throw;
+    }
+}
 
 static async Task EnsureProfileMediaSchemaAsync(AppDbContext db, ILogger logger)
 {
