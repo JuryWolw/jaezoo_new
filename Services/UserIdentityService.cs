@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Services.Security;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Services;
@@ -14,12 +15,15 @@ public static partial class UserIdentityService
     public static string NormalizeEmail(string email) => (email ?? string.Empty).Trim().ToUpperInvariant();
 
     public static string GetLogin(User user)
-        => string.IsNullOrWhiteSpace(user.Login) ? user.UserName : user.Login;
+        => IdentityDataProtector.UnprotectLogin(user);
 
     public static string GetPublicName(User user)
         => string.IsNullOrWhiteSpace(user.DisplayName) ? "Пользователь JaeZoo" : user.DisplayName!.Trim();
     public static string GetPublicName(string? displayName, string? login, string fallback = "Пользователь JaeZoo")
-        => !string.IsNullOrWhiteSpace(displayName) ? displayName.Trim() : (!string.IsNullOrWhiteSpace(login) ? login.Trim() : fallback);
+        => !string.IsNullOrWhiteSpace(displayName) ? displayName.Trim() : (!string.IsNullOrWhiteSpace(login) && !login.EndsWith("@privacy.jaezoo.local", StringComparison.OrdinalIgnoreCase) && !login.StartsWith("u_", StringComparison.OrdinalIgnoreCase) ? login.Trim() : fallback);
+
+    public static string GetEmail(User user)
+        => IdentityDataProtector.UnprotectEmail(user);
 
 
     public static string GetAvatarUrl(User user)

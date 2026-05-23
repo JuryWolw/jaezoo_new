@@ -31,6 +31,20 @@ namespace JaeZoo.Server.Models
         [MaxLength(128)]
         public string EmailNormalized { get; set; } = string.Empty;
 
+        [MaxLength(128)]
+        public string LoginHash { get; set; } = string.Empty;
+
+        [MaxLength(1024)]
+        public string LoginEncrypted { get; set; } = string.Empty;
+
+        [MaxLength(128)]
+        public string EmailHash { get; set; } = string.Empty;
+
+        [MaxLength(1024)]
+        public string EmailEncrypted { get; set; } = string.Empty;
+
+        public int IdentityPrivacyVersion { get; set; } = 0;
+
         public bool EmailConfirmed { get; set; } = false;
         public DateTime? EmailVerifiedAt { get; set; }
 

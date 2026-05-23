@@ -32,7 +32,7 @@ public sealed class AuthEmailController(
         if (user is null)
             return NotFound("Пользователь не найден.");
 
-        return new EmailVerificationStatusDto(user.Email, user.EmailConfirmed, user.EmailVerifiedAt);
+        return new EmailVerificationStatusDto(UserIdentityService.GetEmail(user), user.EmailConfirmed, user.EmailVerifiedAt);
     }
 
     [HttpPost("resend")]
@@ -70,7 +70,7 @@ public sealed class AuthEmailController(
         }
         catch (Exception ex)
         {
-            log.LogError(ex, "Failed to send email confirmation code. UserId={UserId} Email={Email}", userId, user.Email);
+            log.LogError(ex, "Failed to send email confirmation code. UserId={UserId} EmailHash={EmailHash}", userId, user.EmailHash);
 
             var message = ex is TimeoutException
                 ? "Ошибка отправки кода: Yandex Cloud Postbox не ответил за отведённое время."
@@ -131,7 +131,7 @@ public sealed class AuthEmailController(
     private static UserDto ToUserDto(User u) => new(
         u.Id,
         UserIdentityService.GetPublicName(u),
-        u.Email,
+        UserIdentityService.GetEmail(u),
         u.CreatedAt,
         UserIdentityService.GetLogin(u),
         UserIdentityService.GetPublicName(u),

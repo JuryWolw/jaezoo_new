@@ -51,6 +51,7 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
     private async Task SendViaAwsSesV2SdkAsync(User user, string code, CancellationToken ct)
     {
         var (subject, text, html) = BuildMessage(user, code);
+        var recipientEmail = GetRecipientEmail(user);
 
         var endpoint = NormalizeServiceEndpoint(_options.ApiEndpoint);
         var timeout = TimeSpan.FromSeconds(Math.Clamp(_options.SendTimeoutSeconds, 5, 90));
@@ -72,7 +73,7 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
             FromEmailAddress = _options.FromEmail,
             Destination = new Destination
             {
-                ToAddresses = new List<string> { user.Email }
+                ToAddresses = new List<string> { recipientEmail }
             },
             Content = new EmailContent
             {
@@ -105,7 +106,7 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
             endpoint,
             config.AuthenticationRegion,
             _options.FromEmail,
-            user.Email,
+            MaskEmail(recipientEmail),
             MaskKey(_options.UserName),
             timeout.TotalSeconds);
 
@@ -144,6 +145,7 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
     private async Task SendViaSmtpAsync(User user, string code, CancellationToken ct)
     {
         var (subject, text, html) = BuildMessage(user, code);
+        var recipientEmail = GetRecipientEmail(user);
 
         using var msg = new MailMessage
         {
@@ -154,7 +156,7 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
             BodyEncoding = Encoding.UTF8,
             IsBodyHtml = true
         };
-        msg.To.Add(new MailAddress(user.Email));
+        msg.To.Add(new MailAddress(recipientEmail));
         msg.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(text, Encoding.UTF8, "text/plain"));
 
         using var smtp = new SmtpClient(_options.Host, _options.Port)
@@ -176,7 +178,7 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
             _options.Host,
             _options.Port,
             _options.FromEmail,
-            user.Email,
+            MaskEmail(recipientEmail),
             MaskKey(_options.UserName),
             Math.Clamp(_options.SendTimeoutSeconds, 5, 90));
 
@@ -200,10 +202,11 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
 
         using var client = new AmazonSimpleEmailServiceV2Client(credentials, config);
         var html = string.IsNullOrWhiteSpace(htmlBody) ? BuildNotificationHtml(subject, textBody) : htmlBody!;
+        var recipientEmail = GetRecipientEmail(user);
         var request = new SendEmailRequest
         {
             FromEmailAddress = _options.FromEmail,
-            Destination = new Destination { ToAddresses = new List<string> { user.Email } },
+            Destination = new Destination { ToAddresses = new List<string> { recipientEmail } },
             Content = new EmailContent
             {
                 Simple = new Message
@@ -221,7 +224,7 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
         try
         {
             var response = await client.SendEmailAsync(request, ct);
-            logger.LogInformation("Yandex Postbox accepted account notification. MessageId={MessageId} To={To}", response.MessageId, user.Email);
+            logger.LogInformation("Yandex Postbox accepted account notification. MessageId={MessageId} To={To}", response.MessageId, MaskEmail(recipientEmail));
         }
         catch (AmazonServiceException ex)
         {
@@ -232,6 +235,8 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
 
     private async Task SendNotificationViaSmtpAsync(User user, string subject, string textBody, string? htmlBody, CancellationToken ct)
     {
+        var recipientEmail = GetRecipientEmail(user);
+
         using var msg = new MailMessage
         {
             From = new MailAddress(_options.FromEmail, _options.FromName, Encoding.UTF8),
@@ -241,7 +246,7 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
             BodyEncoding = Encoding.UTF8,
             IsBodyHtml = true
         };
-        msg.To.Add(new MailAddress(user.Email));
+        msg.To.Add(new MailAddress(recipientEmail));
         msg.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(textBody, Encoding.UTF8, "text/plain"));
 
         using var smtp = new SmtpClient(_options.Host, _options.Port)
@@ -253,6 +258,14 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
         };
         using var reg = ct.Register(() => { try { smtp.SendAsyncCancel(); } catch { } });
         await smtp.SendMailAsync(msg);
+    }
+
+    private static string GetRecipientEmail(User user)
+    {
+        var email = JaeZoo.Server.Services.UserIdentityService.GetEmail(user);
+        if (string.IsNullOrWhiteSpace(email))
+            throw new InvalidOperationException("User email is empty or cannot be decrypted.");
+        return email;
     }
 
     private static string BuildNotificationHtml(string subject, string textBody)
@@ -310,6 +323,15 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
         value = value.Replace("/v2/email/outbound-emails", string.Empty, StringComparison.OrdinalIgnoreCase).TrimEnd('/');
 
         return value;
+    }
+
+    private static string MaskEmail(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || !value.Contains('@')) return "***";
+        var parts = value.Split('@', 2);
+        var local = parts[0];
+        var visible = local.Length <= 2 ? local[..1] : local[..Math.Min(2, local.Length)];
+        return $"{visible}***@{parts[1]}";
     }
 
     private static string MaskKey(string value)

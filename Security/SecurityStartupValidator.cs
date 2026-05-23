@@ -76,6 +76,14 @@ public static class SecurityStartupValidator
         Add(checks, "Messages", "Database encryption key", IsStrongSecret(messageEncryptionKey, 32), strictMode && messageEncryptionEnabled,
             "Messages:Encryption key must be present and strong when message DB encryption is enabled.");
 
+
+        var identityHashKey = FirstNotEmpty(configuration["IdentityPrivacy:HashKeyBase64"], configuration["IdentityPrivacy:HashKey"], configuration["IdentityPrivacy:HashKeyHex"]);
+        var identityEncryptionKey = FirstNotEmpty(configuration["IdentityPrivacy:EncryptionKeyBase64"], configuration["IdentityPrivacy:EncryptionKey"], configuration["IdentityPrivacy:EncryptionKeyHex"]);
+        Add(checks, "IdentityPrivacy", "HMAC hash key", IsStrongSecret(identityHashKey, 32), strictMode,
+            "IdentityPrivacy:HashKeyBase64 must be configured. It is used for login/email HMAC lookup hashes.");
+        Add(checks, "IdentityPrivacy", "Encryption key", IsStrongSecret(identityEncryptionKey, 32), strictMode,
+            "IdentityPrivacy:EncryptionKeyBase64 must be configured. It is used for reversible login/email encryption.");
+
         var storageAccessKey = configuration["ObjectStorage:AccessKey"];
         var storageSecretKey = configuration["ObjectStorage:SecretKey"];
         Add(checks, "ObjectStorage", "Access key", IsStrongSecret(storageAccessKey, 12, ObjectStoragePlaceholders), strictMode,

@@ -31,7 +31,7 @@ public class TokenService(IOptions<JwtOptions> opts)
             new Claim("email_confirmed", u.EmailConfirmed ? "true" : "false"),
             new Claim("token_version", u.TokenVersion.ToString()),
             new Claim("security_stamp", u.SecurityStamp ?? string.Empty),
-            new Claim(JwtRegisteredClaimNames.Email, u.Email)
+            new Claim(JwtRegisteredClaimNames.Email, UserIdentityService.GetEmail(u))
         };
 
         if (sessionId.HasValue)

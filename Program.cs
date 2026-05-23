@@ -34,6 +34,7 @@ foreach (var warning in startupSecurityReport.Warnings)
 }
 
 MessageTextProtector.Configure(builder.Configuration);
+IdentityDataProtector.Configure(builder.Configuration);
 
 // ---------- DB ----------
 var conn = builder.Configuration.GetConnectionString("DefaultConnection") ?? "Data Source=jaezoo.db";
@@ -316,7 +317,10 @@ using (var scope = app.Services.CreateScope())
     await EnsureModerationSchemaAsync(db, logger);
     await EnsureFileThreatSchemaAsync(db, logger);
     await EnsureMessageEncryptionSchemaAsync(db, logger);
+    await EnsureIdentityPrivacySchemaAsync(db, logger);
     await EnsureE2eeKeySchemaAsync(db, logger);
+
+    await IdentityDataProtector.BackfillUsersAsync(db, logger);
 
     if (MessageTextProtector.Enabled && app.Configuration.GetValue<bool>("Messages:Encryption:MigrateExistingOnStartup"))
     {
@@ -435,6 +439,57 @@ app.Run();
 
 
 
+
+
+static async Task EnsureIdentityPrivacySchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                ALTER TABLE "Users"
+                    ADD COLUMN IF NOT EXISTS "LoginHash" character varying(128) NOT NULL DEFAULT '',
+                    ADD COLUMN IF NOT EXISTS "LoginEncrypted" character varying(1024) NOT NULL DEFAULT '',
+                    ADD COLUMN IF NOT EXISTS "EmailHash" character varying(128) NOT NULL DEFAULT '',
+                    ADD COLUMN IF NOT EXISTS "EmailEncrypted" character varying(1024) NOT NULL DEFAULT '',
+                    ADD COLUMN IF NOT EXISTS "IdentityPrivacyVersion" integer NOT NULL DEFAULT 0;
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_Users_LoginHash" ON "Users" ("LoginHash") WHERE "LoginHash" <> '';
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_Users_EmailHash" ON "Users" ("EmailHash") WHERE "EmailHash" <> '';
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            var columns = new Dictionary<string, string>
+            {
+                ["LoginHash"] = "TEXT NOT NULL DEFAULT ''",
+                ["LoginEncrypted"] = "TEXT NOT NULL DEFAULT ''",
+                ["EmailHash"] = "TEXT NOT NULL DEFAULT ''",
+                ["EmailEncrypted"] = "TEXT NOT NULL DEFAULT ''",
+                ["IdentityPrivacyVersion"] = "INTEGER NOT NULL DEFAULT 0"
+            };
+
+            foreach (var (name, definition) in columns)
+            {
+                var existingSql = "SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('Users') WHERE name = '" + name + "'";
+                var existing = await db.Database.SqlQueryRaw<int>(existingSql).SingleAsync();
+                if (existing == 0)
+                    await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"Users\" ADD COLUMN \"" + name + "\" " + definition + ";");
+            }
+
+            await db.Database.ExecuteSqlRawAsync("CREATE UNIQUE INDEX IF NOT EXISTS \"IX_Users_LoginHash\" ON \"Users\" (\"LoginHash\") WHERE \"LoginHash\" <> ''; ");
+            await db.Database.ExecuteSqlRawAsync("CREATE UNIQUE INDEX IF NOT EXISTS \"IX_Users_EmailHash\" ON \"Users\" (\"EmailHash\") WHERE \"EmailHash\" <> ''; ");
+        }
+
+        logger.LogInformation("Identity privacy schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure identity privacy schema.");
+        throw;
+    }
+}
 
 static async Task EnsureE2eeKeySchemaAsync(AppDbContext db, ILogger logger)
 {

@@ -68,7 +68,7 @@ public sealed class EmailVerificationService(
             using var sendCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             await emailSender.SendEmailConfirmationCodeAsync(user, code, sendCts.Token);
 
-            logger.LogInformation("Email confirmation code sent. UserId={UserId} Email={Email}", user.Id, user.Email);
+            logger.LogInformation("Email confirmation code sent. UserId={UserId} EmailHash={EmailHash}", user.Id, user.EmailHash);
             return new EmailVerificationSendResult(true, false, 0, entity.ExpiresAt, "Код отправлен на почту.");
         }
         catch (Exception ex)
@@ -83,7 +83,7 @@ public sealed class EmailVerificationService(
                 logger.LogWarning(cleanupEx, "Failed to cleanup unsent email confirmation code. CodeId={CodeId} UserId={UserId}", entity.Id, user.Id);
             }
 
-            logger.LogError(ex, "Failed to send email confirmation code. UserId={UserId} Email={Email}", user.Id, user.Email);
+            logger.LogError(ex, "Failed to send email confirmation code. UserId={UserId} EmailHash={EmailHash}", user.Id, user.EmailHash);
             throw;
         }
     }

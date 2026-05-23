@@ -22,13 +22,13 @@ public static class RoleBootstrapService
             return;
         }
 
-        var normalizedLogin = string.IsNullOrWhiteSpace(login) ? null : UserIdentityService.NormalizeLogin(login);
-        var normalizedEmail = string.IsNullOrWhiteSpace(email) ? null : UserIdentityService.NormalizeEmail(email);
+        var loginHash = string.IsNullOrWhiteSpace(login) ? null : JaeZoo.Server.Services.Security.IdentityDataProtector.HashLogin(login);
+        var emailHash = string.IsNullOrWhiteSpace(email) ? null : JaeZoo.Server.Services.Security.IdentityDataProtector.HashEmail(email);
         var normalizedPublicId = publicId?.Trim().ToUpperInvariant();
 
         var user = await db.Users.FirstOrDefaultAsync(u =>
-            (normalizedLogin != null && u.LoginNormalized == normalizedLogin) ||
-            (normalizedEmail != null && u.EmailNormalized == normalizedEmail) ||
+            (loginHash != null && u.LoginHash == loginHash) ||
+            (emailHash != null && u.EmailHash == emailHash) ||
             (normalizedPublicId != null && u.PublicId.ToUpper() == normalizedPublicId), ct);
 
         if (user is null)

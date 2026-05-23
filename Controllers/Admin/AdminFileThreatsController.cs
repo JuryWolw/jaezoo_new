@@ -3,6 +3,7 @@ using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Files;
 using JaeZoo.Server.Security;
+using JaeZoo.Server.Services;
 using JaeZoo.Server.Services.Admin;
 using JaeZoo.Server.Services.Files;
 using Microsoft.AspNetCore.Authorization;
@@ -72,7 +73,6 @@ public sealed class AdminFileThreatsController(
 
         var users = await db.Users.AsNoTracking()
             .Where(u => uploaderIds.Contains(u.Id))
-            .Select(u => new { u.Id, u.PublicId, u.DisplayName, u.Login })
             .ToDictionaryAsync(u => u.Id, ct);
 
         var directRefs = await db.DirectMessageAttachments.AsNoTracking()
@@ -100,7 +100,7 @@ public sealed class AdminFileThreatsController(
                 f.CreatedAt,
                 f.UploaderId,
                 u?.PublicId ?? string.Empty,
-                string.IsNullOrWhiteSpace(u?.DisplayName) ? u?.Login ?? "Удалённый пользователь" : u!.DisplayName!,
+                u is null ? "Удалённый пользователь" : UserIdentityService.GetPublicName(u),
                 f.Kind.ToString(),
                 f.SizeBytes,
                 string.IsNullOrWhiteSpace(f.Bucket) ? "jaezoo-files" : f.Bucket,

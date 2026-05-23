@@ -85,14 +85,12 @@ namespace JaeZoo.Server.Controllers
             if (string.Equals(currentLogin, next, StringComparison.Ordinal))
                 return Ok(new { message = "Логин не изменился." });
 
-            var normalized = UserIdentityService.NormalizeLogin(next);
+            var loginHash = IdentityDataProtector.HashLogin(next);
             var exists = await _db.Users.AnyAsync(
-                u => u.Id != me.Id && (u.LoginNormalized == normalized || u.UserName.ToUpper() == normalized), ct);
+                u => u.Id != me.Id && u.LoginHash == loginHash, ct);
             if (exists) return Conflict(new { message = "Такой логин уже занят." });
 
-            me.Login = next;
-            me.LoginNormalized = normalized;
-            me.UserName = next; // legacy sync
+            IdentityDataProtector.SetLogin(me, next);
             me.SecurityStamp = UserIdentityService.NewSecurityStamp();
             me.TokenVersion++;
             me.UpdatedAt = DateTime.UtcNow;
@@ -122,19 +120,19 @@ namespace JaeZoo.Server.Controllers
             var me = await _db.Users.FirstOrDefaultAsync(u => u.Id == MeId, ct);
             if (me == null) return Unauthorized();
 
-            if (!string.Equals(me.Email ?? string.Empty, current, StringComparison.OrdinalIgnoreCase))
+            var currentEmail = UserIdentityService.GetEmail(me);
+            if (!string.Equals(currentEmail, current, StringComparison.OrdinalIgnoreCase))
                 return NotFound(new { message = "Неверная текущая почта." });
 
-            if (string.Equals(me.Email ?? string.Empty, next, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(currentEmail, next, StringComparison.OrdinalIgnoreCase))
                 return Ok(new { message = "Почта не изменилась." });
 
-            var normalized = UserIdentityService.NormalizeEmail(next);
+            var emailHash = IdentityDataProtector.HashEmail(next);
             var exists = await _db.Users.AnyAsync(
-                u => u.Id != me.Id && (u.EmailNormalized == normalized || u.Email.ToUpper() == normalized), ct);
+                u => u.Id != me.Id && u.EmailHash == emailHash, ct);
             if (exists) return Conflict(new { message = "Эта почта уже используется." });
 
-            me.Email = next;
-            me.EmailNormalized = normalized;
+            IdentityDataProtector.SetEmail(me, next);
             me.EmailConfirmed = false;
             me.EmailVerifiedAt = null;
             me.SecurityStamp = UserIdentityService.NewSecurityStamp();
@@ -293,7 +291,7 @@ namespace JaeZoo.Server.Controllers
 
             await tx.CommitAsync(ct);
 
-            _log.LogWarning("User account deleted completely. UserId={UserId} Login={Login} Email={Email}", uid, me.Login, me.Email);
+            _log.LogWarning("User account deleted completely. UserId={UserId} PublicId={PublicId}", uid, me.PublicId);
             return Ok(new { message = "Аккаунт удалён." });
         }
 

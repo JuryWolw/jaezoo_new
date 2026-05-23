@@ -2,6 +2,7 @@ using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Security;
+using JaeZoo.Server.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -35,8 +36,8 @@ public sealed class AdminAccessController(AppDbContext db) : ControllerBase
         return new AdminMeDto(
             user.Id,
             user.PublicId ?? string.Empty,
-            string.IsNullOrWhiteSpace(user.DisplayName) ? user.Login : user.DisplayName,
-            user.Email ?? string.Empty,
+            UserIdentityService.GetPublicName(user),
+            UserIdentityService.GetEmail(user),
             roles);
     }
 }

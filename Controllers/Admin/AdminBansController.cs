@@ -29,13 +29,13 @@ public sealed class AdminBansController(AppDbContext db, AdminAuditService audit
         var userIds = bans.Select(b => b.UserId).Distinct().ToList();
         var users = await db.Users.AsNoTracking()
             .Where(u => userIds.Contains(u.Id))
-            .Select(u => new { u.Id, u.PublicId, u.DisplayName, u.Email })
+            .Select(u => new { u.Id, u.PublicId, u.DisplayName, u.EmailEncrypted, u.Email })
             .ToDictionaryAsync(u => u.Id, ct);
 
         return bans.Select(b =>
         {
             users.TryGetValue(b.UserId, out var u);
-            return new AdminBanDto(b.Id, b.UserId, u?.PublicId ?? string.Empty, u?.DisplayName ?? "Удалённый пользователь", u?.Email ?? string.Empty, b.Type, b.Reason, b.CreatedAt, b.ExpiresAt, b.RevokedAt, b.CreatedByUserId, b.RevokedByUserId, b.RevokeReason);
+            return new AdminBanDto(b.Id, b.UserId, u?.PublicId ?? string.Empty, u?.DisplayName ?? "Удалённый пользователь", u is null ? string.Empty : UserIdentityService.GetEmail(new User { Id = u.Id, Email = u.Email, EmailEncrypted = u.EmailEncrypted }), b.Type, b.Reason, b.CreatedAt, b.ExpiresAt, b.RevokedAt, b.CreatedByUserId, b.RevokedByUserId, b.RevokeReason);
         }).ToList();
     }
 

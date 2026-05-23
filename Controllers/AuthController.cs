@@ -52,24 +52,29 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
                 message = captchaResult.Message
             });
 
-        var loginNormalized = UserIdentityService.NormalizeLogin(login);
-        var emailNormalized = UserIdentityService.NormalizeEmail(email);
+        var loginHash = IdentityDataProtector.HashLogin(login);
+        var emailHash = IdentityDataProtector.HashEmail(email);
 
-        if (await db.Users.AnyAsync(u => u.LoginNormalized == loginNormalized, ct))
+        if (await db.Users.AnyAsync(u => u.LoginHash == loginHash, ct))
             return Conflict("Пользователь с таким логином уже существует.");
 
-        if (await db.Users.AnyAsync(u => u.EmailNormalized == emailNormalized, ct))
+        if (await db.Users.AnyAsync(u => u.EmailHash == emailHash, ct))
             return Conflict("Пользователь с такой почтой уже существует.");
 
         var now = DateTime.UtcNow;
         var user = new User
         {
             Id = Guid.NewGuid(),
-            UserName = login,
-            Login = login,
-            LoginNormalized = loginNormalized,
-            Email = email,
-            EmailNormalized = emailNormalized,
+            UserName = string.Empty,
+            Login = string.Empty,
+            LoginNormalized = string.Empty,
+            LoginHash = loginHash,
+            LoginEncrypted = IdentityDataProtector.ProtectLogin(login),
+            Email = string.Empty,
+            EmailNormalized = string.Empty,
+            EmailHash = emailHash,
+            EmailEncrypted = IdentityDataProtector.ProtectEmail(email),
+            IdentityPrivacyVersion = 1,
             EmailConfirmed = false,
             EmailVerifiedAt = null,
             PublicId = await UserIdentityService.CreateUniquePublicIdAsync(db, ct),
@@ -81,6 +86,9 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
             TokenVersion = 0,
             IsDisabled = false
         };
+
+        IdentityDataProtector.SetLegacyLoginPlaceholder(user);
+        IdentityDataProtector.SetLegacyEmailPlaceholder(user);
 
         user.PasswordHash = _hasher.HashPassword(user, password);
         db.Users.Add(user);
@@ -96,7 +104,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
         }
         catch (Exception ex)
         {
-            log.LogError(ex, "Failed to send initial email confirmation code. UserId={UserId} Email={Email}", user.Id, user.Email);
+            log.LogError(ex, "Failed to send initial email confirmation code. UserId={UserId} EmailHash={EmailHash}", user.Id, user.EmailHash);
         }
 
         return Created("", new
@@ -120,13 +128,13 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
         if (string.IsNullOrWhiteSpace(loginOrEmail) || string.IsNullOrWhiteSpace(password))
             return Unauthorized("Неверный логин/почта или пароль.");
 
-        var normalized = loginOrEmail.Contains('@')
-            ? UserIdentityService.NormalizeEmail(loginOrEmail)
-            : UserIdentityService.NormalizeLogin(loginOrEmail);
+        var lookupHash = loginOrEmail.Contains('@')
+            ? IdentityDataProtector.HashEmail(loginOrEmail)
+            : IdentityDataProtector.HashLogin(loginOrEmail);
 
         var user = await db.Users.FirstOrDefaultAsync(u =>
-            u.LoginNormalized == normalized ||
-            u.EmailNormalized == normalized, ct);
+            u.LoginHash == lookupHash ||
+            u.EmailHash == lookupHash, ct);
 
         if (user is null)
             return Unauthorized("Неверный логин/почта или пароль.");
@@ -141,11 +149,15 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
             return Unauthorized("Неверный логин/почта или пароль.");
 
         if (result == PasswordVerificationResult.SuccessRehashNeeded)
-            user.PasswordHash = _hasher.HashPassword(user, password);
+            IdentityDataProtector.SetLegacyLoginPlaceholder(user);
+        IdentityDataProtector.SetLegacyEmailPlaceholder(user);
 
-        user.Login = string.IsNullOrWhiteSpace(user.Login) ? user.UserName : user.Login;
-        user.LoginNormalized = string.IsNullOrWhiteSpace(user.LoginNormalized) ? UserIdentityService.NormalizeLogin(user.Login) : user.LoginNormalized;
-        user.EmailNormalized = string.IsNullOrWhiteSpace(user.EmailNormalized) ? UserIdentityService.NormalizeEmail(user.Email) : user.EmailNormalized;
+        user.PasswordHash = _hasher.HashPassword(user, password);
+
+        if (string.IsNullOrWhiteSpace(user.LoginHash))
+            IdentityDataProtector.SetLogin(user, UserIdentityService.GetLogin(user));
+        if (string.IsNullOrWhiteSpace(user.EmailHash))
+            IdentityDataProtector.SetEmail(user, UserIdentityService.GetEmail(user));
         user.DisplayName = string.IsNullOrWhiteSpace(user.DisplayName) ? UserIdentityService.CreateRandomDisplayName() : user.DisplayName;
         user.PublicId = string.IsNullOrWhiteSpace(user.PublicId) ? await UserIdentityService.CreateUniquePublicIdAsync(db, ct) : user.PublicId;
         user.SecurityStamp = string.IsNullOrWhiteSpace(user.SecurityStamp) ? UserIdentityService.NewSecurityStamp() : user.SecurityStamp;
@@ -376,7 +388,7 @@ public class AuthController(AppDbContext db, TokenService tokens, EmailVerificat
     private static UserDto ToUserDto(User u) => new(
         u.Id,
         UserIdentityService.GetPublicName(u),
-        u.Email,
+        UserIdentityService.GetEmail(u),
         u.CreatedAt,
         UserIdentityService.GetLogin(u),
         UserIdentityService.GetPublicName(u),

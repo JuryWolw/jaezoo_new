@@ -567,7 +567,7 @@ namespace JaeZoo.Server.Controllers
             new UserProfileDto(
                 u.Id,
                 UserIdentityService.GetLogin(u),
-                u.Email,
+                UserIdentityService.GetEmail(u),
                 UserIdentityService.GetPublicName(u),
                 UserIdentityService.GetAvatarUrl(u),
                 u.About,

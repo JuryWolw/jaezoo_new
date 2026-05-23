@@ -145,7 +145,6 @@ public sealed class AdminReportsController(AppDbContext db, AdminAuditService au
         var userIds = reports.SelectMany(r => new[] { r.ReporterUserId, r.TargetUserId ?? Guid.Empty }).Where(x => x != Guid.Empty).Distinct().ToList();
         var users = await db.Users.AsNoTracking()
             .Where(u => userIds.Contains(u.Id))
-            .Select(u => new { u.Id, u.PublicId, u.DisplayName, u.Login })
             .ToDictionaryAsync(u => u.Id, ct);
 
         var groupIds = reports.Select(r => r.TargetGroupId).Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToList();
@@ -167,11 +166,11 @@ public sealed class AdminReportsController(AppDbContext db, AdminAuditService au
                 r.TargetType,
                 r.TargetId,
                 reporter?.PublicId ?? string.Empty,
-                UserIdentityService.GetPublicName(reporter?.DisplayName, reporter?.Login, "Удалённый пользователь"),
+                (reporter is null ? "Удалённый пользователь" : UserIdentityService.GetPublicName(reporter)),
                 r.Reason,
                 summary,
                 targetUser?.PublicId,
-                UserIdentityService.GetPublicName(targetUser?.DisplayName, targetUser?.Login, string.Empty),
+                (targetUser is null ? string.Empty : UserIdentityService.GetPublicName(targetUser)),
                 targetGroup?.Title,
                 r.TargetUserId,
                 r.TargetMessageId,

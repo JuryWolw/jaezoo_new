@@ -43,6 +43,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<User>().Property(u => u.LoginNormalized).HasMaxLength(64);
         b.Entity<User>().Property(u => u.Email).HasMaxLength(128);
         b.Entity<User>().Property(u => u.EmailNormalized).HasMaxLength(128);
+        b.Entity<User>().Property(u => u.LoginHash).HasMaxLength(128);
+        b.Entity<User>().Property(u => u.LoginEncrypted).HasMaxLength(1024);
+        b.Entity<User>().Property(u => u.EmailHash).HasMaxLength(128);
+        b.Entity<User>().Property(u => u.EmailEncrypted).HasMaxLength(1024);
         b.Entity<User>().Property(u => u.PublicId).HasMaxLength(32);
         b.Entity<User>().Property(u => u.SecurityStamp).HasMaxLength(64);
         b.Entity<User>().Property(u => u.ProfileBannerUrl).HasMaxLength(512);
@@ -55,6 +59,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<User>().HasIndex(u => u.Email).IsUnique();
         b.Entity<User>().HasIndex(u => u.LoginNormalized).IsUnique();
         b.Entity<User>().HasIndex(u => u.EmailNormalized).IsUnique();
+        b.Entity<User>().HasIndex(u => u.LoginHash).IsUnique();
+        b.Entity<User>().HasIndex(u => u.EmailHash).IsUnique();
         b.Entity<User>().HasIndex(u => u.PublicId).IsUnique();
 
         b.Entity<UserE2eeKey>()

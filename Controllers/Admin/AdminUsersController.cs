@@ -6,6 +6,7 @@ using JaeZoo.Server.Security;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Services.Admin;
 using JaeZoo.Server.Services.Email;
+using JaeZoo.Server.Services.Security;
 using JaeZoo.Server.Services.Storage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -31,11 +32,14 @@ public sealed class AdminUsersController(AppDbContext db, IObjectStorage storage
         if (!string.IsNullOrWhiteSpace(q))
         {
             var nq = q.ToUpperInvariant();
+            var loginHash = UserIdentityService.IsValidLogin(q) ? IdentityDataProtector.HashLogin(q) : null;
+            var emailHash = q.Contains('@', StringComparison.Ordinal) ? IdentityDataProtector.HashEmail(q) : null;
+
             query = query.Where(u =>
                 ((u.PublicId ?? string.Empty).ToUpper()).Contains(nq) ||
                 ((u.DisplayName ?? string.Empty).ToUpper()).Contains(nq) ||
-                ((u.Email ?? string.Empty).ToUpper()).Contains(nq) ||
-                ((u.Login ?? string.Empty).ToUpper()).Contains(nq));
+                (loginHash != null && u.LoginHash == loginHash) ||
+                (emailHash != null && u.EmailHash == emailHash));
         }
 
         var total = await query.CountAsync(ct);
@@ -43,21 +47,6 @@ public sealed class AdminUsersController(AppDbContext db, IObjectStorage storage
             .OrderByDescending(u => u.CreatedAt)
             .Skip(skip)
             .Take(take)
-            .Select(u => new
-            {
-                u.Id,
-                u.PublicId,
-                u.DisplayName,
-                u.Login,
-                u.Email,
-                u.EmailConfirmed,
-                u.IsDisabled,
-                u.DisabledReason,
-                u.CreatedAt,
-                u.LastSeen,
-                u.AvatarUrl,
-                u.ProfileBannerUrl
-            })
             .ToListAsync(ct);
 
         var ids = rows.Select(x => x.Id).ToList();
@@ -72,12 +61,13 @@ public sealed class AdminUsersController(AppDbContext db, IObjectStorage storage
                 g => g.Key,
                 g => (IReadOnlyList<string>)g.Select(x => x.Role.ToString()).OrderBy(x => x).ToArray());
 
+        var canSeeFullEmail = User.IsInRole(GlobalRole.Owner.ToString()) || User.IsInRole(GlobalRole.Admin.ToString());
         var items = rows.Select(u => new AdminUserListItemDto(
             u.Id,
             u.PublicId ?? string.Empty,
-            string.IsNullOrWhiteSpace(u.DisplayName) ? u.Login ?? string.Empty : u.DisplayName,
-            u.Login ?? string.Empty,
-            u.Email ?? string.Empty,
+            UserIdentityService.GetPublicName(u),
+            UserIdentityService.GetLogin(u),
+            IdentityDataProtector.MaskEmailForRole(u, canSeeFullEmail),
             u.EmailConfirmed,
             u.IsDisabled,
             u.DisabledReason,
