@@ -5,6 +5,7 @@ using JaeZoo.Server.Models.Moderation;
 using JaeZoo.Server.Security;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Services.Admin;
+using JaeZoo.Server.Services.Email;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -14,7 +15,7 @@ namespace JaeZoo.Server.Controllers.Admin;
 [ApiController]
 [Authorize(Policy = AuthPolicies.ModerationAccess)]
 [Route("api/admin/bans")]
-public sealed class AdminBansController(AppDbContext db, AdminAuditService audit) : ControllerBase
+public sealed class AdminBansController(AppDbContext db, AdminAuditService audit, IEmailSender emailSender, ILogger<AdminBansController> log) : ControllerBase
 {
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<AdminBanDto>>> List([FromQuery] bool activeOnly = false, [FromQuery] int limit = 200, CancellationToken ct = default)
@@ -63,6 +64,37 @@ public sealed class AdminBansController(AppDbContext db, AdminAuditService audit
         target.UpdatedAt = DateTime.UtcNow;
         await db.UserSessions.Where(s => s.UserId == target.Id && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, DateTime.UtcNow), ct);
         await db.SaveChangesAsync(ct);
+
+        if (request.NotifyEmail)
+        {
+            var subject = string.IsNullOrWhiteSpace(request.EmailSubject) ? "Аккаунт JaeZoo заблокирован" : request.EmailSubject.Trim();
+            var body = string.IsNullOrWhiteSpace(request.EmailBody)
+                ? $"""
+                  Здравствуйте, {UserIdentityService.GetPublicName(target)}.
+
+                  Ваш аккаунт JaeZoo был заблокирован администрацией.
+                  Причина: {ban.Reason}
+
+                  Если вы считаете блокировку ошибочной, свяжитесь с поддержкой JaeZoo.
+                  """
+                : request.EmailBody.Trim();
+            try { await emailSender.SendAccountNotificationAsync(target, subject, body, null, ct); }
+            catch (Exception ex) { log.LogWarning(ex, "Failed to send ban email to {UserId}", target.Id); }
+        }
+
+        if (request.ReportId.HasValue)
+        {
+            var report = await db.ModerationReports.FirstOrDefaultAsync(r => r.Id == request.ReportId.Value, ct);
+            if (report is not null)
+            {
+                report.Status = "Banned";
+                report.ResolvedAt = DateTime.UtcNow;
+                report.ModeratorUserId = actorId;
+                report.ModerationNote = ban.Reason;
+                await db.SaveChangesAsync(ct);
+            }
+        }
+
         await audit.WriteAsync(User, HttpContext, "UserBanned", "User", target.Id.ToString(), $"Banned {target.PublicId} / {UserIdentityService.GetPublicName(target)}. Reason: {ban.Reason}", ct);
         return NoContent();
     }

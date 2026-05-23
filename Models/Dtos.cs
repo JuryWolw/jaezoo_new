@@ -1,4 +1,4 @@
-﻿namespace JaeZoo.Server.Models;
+namespace JaeZoo.Server.Models;
 
 public sealed class RegisterRequest
 {
@@ -341,7 +341,7 @@ public sealed record AdminUserListItemDto(
     string? ProfileBannerUrl,
     IReadOnlyList<string> Roles);
 
-public sealed record AdminBanUserRequest(Guid UserId, string? Reason = null, string? Type = "Account", DateTime? ExpiresAt = null);
+public sealed record AdminBanUserRequest(Guid UserId, string? Reason = null, string? Type = "Account", DateTime? ExpiresAt = null, bool NotifyEmail = true, string? EmailSubject = null, string? EmailBody = null, Guid? ReportId = null);
 public sealed record AdminRevokeBanRequest(string? Reason = null);
 
 public sealed record AdminBanDto(
@@ -366,4 +366,58 @@ public sealed record AdminReportDto(
     string TargetType,
     string TargetId,
     string ReporterPublicId,
-    string Summary);
+    string ReporterDisplayName,
+    string Reason,
+    string Summary,
+    string? TargetUserPublicId = null,
+    string? TargetUserDisplayName = null,
+    string? TargetGroupTitle = null,
+    Guid? TargetUserId = null,
+    Guid? TargetMessageId = null,
+    Guid? TargetGroupId = null);
+public sealed record CreateReportRequest(
+    string TargetType,
+    Guid? TargetUserId = null,
+    Guid? TargetMessageId = null,
+    Guid? TargetGroupId = null,
+    string? Reason = null,
+    string? Details = null);
+
+public sealed record ReportCreatedDto(Guid Id, DateTime CreatedAt, string Status);
+
+public sealed record AdminReportDetailsDto(
+    Guid Id,
+    DateTime CreatedAt,
+    string Status,
+    string TargetType,
+    string TargetId,
+    Guid ReporterUserId,
+    string ReporterPublicId,
+    string ReporterDisplayName,
+    string Reason,
+    string Details,
+    Guid? TargetUserId,
+    string? TargetUserPublicId,
+    string? TargetUserDisplayName,
+    Guid? TargetMessageId,
+    string? MessagePreview,
+    Guid? TargetGroupId,
+    string? TargetGroupTitle,
+    DateTime? ResolvedAt,
+    string? ModerationNote);
+
+public sealed record AdminWarnUserRequest(
+    Guid UserId,
+    Guid? ReportId = null,
+    string? Reason = null,
+    bool NotifyEmail = true,
+    string? EmailSubject = null,
+    string? EmailBody = null);
+
+public sealed record AdminReportActionRequest(
+    string? Note = null,
+    bool NotifyEmail = true,
+    string? EmailSubject = null,
+    string? EmailBody = null,
+    DateTime? ExpiresAt = null);
+

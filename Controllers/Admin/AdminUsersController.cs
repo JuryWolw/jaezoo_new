@@ -4,6 +4,7 @@ using JaeZoo.Server.Models;
 using JaeZoo.Server.Security;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Services.Admin;
+using JaeZoo.Server.Services.Email;
 using JaeZoo.Server.Services.Storage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -14,7 +15,7 @@ namespace JaeZoo.Server.Controllers.Admin;
 [ApiController]
 [Authorize(Policy = AuthPolicies.ModerationAccess)]
 [Route("api/admin/users")]
-public sealed class AdminUsersController(AppDbContext db, IObjectStorage storage, AdminAuditService audit, IConfiguration cfg, ILogger<AdminUsersController> log) : ControllerBase
+public sealed class AdminUsersController(AppDbContext db, IObjectStorage storage, AdminAuditService audit, IEmailSender emailSender, IConfiguration cfg, ILogger<AdminUsersController> log) : ControllerBase
 {
     private string AvatarBucket => cfg["ObjectStorage:Buckets:Avatars"] ?? "jaezoo-avatars";
 
@@ -100,6 +101,24 @@ public sealed class AdminUsersController(AppDbContext db, IObjectStorage storage
 
         var isOwner = await db.UserRoles.AnyAsync(r => r.UserId == userId && r.Role == GlobalRole.Owner && r.RevokedAt == null, ct);
         if (isOwner) return BadRequest("Owner нельзя удалить через админку.");
+
+        try
+        {
+            var subject = "Аккаунт JaeZoo удалён";
+            var body = $"""
+                  Здравствуйте, {UserIdentityService.GetPublicName(user)}.
+
+                  Ваш аккаунт JaeZoo был удалён администрацией.
+                  Причина: {(string.IsNullOrWhiteSpace(reason) ? "Удаление администратором" : reason)}
+
+                  Это действие необратимо.
+                  """;
+            await emailSender.SendAccountNotificationAsync(user, subject, body, null, ct);
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Failed to send account deletion email to {UserId}", userId);
+        }
 
         await DeleteUserStorageAsync(userId, user.ProfileBannerUrl, ct);
 

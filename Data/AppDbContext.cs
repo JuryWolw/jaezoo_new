@@ -27,6 +27,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<UserSession> UserSessions => Set<UserSession>();
     public DbSet<EmailVerificationCode> EmailVerificationCodes => Set<EmailVerificationCode>();
     public DbSet<ModerationBan> ModerationBans => Set<ModerationBan>();
+    public DbSet<ModerationReport> ModerationReports => Set<ModerationReport>();
+    public DbSet<ModerationWarning> ModerationWarnings => Set<ModerationWarning>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -199,6 +201,58 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<ModerationBan>()
             .HasIndex(ban => ban.CreatedAt);
+
+        b.Entity<ModerationReport>()
+            .Property(r => r.TargetType)
+            .HasMaxLength(32);
+
+        b.Entity<ModerationReport>()
+            .Property(r => r.TargetId)
+            .HasMaxLength(128);
+
+        b.Entity<ModerationReport>()
+            .Property(r => r.Reason)
+            .HasMaxLength(128);
+
+        b.Entity<ModerationReport>()
+            .Property(r => r.Details)
+            .HasMaxLength(2000);
+
+        b.Entity<ModerationReport>()
+            .Property(r => r.Status)
+            .HasMaxLength(32);
+
+        b.Entity<ModerationReport>()
+            .Property(r => r.ModerationNote)
+            .HasMaxLength(2000);
+
+        b.Entity<ModerationReport>()
+            .HasIndex(r => new { r.Status, r.CreatedAt });
+
+        b.Entity<ModerationReport>()
+            .HasIndex(r => r.TargetUserId);
+
+        b.Entity<ModerationReport>()
+            .HasIndex(r => r.TargetMessageId);
+
+        b.Entity<ModerationReport>()
+            .HasIndex(r => r.TargetGroupId);
+
+        b.Entity<ModerationWarning>()
+            .Property(w => w.Reason)
+            .HasMaxLength(512);
+
+        b.Entity<ModerationWarning>()
+            .Property(w => w.EmailSubject)
+            .HasMaxLength(160);
+
+        b.Entity<ModerationWarning>()
+            .Property(w => w.EmailBody)
+            .HasMaxLength(4000);
+
+        b.Entity<ModerationWarning>()
+            .HasIndex(w => new { w.UserId, w.CreatedAt });
+
 
         b.Entity<Friendship>()
             .HasIndex(f => new { f.RequesterId, f.AddresseeId })

@@ -18,6 +18,9 @@ public static partial class UserIdentityService
 
     public static string GetPublicName(User user)
         => string.IsNullOrWhiteSpace(user.DisplayName) ? "Пользователь JaeZoo" : user.DisplayName!.Trim();
+    public static string GetPublicName(string? displayName, string? login, string fallback = "Пользователь JaeZoo")
+        => !string.IsNullOrWhiteSpace(displayName) ? displayName.Trim() : (!string.IsNullOrWhiteSpace(login) ? login.Trim() : fallback);
+
 
     public static string GetAvatarUrl(User user)
     {

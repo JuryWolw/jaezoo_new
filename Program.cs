@@ -738,6 +738,41 @@ static async Task EnsureModerationSchemaAsync(AppDbContext db, ILogger logger)
                 );
                 CREATE INDEX IF NOT EXISTS "IX_ModerationBans_UserId_RevokedAt_ExpiresAt" ON "ModerationBans" ("UserId", "RevokedAt", "ExpiresAt");
                 CREATE INDEX IF NOT EXISTS "IX_ModerationBans_CreatedAt" ON "ModerationBans" ("CreatedAt");
+
+                CREATE TABLE IF NOT EXISTS "ModerationReports" (
+                    "Id" uuid NOT NULL,
+                    "CreatedAt" timestamptz NOT NULL DEFAULT now(),
+                    "ReporterUserId" uuid NOT NULL,
+                    "TargetUserId" uuid NULL,
+                    "TargetMessageId" uuid NULL,
+                    "TargetGroupId" uuid NULL,
+                    "TargetType" character varying(32) NOT NULL DEFAULT 'User',
+                    "TargetId" character varying(128) NOT NULL DEFAULT '',
+                    "Reason" character varying(128) NOT NULL DEFAULT '',
+                    "Details" character varying(2000) NOT NULL DEFAULT '',
+                    "Status" character varying(32) NOT NULL DEFAULT 'Open',
+                    "ModeratorUserId" uuid NULL,
+                    "ResolvedAt" timestamptz NULL,
+                    "ModerationNote" character varying(2000) NULL,
+                    CONSTRAINT "PK_ModerationReports" PRIMARY KEY ("Id")
+                );
+                CREATE INDEX IF NOT EXISTS "IX_ModerationReports_Status_CreatedAt" ON "ModerationReports" ("Status", "CreatedAt");
+                CREATE INDEX IF NOT EXISTS "IX_ModerationReports_TargetUserId" ON "ModerationReports" ("TargetUserId");
+                CREATE INDEX IF NOT EXISTS "IX_ModerationReports_TargetMessageId" ON "ModerationReports" ("TargetMessageId");
+                CREATE INDEX IF NOT EXISTS "IX_ModerationReports_TargetGroupId" ON "ModerationReports" ("TargetGroupId");
+
+                CREATE TABLE IF NOT EXISTS "ModerationWarnings" (
+                    "Id" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "ReportId" uuid NULL,
+                    "CreatedByUserId" uuid NULL,
+                    "CreatedAt" timestamptz NOT NULL DEFAULT now(),
+                    "Reason" character varying(512) NOT NULL DEFAULT '',
+                    "EmailSubject" character varying(160) NOT NULL DEFAULT '',
+                    "EmailBody" character varying(4000) NOT NULL DEFAULT '',
+                    CONSTRAINT "PK_ModerationWarnings" PRIMARY KEY ("Id")
+                );
+                CREATE INDEX IF NOT EXISTS "IX_ModerationWarnings_UserId_CreatedAt" ON "ModerationWarnings" ("UserId", "CreatedAt");
                 """);
         }
         else if (db.Database.IsSqlite())
@@ -758,6 +793,39 @@ static async Task EnsureModerationSchemaAsync(AppDbContext db, ILogger logger)
                 );
                 CREATE INDEX IF NOT EXISTS "IX_ModerationBans_UserId_RevokedAt_ExpiresAt" ON "ModerationBans" ("UserId", "RevokedAt", "ExpiresAt");
                 CREATE INDEX IF NOT EXISTS "IX_ModerationBans_CreatedAt" ON "ModerationBans" ("CreatedAt");
+
+                CREATE TABLE IF NOT EXISTS "ModerationReports" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_ModerationReports" PRIMARY KEY,
+                    "CreatedAt" TEXT NOT NULL,
+                    "ReporterUserId" TEXT NOT NULL,
+                    "TargetUserId" TEXT NULL,
+                    "TargetMessageId" TEXT NULL,
+                    "TargetGroupId" TEXT NULL,
+                    "TargetType" TEXT NOT NULL DEFAULT 'User',
+                    "TargetId" TEXT NOT NULL DEFAULT '',
+                    "Reason" TEXT NOT NULL DEFAULT '',
+                    "Details" TEXT NOT NULL DEFAULT '',
+                    "Status" TEXT NOT NULL DEFAULT 'Open',
+                    "ModeratorUserId" TEXT NULL,
+                    "ResolvedAt" TEXT NULL,
+                    "ModerationNote" TEXT NULL
+                );
+                CREATE INDEX IF NOT EXISTS "IX_ModerationReports_Status_CreatedAt" ON "ModerationReports" ("Status", "CreatedAt");
+                CREATE INDEX IF NOT EXISTS "IX_ModerationReports_TargetUserId" ON "ModerationReports" ("TargetUserId");
+                CREATE INDEX IF NOT EXISTS "IX_ModerationReports_TargetMessageId" ON "ModerationReports" ("TargetMessageId");
+                CREATE INDEX IF NOT EXISTS "IX_ModerationReports_TargetGroupId" ON "ModerationReports" ("TargetGroupId");
+
+                CREATE TABLE IF NOT EXISTS "ModerationWarnings" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_ModerationWarnings" PRIMARY KEY,
+                    "UserId" TEXT NOT NULL,
+                    "ReportId" TEXT NULL,
+                    "CreatedByUserId" TEXT NULL,
+                    "CreatedAt" TEXT NOT NULL,
+                    "Reason" TEXT NOT NULL DEFAULT '',
+                    "EmailSubject" TEXT NOT NULL DEFAULT '',
+                    "EmailBody" TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS "IX_ModerationWarnings_UserId_CreatedAt" ON "ModerationWarnings" ("UserId", "CreatedAt");
                 """);
         }
         logger.LogInformation("Moderation schema ensured.");
