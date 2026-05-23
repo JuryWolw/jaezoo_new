@@ -1,4 +1,4 @@
-﻿using JaeZoo.Server.Data;
+using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Middleware;
@@ -295,6 +295,7 @@ using (var scope = app.Services.CreateScope())
     await EnsureGroupVoiceTablesAsync(db, logger);
     await EnsureEmailVerificationTablesAsync(db, logger);
     await EnsureChatFileMetadataColumnsAsync(db, logger);
+    await EnsureProfileMediaSchemaAsync(db, logger);
     await RoleBootstrapService.EnsureOwnerAsync(db, app.Configuration, logger);
 
     if (db.Database.IsNpgsql())
@@ -384,6 +385,102 @@ app.MapHub<CallsHub>("/hubs/calls");
 app.MapGet("/", () => Results.Redirect("/swagger"));
 
 app.Run();
+
+
+static async Task EnsureProfileMediaSchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                ALTER TABLE "Users"
+                    ADD COLUMN IF NOT EXISTS "ProfileBannerUrl" character varying(512) NULL,
+                    ADD COLUMN IF NOT EXISTS "ProfileTextTheme" character varying(16) NULL;
+
+                CREATE TABLE IF NOT EXISTS "UserAvatars" (
+                    "Id" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "Bucket" character varying(128) NOT NULL,
+                    "ObjectKey" character varying(512) NOT NULL,
+                    "Url" character varying(512) NOT NULL,
+                    "ContentType" character varying(128) NOT NULL,
+                    "SizeBytes" bigint NOT NULL,
+                    "IsCurrent" boolean NOT NULL,
+                    "CreatedAt" timestamp with time zone NOT NULL,
+                    "DeletedAt" timestamp with time zone NULL,
+                    CONSTRAINT "PK_UserAvatars" PRIMARY KEY ("Id")
+                );
+
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'FK_UserAvatars_Users_UserId'
+                    ) THEN
+                        ALTER TABLE "UserAvatars"
+                            ADD CONSTRAINT "FK_UserAvatars_Users_UserId"
+                            FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE;
+                    END IF;
+                END $$;
+
+                CREATE INDEX IF NOT EXISTS "IX_UserAvatars_UserId_DeletedAt_CreatedAt"
+                    ON "UserAvatars" ("UserId", "DeletedAt", "CreatedAt");
+
+                CREATE INDEX IF NOT EXISTS "IX_UserAvatars_UserId_IsCurrent"
+                    ON "UserAvatars" ("UserId", "IsCurrent");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            var columns = new Dictionary<string, string>
+            {
+                ["ProfileBannerUrl"] = "TEXT NULL",
+                ["ProfileTextTheme"] = "TEXT NULL"
+            };
+
+            foreach (var (name, definition) in columns)
+            {
+                var existingSql = "SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('Users') WHERE name = '" + name + "'";
+                var existing = await db.Database.SqlQueryRaw<int>(existingSql).SingleAsync();
+                if (existing == 0)
+                {
+                    await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"Users\" ADD COLUMN \"" + name + "\" " + definition + ";");
+                }
+            }
+
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "UserAvatars" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_UserAvatars" PRIMARY KEY,
+                    "UserId" TEXT NOT NULL,
+                    "Bucket" TEXT NOT NULL,
+                    "ObjectKey" TEXT NOT NULL,
+                    "Url" TEXT NOT NULL,
+                    "ContentType" TEXT NOT NULL,
+                    "SizeBytes" INTEGER NOT NULL,
+                    "IsCurrent" INTEGER NOT NULL,
+                    "CreatedAt" TEXT NOT NULL,
+                    "DeletedAt" TEXT NULL,
+                    CONSTRAINT "FK_UserAvatars_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS "IX_UserAvatars_UserId_DeletedAt_CreatedAt"
+                    ON "UserAvatars" ("UserId", "DeletedAt", "CreatedAt");
+
+                CREATE INDEX IF NOT EXISTS "IX_UserAvatars_UserId_IsCurrent"
+                    ON "UserAvatars" ("UserId", "IsCurrent");
+                """);
+        }
+
+        logger.LogInformation("Profile media schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure profile media schema.");
+        throw;
+    }
+}
 
 static async Task EnsureChatFileMetadataColumnsAsync(AppDbContext db, ILogger logger)
 {
