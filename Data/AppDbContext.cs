@@ -74,8 +74,15 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .HasMaxLength(128);
 
         b.Entity<UserE2eeKey>()
-            .HasIndex(k => k.UserId)
+            .Property(k => k.DeviceId)
+            .HasMaxLength(64);
+
+        b.Entity<UserE2eeKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId })
             .IsUnique();
+
+        b.Entity<UserE2eeKey>()
+            .HasIndex(k => k.UserId);
 
         b.Entity<UserE2eeKey>()
             .HasIndex(k => k.Fingerprint);

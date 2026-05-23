@@ -4,13 +4,14 @@ using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Security;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Controllers;
 
 [ApiController]
-[Route("api/e2ee/keys")]
+[Route("api/e2ee")]
 [Authorize]
 public sealed class E2eeKeysController(AppDbContext db, ILogger<E2eeKeysController> log) : ControllerBase
 {
@@ -18,87 +19,172 @@ public sealed class E2eeKeysController(AppDbContext db, ILogger<E2eeKeysControll
         ? id
         : Guid.Empty;
 
-    [HttpGet("{userId:guid}")]
+    [HttpGet("keys/{userId:guid}")]
     public async Task<ActionResult<E2eePublicKeyDto>> GetPublicKey(Guid userId, CancellationToken ct)
     {
-        var key = await db.UserE2eeKeys.AsNoTracking().FirstOrDefaultAsync(x => x.UserId == userId, ct);
-        if (key is null || string.IsNullOrWhiteSpace(key.PublicKeyBase64))
-            return NotFound(new { message = "E2EE public key not found." });
-
-        return Ok(ToDto(key));
+        var key = await db.UserE2eeKeys.AsNoTracking()
+            .Where(x => x.UserId == userId && !x.IsRevoked && !string.IsNullOrEmpty(x.PublicKeyBase64))
+            .OrderByDescending(x => x.LastSeenAt ?? x.UpdatedAt)
+            .ThenByDescending(x => x.UpdatedAt)
+            .FirstOrDefaultAsync(ct);
+        if (key is null) return NotFound(new { message = "E2EE public key not found." });
+        return Ok(ToLegacyDto(key));
     }
 
-    [HttpGet("me")]
+    [HttpGet("keys/me")]
     public async Task<ActionResult<E2eePublicKeyDto>> GetMyPublicKey(CancellationToken ct)
     {
         if (MeId == Guid.Empty) return Unauthorized();
-        var key = await db.UserE2eeKeys.AsNoTracking().FirstOrDefaultAsync(x => x.UserId == MeId, ct);
-        if (key is null || string.IsNullOrWhiteSpace(key.PublicKeyBase64))
-            return NotFound(new { message = "E2EE public key not found." });
-
-        return Ok(ToDto(key));
+        var key = await db.UserE2eeKeys.AsNoTracking()
+            .Where(x => x.UserId == MeId && !x.IsRevoked && !string.IsNullOrEmpty(x.PublicKeyBase64))
+            .OrderByDescending(x => x.LastSeenAt ?? x.UpdatedAt)
+            .ThenByDescending(x => x.UpdatedAt)
+            .FirstOrDefaultAsync(ct);
+        if (key is null) return NotFound(new { message = "E2EE public key not found." });
+        return Ok(ToLegacyDto(key));
     }
 
-    [HttpPost("me")]
+    [HttpPost("keys/me")]
     public async Task<ActionResult<E2eePublicKeyDto>> UpsertMyPublicKey([FromBody] UpsertE2eePublicKeyRequest request, CancellationToken ct)
     {
         if (MeId == Guid.Empty) return Unauthorized();
-        if (request is null || string.IsNullOrWhiteSpace(request.PublicKeyBase64))
-            return BadRequest(new { message = "Public key is required." });
+        var deviceId = NormalizeDeviceId(request.DeviceId) ?? "legacy";
+        var device = await UpsertDeviceInternalAsync(MeId, deviceId, request.PublicKeyBase64, request.DeviceName, request.ReplaceExisting, ct);
+        return Ok(ToLegacyDto(device));
+    }
+
+    [HttpGet("devices/me")]
+    public async Task<ActionResult<IReadOnlyList<E2eeDeviceKeyDto>>> GetMyDevices(CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        var keys = await db.UserE2eeKeys.AsNoTracking()
+            .Where(x => x.UserId == MeId)
+            .OrderByDescending(x => x.LastSeenAt ?? x.UpdatedAt)
+            .ThenByDescending(x => x.UpdatedAt)
+            .ToListAsync(ct);
+        return Ok(keys.Select(ToDeviceDto).ToList());
+    }
+
+    [HttpGet("devices/users/{userId:guid}")]
+    public async Task<ActionResult<IReadOnlyList<E2eeDeviceKeyDto>>> GetUserDevices(Guid userId, CancellationToken ct)
+    {
+        var keys = await db.UserE2eeKeys.AsNoTracking()
+            .Where(x => x.UserId == userId && !x.IsRevoked && !string.IsNullOrEmpty(x.PublicKeyBase64))
+            .OrderByDescending(x => x.LastSeenAt ?? x.UpdatedAt)
+            .ThenByDescending(x => x.UpdatedAt)
+            .ToListAsync(ct);
+        return Ok(keys.Select(ToDeviceDto).ToList());
+    }
+
+    [HttpPost("devices/me")]
+    public async Task<ActionResult<E2eeDeviceKeyDto>> UpsertMyDevice([FromBody] UpsertE2eeDeviceKeyRequest request, CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        var deviceId = NormalizeDeviceId(request.DeviceId);
+        if (string.IsNullOrWhiteSpace(deviceId)) return BadRequest(new { message = "DeviceId is required." });
+        var device = await UpsertDeviceInternalAsync(MeId, deviceId, request.PublicKeyBase64, request.DeviceName, request.ReplaceExisting, ct);
+        return Ok(ToDeviceDto(device));
+    }
+
+    [HttpPost("devices/{deviceId}/revoke")]
+    public async Task<IActionResult> RevokeMyDevice(string deviceId, CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        var normalized = NormalizeDeviceId(deviceId);
+        if (string.IsNullOrWhiteSpace(normalized)) return BadRequest(new { message = "DeviceId is required." });
+        var key = await db.UserE2eeKeys.FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == normalized, ct);
+        if (key is null) return NotFound();
+        key.IsRevoked = true;
+        key.RevokedAt = DateTime.UtcNow;
+        key.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return NoContent();
+    }
+
+    private async Task<UserE2eeKey> UpsertDeviceInternalAsync(Guid userId, string deviceId, string publicKeyBase64, string? deviceName, bool replaceExisting, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(publicKeyBase64)) throw new BadHttpRequestException("Public key is required.");
 
         byte[] raw;
         try
         {
-            raw = Convert.FromBase64String(request.PublicKeyBase64.Trim());
+            raw = Convert.FromBase64String(publicKeyBase64.Trim());
             using var ecdh = ECDiffieHellman.Create();
             ecdh.ImportSubjectPublicKeyInfo(raw, out _);
         }
         catch
         {
-            return BadRequest(new { message = "Invalid E2EE public key." });
+            throw new BadHttpRequestException("Invalid E2EE public key.");
         }
 
-        if (raw.Length > 4096)
-            return BadRequest(new { message = "Public key is too large." });
+        if (raw.Length > 4096) throw new BadHttpRequestException("Public key is too large.");
 
-        var fingerprint = Fingerprint(raw);
         var now = DateTime.UtcNow;
-        var existing = await db.UserE2eeKeys.FirstOrDefaultAsync(x => x.UserId == MeId, ct);
-
-        if (existing is not null && !request.ReplaceExisting)
+        var existing = await db.UserE2eeKeys.FirstOrDefaultAsync(x => x.UserId == userId && x.DeviceId == deviceId, ct);
+        if (existing is not null && !replaceExisting)
         {
-            // Do not silently rotate another device's account key. Multi-device key sync will be a separate stage.
-            return Ok(ToDto(existing));
+            existing.LastSeenAt = now;
+            await db.SaveChangesAsync(ct);
+            return existing;
         }
 
         if (existing is null)
         {
             existing = new UserE2eeKey
             {
-                UserId = MeId,
-                CreatedAt = now
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                DeviceId = deviceId,
+                CreatedAt = now,
+                IsTrusted = true
             };
             db.UserE2eeKeys.Add(existing);
         }
 
+        var safeName = string.IsNullOrWhiteSpace(deviceName) ? null : deviceName.Trim();
         existing.PublicKeyBase64 = Convert.ToBase64String(raw);
         existing.Algorithm = "ECDH-P256-SPKI";
-        existing.Fingerprint = fingerprint;
-        var deviceName = string.IsNullOrWhiteSpace(request.DeviceName) ? null : request.DeviceName.Trim();
-        existing.DeviceName = deviceName is null ? null : deviceName[..Math.Min(128, deviceName.Length)];
+        existing.Fingerprint = Fingerprint(raw);
+        existing.DeviceName = safeName is null ? null : safeName[..Math.Min(128, safeName.Length)];
+        existing.IsRevoked = false;
+        existing.RevokedAt = null;
+        existing.LastSeenAt = now;
         existing.UpdatedAt = now;
 
         await db.SaveChangesAsync(ct);
-        log.LogInformation("E2EE public key registered. UserId={UserId} Fingerprint={Fingerprint}", MeId, fingerprint);
-        return Ok(ToDto(existing));
+        log.LogInformation("E2EE device key registered. UserId={UserId} DeviceId={DeviceId} Fingerprint={Fingerprint}", userId, deviceId, existing.Fingerprint);
+        return existing;
     }
 
-    private static E2eePublicKeyDto ToDto(UserE2eeKey key) => new(
+    private static E2eePublicKeyDto ToLegacyDto(UserE2eeKey key) => new(
         key.UserId,
         key.PublicKeyBase64,
         key.Algorithm,
         key.Fingerprint,
-        key.UpdatedAt);
+        key.UpdatedAt,
+        key.DeviceId,
+        key.DeviceName);
+
+    private static E2eeDeviceKeyDto ToDeviceDto(UserE2eeKey key) => new(
+        key.Id,
+        key.UserId,
+        key.DeviceId,
+        key.PublicKeyBase64,
+        key.Algorithm,
+        key.Fingerprint,
+        key.DeviceName,
+        key.IsTrusted,
+        key.IsRevoked,
+        key.CreatedAt,
+        key.UpdatedAt,
+        key.LastSeenAt);
+
+    private static string? NormalizeDeviceId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var s = value.Trim();
+        return s.Length > 64 ? s[..64] : s;
+    }
 
     private static string Fingerprint(byte[] raw)
     {

@@ -413,14 +413,27 @@ static async Task EnsureE2eeKeySchemaAsync(AppDbContext db, ILogger logger)
                 CREATE TABLE IF NOT EXISTS "UserE2eeKeys" (
                     "Id" uuid NOT NULL,
                     "UserId" uuid NOT NULL,
+                    "DeviceId" character varying(64) NOT NULL DEFAULT 'legacy',
                     "PublicKeyBase64" character varying(8192) NOT NULL,
                     "Algorithm" character varying(64) NOT NULL,
                     "Fingerprint" character varying(128) NOT NULL,
                     "DeviceName" character varying(128) NULL,
+                    "IsRevoked" boolean NOT NULL DEFAULT false,
+                    "IsTrusted" boolean NOT NULL DEFAULT true,
+                    "RevokedAt" timestamp with time zone NULL,
+                    "LastSeenAt" timestamp with time zone NULL,
                     "CreatedAt" timestamp with time zone NOT NULL,
                     "UpdatedAt" timestamp with time zone NOT NULL,
                     CONSTRAINT "PK_UserE2eeKeys" PRIMARY KEY ("Id")
                 );
+
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "DeviceId" character varying(64) NOT NULL DEFAULT 'legacy';
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "IsRevoked" boolean NOT NULL DEFAULT false;
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "IsTrusted" boolean NOT NULL DEFAULT true;
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "RevokedAt" timestamp with time zone NULL;
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "LastSeenAt" timestamp with time zone NULL;
+
+                UPDATE "UserE2eeKeys" SET "DeviceId" = 'legacy' WHERE "DeviceId" IS NULL OR "DeviceId" = '';
 
                 DO $$
                 BEGIN
@@ -433,7 +446,9 @@ static async Task EnsureE2eeKeySchemaAsync(AppDbContext db, ILogger logger)
                     END IF;
                 END $$;
 
-                CREATE UNIQUE INDEX IF NOT EXISTS "IX_UserE2eeKeys_UserId" ON "UserE2eeKeys" ("UserId");
+                DROP INDEX IF EXISTS "IX_UserE2eeKeys_UserId";
+                CREATE INDEX IF NOT EXISTS "IX_UserE2eeKeys_UserId" ON "UserE2eeKeys" ("UserId");
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_UserE2eeKeys_UserId_DeviceId" ON "UserE2eeKeys" ("UserId", "DeviceId");
                 CREATE INDEX IF NOT EXISTS "IX_UserE2eeKeys_Fingerprint" ON "UserE2eeKeys" ("Fingerprint");
                 """);
         }
@@ -443,25 +458,31 @@ static async Task EnsureE2eeKeySchemaAsync(AppDbContext db, ILogger logger)
                 CREATE TABLE IF NOT EXISTS "UserE2eeKeys" (
                     "Id" TEXT NOT NULL CONSTRAINT "PK_UserE2eeKeys" PRIMARY KEY,
                     "UserId" TEXT NOT NULL,
+                    "DeviceId" TEXT NOT NULL DEFAULT 'legacy',
                     "PublicKeyBase64" TEXT NOT NULL,
                     "Algorithm" TEXT NOT NULL,
                     "Fingerprint" TEXT NOT NULL,
                     "DeviceName" TEXT NULL,
+                    "IsRevoked" INTEGER NOT NULL DEFAULT 0,
+                    "IsTrusted" INTEGER NOT NULL DEFAULT 1,
+                    "RevokedAt" TEXT NULL,
+                    "LastSeenAt" TEXT NULL,
                     "CreatedAt" TEXT NOT NULL,
                     "UpdatedAt" TEXT NOT NULL,
                     CONSTRAINT "FK_UserE2eeKeys_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
                 );
 
-                CREATE UNIQUE INDEX IF NOT EXISTS "IX_UserE2eeKeys_UserId" ON "UserE2eeKeys" ("UserId");
+                CREATE INDEX IF NOT EXISTS "IX_UserE2eeKeys_UserId" ON "UserE2eeKeys" ("UserId");
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_UserE2eeKeys_UserId_DeviceId" ON "UserE2eeKeys" ("UserId", "DeviceId");
                 CREATE INDEX IF NOT EXISTS "IX_UserE2eeKeys_Fingerprint" ON "UserE2eeKeys" ("Fingerprint");
                 """);
         }
 
-        logger.LogInformation("E2EE key schema ensured.");
+        logger.LogInformation("E2EE device key schema ensured.");
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "Failed to ensure E2EE key schema.");
+        logger.LogError(ex, "Failed to ensure E2EE device key schema.");
         throw;
     }
 }
