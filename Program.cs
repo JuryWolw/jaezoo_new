@@ -27,6 +27,12 @@ using JaeZoo.Server.Services.Files;
 
 var builder = WebApplication.CreateBuilder(args);
 
+var startupSecurityReport = SecurityStartupValidator.ValidateOrThrow(builder.Configuration, builder.Environment);
+foreach (var warning in startupSecurityReport.Warnings)
+{
+    Console.WriteLine($"[SECURITY WARN] [{warning.Area}] {warning.Name}: {warning.Message}");
+}
+
 MessageTextProtector.Configure(builder.Configuration);
 
 // ---------- DB ----------
@@ -150,14 +156,16 @@ builder.Services.AddControllers()
     });
 
 var redis = Environment.GetEnvironmentVariable("REDIS_URL");
+var signalRDetailedErrors = builder.Environment.IsDevelopment()
+    || builder.Configuration.GetValue<bool>("SignalR:EnableDetailedErrors");
 if (!string.IsNullOrWhiteSpace(redis))
 {
-    builder.Services.AddSignalR(o => { o.EnableDetailedErrors = true; })
+    builder.Services.AddSignalR(o => { o.EnableDetailedErrors = signalRDetailedErrors; })
         .AddStackExchangeRedis(redis);
 }
 else
 {
-    builder.Services.AddSignalR(o => { o.EnableDetailedErrors = true; });
+    builder.Services.AddSignalR(o => { o.EnableDetailedErrors = signalRDetailedErrors; });
 }
 
 builder.Services.AddSingleton<IPresenceTracker, PresenceTracker>();
@@ -282,7 +290,12 @@ if (storageConfigured)
 else
 {
     builder.Logging.AddConsole();
-    Console.WriteLine("[WARN] Object storage is not configured. Falling back to local file storage.");
+    if (builder.Environment.IsProduction() || builder.Configuration.GetValue<bool>("Security:StrictStartupValidation"))
+    {
+        throw new InvalidOperationException("Object storage is not configured. Local file storage fallback is disabled in Production/strict security mode.");
+    }
+
+    Console.WriteLine("[WARN] Object storage is not configured. Falling back to local file storage for development only.");
     builder.Services.AddSingleton<IObjectStorage, LocalObjectStorage>();
 }
 
@@ -355,6 +368,22 @@ fwd.KnownNetworks.Clear();
 fwd.KnownProxies.Clear();
 app.UseForwardedHeaders(fwd);
 
+if (app.Environment.IsProduction())
+{
+    app.UseHsts();
+}
+
+app.Use(async (context, next) =>
+{
+    var headers = context.Response.Headers;
+    headers.TryAdd("X-Content-Type-Options", "nosniff");
+    headers.TryAdd("X-Frame-Options", "DENY");
+    headers.TryAdd("Referrer-Policy", "no-referrer");
+    headers.TryAdd("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+    headers.TryAdd("Cross-Origin-Resource-Policy", "same-site");
+    await next();
+});
+
 // ---------- Пайплайн ----------
 app.UseStaticFiles(new StaticFileOptions
 {
@@ -369,7 +398,11 @@ app.UseStaticFiles(new StaticFileOptions
     }
 });
 
-if (app.Environment.IsDevelopment() || app.Configuration.GetValue<bool>("Swagger"))
+var swaggerEnabled = app.Environment.IsDevelopment()
+    || (app.Configuration.GetValue<bool>("Swagger")
+        && (!app.Environment.IsProduction() || app.Configuration.GetValue<bool>("Security:AllowSwaggerInProduction")));
+
+if (swaggerEnabled)
 {
     app.UseSwagger();
     app.UseSwaggerUI();
@@ -396,7 +429,7 @@ app.MapControllers();
 app.MapHub<ChatHub>("/hubs/chat");
 app.MapHub<CallsHub>("/hubs/calls");
 
-app.MapGet("/", () => Results.Redirect("/swagger"));
+app.MapGet("/", () => Results.Ok(new { service = "JaeZoo.Server", status = "ok", swagger = swaggerEnabled }));
 
 app.Run();
 
