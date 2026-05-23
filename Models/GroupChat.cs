@@ -18,6 +18,15 @@ public class GroupChat
 
     public int MemberLimit { get; set; } = DefaultMemberLimit;
 
+    /// <summary>
+    /// Monotonically increasing security epoch for group E2EE.
+    /// It changes whenever group membership changes, so new messages are bound
+    /// to the exact membership version used by the sender.
+    /// </summary>
+    public int SecurityEpoch { get; set; } = 1;
+
+    public DateTime SecurityEpochChangedAt { get; set; } = DateTime.UtcNow;
+
     [MaxLength(512)]
     public string? AvatarUrl { get; set; }
 

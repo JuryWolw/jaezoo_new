@@ -15,6 +15,12 @@ public class GroupMessage
 
     public DirectMessageKind Kind { get; set; } = DirectMessageKind.User;
 
+    /// <summary>
+    /// Group security epoch at the moment this message was accepted.
+    /// Used by clients to validate E2EE membership context.
+    /// </summary>
+    public int GroupSecurityEpoch { get; set; } = 1;
+
     [MaxLength(64)]
     public string? SystemKey { get; set; }
 

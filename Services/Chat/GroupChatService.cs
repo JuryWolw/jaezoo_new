@@ -2,12 +2,54 @@
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
 using Microsoft.EntityFrameworkCore;
+using System.Text;
+using System.Text.Json;
 
 namespace JaeZoo.Server.Services.Chat;
 
 public sealed class GroupChatService(AppDbContext db, DirectChatService directChat)
 {
     public const int MaxGroupMembers = 50;
+    private const string GroupE2eePrefixV1 = "jze2eeg1:";
+
+    public static void AdvanceSecurityEpoch(GroupChat chat, DateTime now)
+    {
+        chat.SecurityEpoch = Math.Max(1, chat.SecurityEpoch) + 1;
+        chat.SecurityEpochChangedAt = now;
+        chat.UpdatedAt = now;
+    }
+
+    private static bool IsGroupE2eePayload(string? text) =>
+        !string.IsNullOrWhiteSpace(text) && text.StartsWith(GroupE2eePrefixV1, StringComparison.Ordinal);
+
+    private static void ValidateGroupE2eePayload(Guid groupId, int currentEpoch, string? text)
+    {
+        if (!IsGroupE2eePayload(text))
+            return;
+
+        try
+        {
+            var base64 = text![GroupE2eePrefixV1.Length..];
+            var json = Encoding.UTF8.GetString(Convert.FromBase64String(base64));
+            var payload = JsonSerializer.Deserialize<GroupE2eeServerEnvelope>(json);
+            if (payload is null)
+                throw new InvalidOperationException("Invalid group E2EE envelope.");
+            if (payload.groupId != groupId)
+                throw new InvalidOperationException("Group E2EE envelope belongs to another group.");
+            if (payload.securityEpoch != currentEpoch)
+                throw new InvalidOperationException("Group E2EE keys are stale. Refresh the group and send the message again.");
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("Invalid group E2EE envelope.", ex);
+        }
+    }
+
+    private sealed record GroupE2eeServerEnvelope(int v, Guid groupId, int securityEpoch);
 
     public static string GetAvatarUrl(GroupChat chat) =>
         string.IsNullOrWhiteSpace(chat.AvatarUrl) ? $"/avatars/groups/{chat.Id}" : chat.AvatarUrl;
@@ -102,6 +144,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             Description = normalizedDescription,
             OwnerId = ownerId,
             MemberLimit = MaxGroupMembers,
+            SecurityEpoch = 1,
+            SecurityEpochChangedAt = now,
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -226,7 +270,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             });
         }
 
-        chat.UpdatedAt = now;
+        AdvanceSecurityEpoch(chat, now);
         await db.SaveChangesAsync(ct);
 
         return await db.GroupChatMembers
@@ -252,7 +296,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             throw new InvalidOperationException("You do not have access to remove this member.");
 
         db.GroupChatMembers.Remove(member);
-        chat.UpdatedAt = DateTime.UtcNow;
+        AdvanceSecurityEpoch(chat, DateTime.UtcNow);
         await db.SaveChangesAsync(ct);
 
         return await db.GroupChatMembers
@@ -304,7 +348,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             throw new InvalidOperationException("You are not a member of this group.");
 
         db.GroupChatMembers.Remove(member);
-        chat.UpdatedAt = DateTime.UtcNow;
+        AdvanceSecurityEpoch(chat, DateTime.UtcNow);
         await db.SaveChangesAsync(ct);
     }
 
@@ -412,7 +456,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             CanManageRoles(chat, member),
             unread.count,
             unread.firstId,
-            unread.firstAt);
+            unread.firstAt,
+            Math.Max(1, chat.SecurityEpoch),
+            chat.SecurityEpochChangedAt);
     }
 
     public async Task<List<GroupChatSummaryDto>> ListForUserAsync(Guid me, CancellationToken ct = default)
@@ -556,7 +602,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             message.EditedAt,
             message.DeletedAt,
             message.DeletedById,
-            forwardedFrom);
+            forwardedFrom,
+            Math.Max(1, message.GroupSecurityEpoch));
     }
 
     public async Task<List<MessageDto>> BuildMessageDtosAsync(IReadOnlyList<GroupMessage> messages, CancellationToken ct = default)
@@ -598,6 +645,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             ?? throw new InvalidOperationException("Group chat not found or access denied.");
 
         text = (text ?? string.Empty).Trim();
+        if (kind == DirectMessageKind.User)
+            ValidateGroupE2eePayload(groupId, Math.Max(1, chat.SecurityEpoch), text);
+
         var ids = (fileIds ?? Array.Empty<Guid>())
             .Where(x => x != Guid.Empty)
             .Distinct()
@@ -632,6 +682,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             SenderId = senderId,
             Text = text,
             SentAt = now,
+            GroupSecurityEpoch = Math.Max(1, chat.SecurityEpoch),
             Kind = kind,
             SystemKey = string.IsNullOrWhiteSpace(systemKey) ? null : systemKey.Trim(),
             ForwardedFromMessageId = forwardedFromMessageId
@@ -719,6 +770,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             SenderId = senderId,
             Text = (source.Text ?? string.Empty).Trim(),
             SentAt = now,
+            GroupSecurityEpoch = Math.Max(1, chat.SecurityEpoch),
             Kind = source.Kind,
             SystemKey = string.IsNullOrWhiteSpace(source.SystemKey) ? null : source.SystemKey.Trim(),
             ForwardedFromMessageId = source.Id
@@ -803,6 +855,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             SenderId = senderId,
             Text = (source.Text ?? string.Empty).Trim(),
             SentAt = now,
+            GroupSecurityEpoch = Math.Max(1, chat.SecurityEpoch),
             Kind = source.Kind,
             SystemKey = string.IsNullOrWhiteSpace(source.SystemKey) ? null : source.SystemKey.Trim(),
             ForwardedFromMessageId = source.Id

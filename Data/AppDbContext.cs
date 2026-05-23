@@ -63,6 +63,22 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<User>().HasIndex(u => u.EmailHash).IsUnique();
         b.Entity<User>().HasIndex(u => u.PublicId).IsUnique();
 
+
+        b.Entity<GroupChat>()
+            .Property(g => g.SecurityEpoch)
+            .HasDefaultValue(1);
+
+        b.Entity<GroupChat>()
+            .Property(g => g.SecurityEpochChangedAt)
+            .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+        b.Entity<GroupMessage>()
+            .Property(m => m.GroupSecurityEpoch)
+            .HasDefaultValue(1);
+
+        b.Entity<GroupMessage>()
+            .HasIndex(m => new { m.GroupChatId, m.GroupSecurityEpoch, m.SentAt });
+
         b.Entity<UserE2eeKey>()
             .Property(k => k.PublicKeyBase64)
             .HasMaxLength(8192);

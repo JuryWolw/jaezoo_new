@@ -144,7 +144,8 @@ public record MessageDto(
     DateTime? EditedAt = null,
     DateTime? DeletedAt = null,
     Guid? DeletedById = null,
-    MessageForwardInfoDto? ForwardedFrom = null
+    MessageForwardInfoDto? ForwardedFrom = null,
+    int? GroupSecurityEpoch = null
 );
 
 public record UnreadDialogDto(Guid FriendId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt);
@@ -266,7 +267,9 @@ public record GroupChatSummaryDto(
     bool CanManageRoles,
     int UnreadCount = 0,
     Guid? FirstUnreadId = null,
-    DateTime? FirstUnreadAt = null
+    DateTime? FirstUnreadAt = null,
+    int SecurityEpoch = 1,
+    DateTime? SecurityEpochChangedAt = null
 );
 
 public record GroupChatDetailsDto(GroupChatSummaryDto Chat, IReadOnlyList<GroupChatMemberDto> Members);
@@ -277,7 +280,7 @@ public record GroupChatMessageUpdatedDto(Guid GroupId, MessageDto Message);
 public record GroupChatMessageDeletedDto(Guid GroupId, Guid MessageId, DateTime DeletedAt, Guid DeletedById);
 public record GroupChatUnreadChangedDto(Guid GroupId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt);
 public record GroupChatUpdatedDto(GroupChatSummaryDto Chat);
-public record GroupChatMembersChangedDto(Guid GroupId, IReadOnlyList<GroupChatMemberDto> Members);
+public record GroupChatMembersChangedDto(Guid GroupId, IReadOnlyList<GroupChatMemberDto> Members, int SecurityEpoch = 1, DateTime? SecurityEpochChangedAt = null);
 
 
 public record SetGroupAvatarUrlRequest(string AvatarUrl);

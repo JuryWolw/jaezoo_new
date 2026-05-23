@@ -1301,9 +1301,15 @@ public class ChatController(
     private async Task BroadcastGroupMembersChanged(Guid groupId, CancellationToken ct)
     {
         var members = await groupChats.GetMemberDtosAsync(groupId, ct);
+        var epoch = await db.GroupChats.AsNoTracking()
+            .Where(g => g.Id == groupId)
+            .Select(g => new { g.SecurityEpoch, g.SecurityEpochChangedAt })
+            .FirstOrDefaultAsync(ct);
+        var securityEpoch = Math.Max(1, epoch?.SecurityEpoch ?? 1);
+        var securityEpochChangedAt = epoch?.SecurityEpochChangedAt;
         foreach (var memberId in members.Select(m => m.UserId))
         {
-            await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatMembersChanged", new GroupChatMembersChangedDto(groupId, members), ct);
+            await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatMembersChanged", new GroupChatMembersChangedDto(groupId, members, securityEpoch, securityEpochChangedAt), ct);
         }
     }
 
