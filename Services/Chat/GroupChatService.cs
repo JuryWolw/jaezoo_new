@@ -450,6 +450,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             from a in db.GroupMessageAttachments.AsNoTracking()
             join f in db.ChatFiles.AsNoTracking() on a.FileId equals f.Id
             where messageIds.Contains(a.MessageId)
+                  && f.DeletedAt == null
+                  && f.BlockedAt == null
             orderby a.CreatedAt, a.Id
             select new { a.MessageId, File = f }
         ).ToListAsync(ct);

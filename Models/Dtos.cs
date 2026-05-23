@@ -114,7 +114,11 @@ public record AttachmentDto(
     long SizeBytes,
     string Url,
     bool IsImage,
-    bool IsVideo
+    bool IsVideo,
+    string ScanStatus = "NotScanned",
+    bool IsScanned = false,
+    bool IsSafeToDownload = false,
+    string? ScanWarning = null
 );
 
 public record MessageForwardInfoDto(
@@ -174,7 +178,11 @@ public record FileUploadResponse(
     long SizeBytes,
     string Url,
     bool IsImage,
-    bool IsVideo
+    bool IsVideo,
+    string ScanStatus = "Pending",
+    bool IsScanned = false,
+    bool IsSafeToDownload = false,
+    string? ScanWarning = null
 );
 
 

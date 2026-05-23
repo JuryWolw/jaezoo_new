@@ -1,4 +1,4 @@
-using JaeZoo.Server.Data;
+﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services.Storage;
 using Microsoft.EntityFrameworkCore;
@@ -81,15 +81,31 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
     public static bool IsVideo(string? ct) =>
         !string.IsNullOrWhiteSpace(ct) && ct.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
 
-    public AttachmentDto ToAttachmentDto(ChatFile f) => new(
-        f.Id,
-        f.OriginalFileName,
-        f.ContentType,
-        f.SizeBytes,
-        storage.GetPublicUrl(f.StoredPath),
-        IsImage(f.ContentType),
-        IsVideo(f.ContentType)
-    );
+    public AttachmentDto ToAttachmentDto(ChatFile f)
+    {
+        var status = f.ScanStatus.ToString();
+        var isClean = f.ScanStatus == JaeZoo.Server.Models.Files.FileScanStatus.Clean;
+        var isBlocked = f.ScanStatus == JaeZoo.Server.Models.Files.FileScanStatus.Blocked || f.BlockedAt.HasValue || f.DeletedAt.HasValue;
+        var warning = isClean
+            ? null
+            : isBlocked
+                ? "Файл заблокирован проверкой безопасности."
+                : "Файл ещё не проверен антивирусом. Скачивание выполняется под вашу ответственность.";
+
+        return new AttachmentDto(
+            f.Id,
+            f.OriginalFileName,
+            f.ContentType,
+            f.SizeBytes,
+            $"/api/files/{f.Id}/raw",
+            IsImage(f.ContentType),
+            IsVideo(f.ContentType),
+            status,
+            isClean || isBlocked,
+            isClean,
+            warning
+        );
+    }
 
     public async Task<Dictionary<Guid, List<AttachmentDto>>> LoadAttachmentsForMessagesAsync(List<Guid> messageIds, CancellationToken ct)
     {
@@ -100,6 +116,8 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
             from a in db.DirectMessageAttachments.AsNoTracking()
             join f in db.ChatFiles.AsNoTracking() on a.FileId equals f.Id
             where messageIds.Contains(a.MessageId)
+                  && f.DeletedAt == null
+                  && f.BlockedAt == null
             orderby a.CreatedAt, a.Id
             select new { a.MessageId, File = f }
         ).ToListAsync(ct);

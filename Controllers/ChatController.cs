@@ -2,6 +2,7 @@
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services.Chat;
+using JaeZoo.Server.Services.Files;
 using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -20,6 +21,7 @@ public class ChatController(
     ILogger<ChatController> log,
     DirectChatService chat,
     GroupChatService groupChats,
+    FileCleanupService fileCleanup,
     IHubContext<ChatHub> hub,
     IWebHostEnvironment env) : ControllerBase
 {
@@ -406,12 +408,19 @@ public class ChatController(
             if (msg.SenderId != MeId) return Forbid();
             if (msg.DeletedAt.HasValue) return Ok(new { ok = true });
 
+            var attachedFileIds = await db.DirectMessageAttachments
+                .AsNoTracking()
+                .Where(a => a.MessageId == msg.Id)
+                .Select(a => a.FileId)
+                .ToListAsync(ct);
+
             msg.DeletedAt = DateTime.UtcNow;
             msg.DeletedById = MeId;
             msg.EditedAt = null;
             msg.Text = string.Empty;
             msg.SystemKey = null;
             await db.SaveChangesAsync(ct);
+            await fileCleanup.DeleteFilesForMessageAsync(attachedFileIds, ct);
 
             var dialog = await db.DirectDialogs.AsNoTracking().FirstAsync(d => d.Id == msg.DialogId, ct);
             var peerId = dialog.User1Id == MeId ? dialog.User2Id : dialog.User1Id;
@@ -1025,12 +1034,19 @@ public class ChatController(
             if (!await groupChats.IsMemberAsync(msg.GroupChatId, MeId, ct)) return Forbid();
             if (msg.DeletedAt.HasValue) return Ok(new { ok = true });
 
+            var attachedFileIds = await db.GroupMessageAttachments
+                .AsNoTracking()
+                .Where(a => a.MessageId == msg.Id)
+                .Select(a => a.FileId)
+                .ToListAsync(ct);
+
             msg.DeletedAt = DateTime.UtcNow;
             msg.DeletedById = MeId;
             msg.EditedAt = null;
             msg.Text = string.Empty;
             msg.SystemKey = null;
             await db.SaveChangesAsync(ct);
+            await fileCleanup.DeleteFilesForMessageAsync(attachedFileIds, ct);
 
             await BroadcastGroupDeleted(msg.GroupChatId, msg.Id, msg.DeletedAt.Value, MeId, ct);
             return Ok(new { ok = true });

@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using Amazon.S3;
 using Amazon.S3.Model;
 using JaeZoo.Server.Data;
@@ -144,7 +144,7 @@ public class FilesController(
                 StoredPath = objectKey,
                 Sha256 = meta.Sha256Hex,
                 Kind = meta.Kind,
-                ScanStatus = meta.ScanStatus,
+                ScanStatus = FileScanStatus.Pending,
                 IsPotentiallyDangerous = meta.IsPotentiallyDangerous,
                 RiskNote = meta.RiskNote,
                 CreatedAt = now,
@@ -166,7 +166,11 @@ public class FilesController(
                 entity.SizeBytes,
                 url,
                 meta.IsImage,
-                meta.IsVideo
+                meta.IsVideo,
+                entity.ScanStatus.ToString(),
+                false,
+                false,
+                "Файл загружен и ожидает антивирусной проверки."
             ));
         }
         catch (AmazonS3Exception s3ex)
@@ -245,6 +249,8 @@ public class FilesController(
             Response.Headers.CacheControl = "private,max-age=3600";
             Response.Headers["X-JaeZoo-File-Kind"] = file.Kind.ToString();
             Response.Headers["X-JaeZoo-File-Sha256"] = file.Sha256 ?? string.Empty;
+            Response.Headers["X-JaeZoo-File-Scan-Status"] = file.ScanStatus.ToString();
+            Response.Headers["X-JaeZoo-File-Safe"] = (file.ScanStatus == FileScanStatus.Clean).ToString().ToLowerInvariant();
             return File(stream, ctType ?? file.ContentType ?? "application/octet-stream", enableRangeProcessing: true);
         }
         catch (AmazonS3Exception s3ex) when (s3ex.StatusCode == System.Net.HttpStatusCode.NotFound)

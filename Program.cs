@@ -113,6 +113,11 @@ builder.Services.AddHttpClient<SmartCaptchaService>();
 builder.Services.AddSingleton<RiskCaptchaService>();
 builder.Services.AddSingleton<FileInspectionService>();
 builder.Services.AddSingleton<FileBucketRouter>();
+builder.Services.Configure<FileAntivirusOptions>(builder.Configuration.GetSection("Files:Antivirus"));
+builder.Services.AddSingleton<IFileAntivirusScanner, FileAntivirusScanner>();
+builder.Services.AddScoped<FileCleanupService>();
+builder.Services.AddScoped<FileModerationService>();
+builder.Services.AddHostedService<FileScanHostedService>();
 
 // ---------- Email / Yandex Cloud Postbox ----------
 builder.Services.Configure<PostboxOptions>(builder.Configuration.GetSection("Postbox"));

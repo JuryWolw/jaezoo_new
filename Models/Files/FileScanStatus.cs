@@ -6,5 +6,7 @@ public enum FileScanStatus
     MetadataChecked = 1,
     Clean = 2,
     Suspicious = 3,
-    Blocked = 4
+    Blocked = 4,
+    Pending = 5,
+    Failed = 6
 }
