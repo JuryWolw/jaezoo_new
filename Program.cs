@@ -360,6 +360,7 @@ using (var scope = app.Services.CreateScope())
     await EnsureIdentityPrivacySchemaAsync(db, logger);
     await EnsureE2eeKeySchemaAsync(db, logger);
     await EnsureGroupE2eeSecuritySchemaAsync(db, logger);
+    await EnsurePublicGroupsSchemaAsync(db, logger);
 
     await IdentityDataProtector.BackfillUsersAsync(db, logger);
 
@@ -967,6 +968,35 @@ static async Task EnsureGroupVoiceTablesAsync(AppDbContext db, ILogger logger)
 
 
 
+
+
+static async Task EnsurePublicGroupsSchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                ALTER TABLE "GroupChats" ADD COLUMN IF NOT EXISTS "IsPublic" boolean NOT NULL DEFAULT false;
+                CREATE INDEX IF NOT EXISTS "IX_GroupChats_IsPublic" ON "GroupChats" ("IsPublic");
+                """);
+        }
+        else
+        {
+            var columns = await db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('GroupChats')").ToListAsync();
+            if (!columns.Contains("IsPublic", StringComparer.OrdinalIgnoreCase))
+                await db.Database.ExecuteSqlRawAsync("""ALTER TABLE "GroupChats" ADD COLUMN "IsPublic" INTEGER NOT NULL DEFAULT 0;""");
+            await db.Database.ExecuteSqlRawAsync("""CREATE INDEX IF NOT EXISTS "IX_GroupChats_IsPublic" ON "GroupChats" ("IsPublic");""");
+        }
+
+        logger.LogInformation("Public/private groups schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure public/private groups schema.");
+        throw;
+    }
+}
 
 static async Task EnsureGroupE2eeSecuritySchemaAsync(AppDbContext db, ILogger logger)
 {

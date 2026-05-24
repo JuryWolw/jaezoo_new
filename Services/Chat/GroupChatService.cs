@@ -97,7 +97,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct);
     }
 
-    public async Task<GroupChat> CreateChatAsync(Guid ownerId, string? title, string? description, IReadOnlyCollection<Guid>? memberIds, CancellationToken ct = default)
+    public async Task<GroupChat> CreateChatAsync(Guid ownerId, string? title, string? description, IReadOnlyCollection<Guid>? memberIds, bool isPublic = false, CancellationToken ct = default)
     {
         var normalizedTitle = (title ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(normalizedTitle))
@@ -144,6 +144,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             Description = normalizedDescription,
             OwnerId = ownerId,
             MemberLimit = MaxGroupMembers,
+            IsPublic = isPublic,
             SecurityEpoch = 1,
             SecurityEpochChangedAt = now,
             CreatedAt = now,
@@ -173,7 +174,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return chat;
     }
 
-    public async Task<GroupChat> UpdateChatAsync(Guid groupId, Guid me, string? title, string? description, CancellationToken ct = default)
+    public async Task<GroupChat> UpdateChatAsync(Guid groupId, Guid me, string? title, string? description, bool? isPublic = null, CancellationToken ct = default)
     {
         var chat = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct)
             ?? throw new InvalidOperationException("Group chat not found.");
@@ -192,6 +193,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
         chat.Title = normalizedTitle;
         chat.Description = NormalizeDescription(description);
+        if (isPublic.HasValue)
+            chat.IsPublic = isPublic.Value;
         chat.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         return chat;
@@ -458,7 +461,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             unread.firstId,
             unread.firstAt,
             Math.Max(1, chat.SecurityEpoch),
-            chat.SecurityEpochChangedAt);
+            chat.SecurityEpochChangedAt,
+            chat.IsPublic,
+            true);
     }
 
     public async Task<List<GroupChatSummaryDto>> ListForUserAsync(Guid me, CancellationToken ct = default)
@@ -483,6 +488,81 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             .OrderByDescending(x => x.LastMessageAt ?? x.UpdatedAt)
             .ThenBy(x => x.Title, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+
+    public async Task<List<PublicGroupSearchDto>> SearchPublicAsync(Guid me, string? query, int take = 30, CancellationToken ct = default)
+    {
+        var q = (query ?? string.Empty).Trim();
+        if (q.Length < 2)
+            return new List<PublicGroupSearchDto>();
+
+        take = Math.Clamp(take, 1, 50);
+
+        var memberGroupIds = await db.GroupChatMembers
+            .AsNoTracking()
+            .Where(m => m.UserId == me)
+            .Select(m => m.GroupChatId)
+            .ToListAsync(ct);
+        var memberSet = memberGroupIds.ToHashSet();
+
+        var lower = q.ToLowerInvariant();
+        var groups = await db.GroupChats
+            .AsNoTracking()
+            .Where(g => g.IsPublic &&
+                (g.Title.ToLower().Contains(lower) || (g.Description != null && g.Description.ToLower().Contains(lower))))
+            .OrderBy(g => g.Title)
+            .Take(take)
+            .ToListAsync(ct);
+
+        var ids = groups.Select(g => g.Id).ToList();
+        var counts = await db.GroupChatMembers
+            .AsNoTracking()
+            .Where(m => ids.Contains(m.GroupChatId))
+            .GroupBy(m => m.GroupChatId)
+            .Select(g => new { GroupId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.GroupId, x => x.Count, ct);
+
+        return groups.Select(g => new PublicGroupSearchDto(
+            g.Id,
+            g.Title,
+            g.Description,
+            GetAvatarUrl(g),
+            g.OwnerId,
+            counts.TryGetValue(g.Id, out var c) ? c : 0,
+            g.MemberLimit,
+            g.CreatedAt,
+            g.UpdatedAt,
+            g.IsPublic,
+            memberSet.Contains(g.Id))).ToList();
+    }
+
+    public async Task<GroupChat> JoinPublicAsync(Guid groupId, Guid me, CancellationToken ct = default)
+    {
+        var chat = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct)
+            ?? throw new InvalidOperationException("Group chat not found.");
+
+        if (!chat.IsPublic)
+            throw new InvalidOperationException("This group is private. You can join it only by invite.");
+
+        var isAlreadyMember = await db.GroupChatMembers.AnyAsync(m => m.GroupChatId == groupId && m.UserId == me, ct);
+        if (isAlreadyMember)
+            return chat;
+
+        var count = await db.GroupChatMembers.CountAsync(m => m.GroupChatId == groupId, ct);
+        if (count >= chat.MemberLimit)
+            throw new InvalidOperationException($"Group member limit is {chat.MemberLimit}.");
+
+        var now = DateTime.UtcNow;
+        db.GroupChatMembers.Add(new GroupChatMember
+        {
+            GroupChatId = groupId,
+            UserId = me,
+            JoinedAt = now
+        });
+        AdvanceSecurityEpoch(chat, now);
+        await db.SaveChangesAsync(ct);
+        return chat;
     }
 
     public AttachmentDto ToAttachmentDto(ChatFile f) => directChat.ToAttachmentDto(f);

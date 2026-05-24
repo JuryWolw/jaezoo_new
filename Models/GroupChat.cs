@@ -18,6 +18,9 @@ public class GroupChat
 
     public int MemberLimit { get; set; } = DefaultMemberLimit;
 
+    /// <summary>Public groups are searchable and can be joined by verified users. Private groups are invite-only.</summary>
+    public bool IsPublic { get; set; } = false;
+
     /// <summary>
     /// Monotonically increasing security epoch for group E2EE.
     /// It changes whenever group membership changes, so new messages are bound

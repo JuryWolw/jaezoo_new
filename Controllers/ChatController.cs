@@ -517,6 +517,57 @@ public class ChatController(
         }
     }
 
+
+    [HttpGet("groups/search")]
+    [EnableRateLimiting("search")]
+    public async Task<ActionResult<IEnumerable<PublicGroupSearchDto>>> SearchPublicGroups([FromQuery] string? q, int take = 30, CancellationToken ct = default)
+    {
+        try
+        {
+            var query = (q ?? string.Empty).Trim();
+            if (query.Length < 2)
+                return Ok(Array.Empty<PublicGroupSearchDto>());
+
+            return Ok(await groupChats.SearchPublicAsync(MeId, query, take, ct));
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "SearchPublicGroups failed: me={MeId}, query={Query}", MeId, q);
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpPost("groups/{groupId:guid}/join")]
+    [RequireVerifiedEmail]
+    [EnableRateLimiting("security-sensitive")]
+    public async Task<ActionResult<GroupChatDetailsDto>> JoinPublicGroup(Guid groupId, CancellationToken ct)
+    {
+        try
+        {
+            var chatEntity = await groupChats.JoinPublicAsync(groupId, MeId, ct);
+            var details = await BuildGroupDetailsAsync(chatEntity.Id, ct);
+            if (details is null) return Problem("Failed to build group chat dto.", statusCode: 500);
+
+            await BroadcastGroupMembersChanged(chatEntity.Id, ct);
+            await BroadcastGroupUpdated(details.Chat, ct);
+
+            var memberIds = await GetGroupMemberIdsAsync(chatEntity.Id, ct);
+            foreach (var memberId in memberIds)
+            {
+                var summary = await groupChats.GetSummaryAsync(chatEntity.Id, memberId, ct);
+                if (summary is not null)
+                    await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatUpdated", new GroupChatUpdatedDto(summary), ct);
+            }
+
+            return Ok(details);
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "JoinPublicGroup failed: me={MeId}, group={GroupId}", MeId, groupId);
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     [HttpGet("groups/unread")]
     public async Task<ActionResult<IEnumerable<GroupUnreadChatDto>>> GroupUnreadSummary(CancellationToken ct)
     {
@@ -557,7 +608,7 @@ public class ChatController(
             var verifyMembers = await RequireUsersVerifiedAsync(memberIds, "В группу можно добавлять только пользователей с подтверждённой почтой.", ct);
             if (verifyMembers is not null) return verifyMembers;
 
-            var group = await groupChats.CreateChatAsync(MeId, body.Title, body.Description, body.MemberIds, ct);
+            var group = await groupChats.CreateChatAsync(MeId, body.Title, body.Description, body.MemberIds, body.IsPublic, ct);
             var details = await BuildGroupDetailsAsync(group.Id, ct);
             if (details is null) return Problem("Failed to build group chat dto.", statusCode: 500);
 
@@ -602,7 +653,7 @@ public class ChatController(
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
 
-            await groupChats.UpdateChatAsync(groupId, MeId, body.Title, body.Description, ct);
+            await groupChats.UpdateChatAsync(groupId, MeId, body.Title, body.Description, body.IsPublic, ct);
             var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
             if (summary is null) return NotFound(new { error = "Group chat not found." });
 

@@ -226,8 +226,8 @@ public record FileUploadResponse(
 );
 
 
-public record CreateGroupChatRequest(string Title, string? Description = null, IReadOnlyList<Guid>? MemberIds = null);
-public record UpdateGroupChatRequest(string Title, string? Description = null);
+public record CreateGroupChatRequest(string Title, string? Description = null, IReadOnlyList<Guid>? MemberIds = null, bool IsPublic = false);
+public record UpdateGroupChatRequest(string Title, string? Description = null, bool? IsPublic = null);
 public record UpdateGroupMembersRequest(IReadOnlyList<Guid> UserIds);
 public record UpdateGroupMemberRoleRequest(string Role);
 
@@ -269,10 +269,26 @@ public record GroupChatSummaryDto(
     Guid? FirstUnreadId = null,
     DateTime? FirstUnreadAt = null,
     int SecurityEpoch = 1,
-    DateTime? SecurityEpochChangedAt = null
+    DateTime? SecurityEpochChangedAt = null,
+    bool IsPublic = false,
+    bool IsMember = true
 );
 
 public record GroupChatDetailsDto(GroupChatSummaryDto Chat, IReadOnlyList<GroupChatMemberDto> Members);
+
+public record PublicGroupSearchDto(
+    Guid Id,
+    string Title,
+    string? Description,
+    string? AvatarUrl,
+    Guid OwnerId,
+    int MemberCount,
+    int MemberLimit,
+    DateTime CreatedAt,
+    DateTime UpdatedAt,
+    bool IsPublic,
+    bool IsMember
+);
 public record GroupUnreadChatDto(Guid GroupId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt);
 
 public record GroupChatRealtimeMessageDto(Guid GroupId, MessageDto Message);

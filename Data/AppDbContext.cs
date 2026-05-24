@@ -65,6 +65,13 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
 
         b.Entity<GroupChat>()
+            .Property(g => g.IsPublic)
+            .HasDefaultValue(false);
+
+        b.Entity<GroupChat>()
+            .HasIndex(g => g.IsPublic);
+
+        b.Entity<GroupChat>()
             .Property(g => g.SecurityEpoch)
             .HasDefaultValue(1);
 

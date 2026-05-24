@@ -131,7 +131,8 @@ namespace JaeZoo.Server.Controllers
 
             var users = await baseQuery
                 .AsNoTracking()
-                .OrderBy(u => u.DisplayName)
+                .OrderBy(u => u.PublicId == qUpper ? 0 : 1)
+                .ThenBy(u => u.DisplayName)
                 .Take(25)
                 .ToListAsync(ct);
 
