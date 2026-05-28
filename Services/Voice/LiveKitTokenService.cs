@@ -30,10 +30,20 @@ public sealed class LiveKitTokenService(IOptions<LiveKitOptions> options)
         var now = DateTimeOffset.UtcNow;
         var ttl = TimeSpan.FromMinutes(Math.Clamp(_options.TokenTtlMinutes, 5, 24 * 60));
 
+        // LiveKit participant identity must be unique per media join.
+        // Earlier we used only User.Id as `sub`; when an embedded WebView2 engine failed
+        // during ICE and the client retried/fell back, LiveKit could still keep the old
+        // half-open participant for the same identity. The next engine then joined with
+        // the same identity and the media PC could be replaced/disconnected before audio
+        // publishing. Keep the user id as the stable prefix so old client UI can map
+        // speaking/video events back to a JaeZoo user, but add a per-token nonce for
+        // LiveKit-level uniqueness.
+        var participantIdentity = $"{user.Id:N}.{sessionId:N}.{Guid.NewGuid():N}";
+
         var payload = new Dictionary<string, object?>
         {
             ["iss"] = _options.ApiKey,
-            ["sub"] = user.Id.ToString(),
+            ["sub"] = participantIdentity,
             ["name"] = UserIdentityService.GetPublicName(user),
             ["iat"] = now.ToUnixTimeSeconds(),
             ["nbf"] = now.AddSeconds(-10).ToUnixTimeSeconds(),
@@ -44,7 +54,8 @@ public sealed class LiveKitTokenService(IOptions<LiveKitOptions> options)
                 userName = UserIdentityService.GetPublicName(user),
                 publicId = user.PublicId,
                 groupId,
-                sessionId
+                sessionId,
+                participantIdentity
             }, JsonOptions),
             ["video"] = new Dictionary<string, object?>
             {
