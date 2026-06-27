@@ -304,6 +304,14 @@ public record CrossChatForwardRequest(string Source, Guid? SourceChatId, IReadOn
 
 public record GroupVoiceJoinRequest(string? ClientInfo = null);
 
+public record GroupVoiceIceServerDto(
+    IReadOnlyList<string> Urls,
+    string? Username = null,
+    string? Credential = null,
+    string CredentialType = "password"
+);
+
+
 public record GroupVoiceParticipantDto(
     Guid UserId,
     string UserName,
@@ -332,7 +340,10 @@ public record GroupVoiceJoinResponse(
     string Token,
     Guid SessionId,
     bool IsNewSession,
-    GroupVoiceStateDto State
+    GroupVoiceStateDto State,
+    IReadOnlyList<GroupVoiceIceServerDto>? IceServers = null,
+    string IceTransportPolicy = "all",
+    bool PreferTcpTurn = false
 );
 
 public record GroupVoiceStateChangedDto(Guid GroupId, GroupVoiceStateDto State);

@@ -1,4 +1,4 @@
-﻿using JaeZoo.Server.Data;
+using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Options;
@@ -83,7 +83,16 @@ public sealed class GroupVoiceService(
             throw new InvalidOperationException("Failed to create group voice session.");
 
         var token = tokens.CreateJoinToken(user, groupId, session.Id, session.RoomName);
-        return new GroupVoiceJoinResponse(tokens.Url, session.RoomName, token, session.Id, isNewSession, state);
+        return new GroupVoiceJoinResponse(
+            tokens.Url,
+            session.RoomName,
+            token,
+            session.Id,
+            isNewSession,
+            state,
+            BuildIceServers(),
+            NormalizeIceTransportPolicy(_options.IceTransportPolicy),
+            _options.PreferTcpTurn);
     }
 
     public async Task<GroupVoiceStateDto> HeartbeatAsync(Guid groupId, Guid userId, CancellationToken ct = default)
@@ -296,6 +305,62 @@ public sealed class GroupVoiceService(
         session.State = GroupVoiceSessionState.Ended;
         session.EndedAt = now;
         session.LastActivityAt = now;
+    }
+
+    private IReadOnlyList<GroupVoiceIceServerDto> BuildIceServers()
+    {
+        var turnDomain = ResolveTurnDomain();
+        if (string.IsNullOrWhiteSpace(turnDomain))
+            return Array.Empty<GroupVoiceIceServerDto>();
+
+        var udpUrls = new[]
+        {
+            $"stun:{turnDomain}:3478",
+            $"turn:{turnDomain}:3478?transport=udp",
+            $"turn:{turnDomain}:3478?transport=tcp",
+            $"turns:{turnDomain}:5349?transport=tcp"
+        };
+
+        var tcpFirstUrls = new[]
+        {
+            $"turns:{turnDomain}:5349?transport=tcp",
+            $"turn:{turnDomain}:3478?transport=tcp",
+            $"turn:{turnDomain}:3478?transport=udp",
+            $"stun:{turnDomain}:3478"
+        };
+
+        var urls = (_options.PreferTcpTurn ? tcpFirstUrls : udpUrls)
+            .Where(u => !string.IsNullOrWhiteSpace(u))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return new[] { new GroupVoiceIceServerDto(urls) };
+    }
+
+    private string ResolveTurnDomain()
+    {
+        if (!string.IsNullOrWhiteSpace(_options.TurnDomain))
+            return _options.TurnDomain.Trim();
+
+        if (Uri.TryCreate(tokens.Url, UriKind.Absolute, out var uri))
+        {
+            var host = uri.Host;
+            if (!string.IsNullOrWhiteSpace(host))
+            {
+                if (host.StartsWith("sfu.", StringComparison.OrdinalIgnoreCase))
+                    return "turn-sfu." + host[4..];
+
+                return host;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static string NormalizeIceTransportPolicy(string? policy)
+    {
+        policy = string.IsNullOrWhiteSpace(policy) ? "all" : policy.Trim().ToLowerInvariant();
+        return policy == "relay" ? "relay" : "all";
     }
 
     private static string? NormalizeClientInfo(string? clientInfo)
