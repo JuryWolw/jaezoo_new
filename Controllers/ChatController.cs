@@ -319,6 +319,7 @@ public class ChatController(
 
             var readDto = new ChatMessageReadDto(me, me, mid, DateTime.UtcNow);
             await hub.Clients.User(friendId.ToString()).SendAsync("ChatMessageRead", readDto, ct);
+            await hub.Clients.User(me.ToString()).SendAsync("ChatMessageRead", readDto, ct);
 
             return Ok(new { ok = true });
         }
@@ -1010,7 +1011,7 @@ public class ChatController(
 
             var readDto = new GroupChatMessageReadDto(groupId, MeId, mid, DateTime.UtcNow);
             var memberIds = await GetGroupMemberIdsAsync(groupId, ct);
-            foreach (var memberId in memberIds.Where(x => x != MeId))
+            foreach (var memberId in memberIds)
                 await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatMessageRead", readDto, ct);
 
             return Ok(new { ok = true });
