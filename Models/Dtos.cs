@@ -1,4 +1,4 @@
-namespace JaeZoo.Server.Models;
+﻿namespace JaeZoo.Server.Models;
 
 public sealed class RegisterRequest
 {
@@ -149,6 +149,10 @@ public record MessageDto(
 );
 
 public record UnreadDialogDto(Guid FriendId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt);
+
+public record ChatMessageReadDto(Guid PeerId, Guid ReaderId, Guid LastReadMessageId, DateTime ReadAtUtc);
+public record GroupChatMessageReadDto(Guid GroupId, Guid ReaderId, Guid LastReadMessageId, DateTime ReadAtUtc);
+
 public record MarkReadRequest(Guid LastReadMessageId);
 
 public record SendMessageRequest(string? Text, IReadOnlyList<Guid>? FileIds = null);

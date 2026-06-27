@@ -317,6 +317,9 @@ public class ChatController(
             var unreadDto = new ChatUnreadChangedDto(friendId, unread.count, unread.firstId, unread.firstAt);
             await hub.Clients.User(me.ToString()).SendAsync("ChatUnreadChanged", unreadDto, ct);
 
+            var readDto = new ChatMessageReadDto(me, me, mid, DateTime.UtcNow);
+            await hub.Clients.User(friendId.ToString()).SendAsync("ChatMessageRead", readDto, ct);
+
             return Ok(new { ok = true });
         }
         catch (Exception ex)
@@ -1004,6 +1007,11 @@ public class ChatController(
 
             var unread = await groupChats.GetUnreadForUserAsync(groupId, MeId, ct);
             await hub.Clients.User(MeId.ToString()).SendAsync("GroupChatUnreadChanged", new GroupChatUnreadChangedDto(groupId, unread.count, unread.firstId, unread.firstAt), ct);
+
+            var readDto = new GroupChatMessageReadDto(groupId, MeId, mid, DateTime.UtcNow);
+            var memberIds = await GetGroupMemberIdsAsync(groupId, ct);
+            foreach (var memberId in memberIds.Where(x => x != MeId))
+                await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatMessageRead", readDto, ct);
 
             return Ok(new { ok = true });
         }
