@@ -216,7 +216,11 @@ public class ChatController(
                 }
 
                 var (count, firstId, firstAt) = await chat.GetUnreadForUserAsync(dlg, me, ct);
-                result.Add(new UnreadDialogDto(friendId, count, firstId, firstAt));
+                var (_, lastReadByFriendId) = DirectChatService.GetReadCursor(dlg, friendId);
+                result.Add(new UnreadDialogDto(friendId, count, firstId, firstAt)
+                {
+                    LastReadByFriendMessageId = lastReadByFriendId == Guid.Empty ? null : lastReadByFriendId
+                });
             }
 
             return Ok(result);
@@ -588,7 +592,21 @@ public class ChatController(
             foreach (var groupId in groups)
             {
                 var unread = await groupChats.GetUnreadForUserAsync(groupId, MeId, ct);
-                result.Add(new GroupUnreadChatDto(groupId, unread.count, unread.firstId, unread.firstAt));
+                var lastReadByOtherMessageId = await db.GroupChatMembers
+                    .AsNoTracking()
+                    .Where(m => m.GroupChatId == groupId && m.UserId != MeId && m.LastReadMessageId != Guid.Empty)
+                    .Join(db.GroupMessages.AsNoTracking(),
+                        member => member.LastReadMessageId,
+                        message => message.Id,
+                        (member, message) => new { member.LastReadMessageId, message.SentAt })
+                    .OrderByDescending(x => x.SentAt)
+                    .Select(x => (Guid?)x.LastReadMessageId)
+                    .FirstOrDefaultAsync(ct);
+
+                result.Add(new GroupUnreadChatDto(groupId, unread.count, unread.firstId, unread.firstAt)
+                {
+                    LastReadByOtherMessageId = lastReadByOtherMessageId
+                });
             }
 
             return Ok(result);

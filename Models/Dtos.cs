@@ -148,7 +148,10 @@ public record MessageDto(
     int? GroupSecurityEpoch = null
 );
 
-public record UnreadDialogDto(Guid FriendId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt);
+public record UnreadDialogDto(Guid FriendId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt)
+{
+    public Guid? LastReadByFriendMessageId { get; init; }
+}
 
 public record ChatMessageReadDto(Guid PeerId, Guid ReaderId, Guid LastReadMessageId, DateTime ReadAtUtc);
 public record GroupChatMessageReadDto(Guid GroupId, Guid ReaderId, Guid LastReadMessageId, DateTime ReadAtUtc);
@@ -293,7 +296,10 @@ public record PublicGroupSearchDto(
     bool IsPublic,
     bool IsMember
 );
-public record GroupUnreadChatDto(Guid GroupId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt);
+public record GroupUnreadChatDto(Guid GroupId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt)
+{
+    public Guid? LastReadByOtherMessageId { get; init; }
+}
 
 public record GroupChatRealtimeMessageDto(Guid GroupId, MessageDto Message);
 public record GroupChatMessageUpdatedDto(Guid GroupId, MessageDto Message);
