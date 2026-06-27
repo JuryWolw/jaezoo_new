@@ -507,11 +507,13 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         var memberSet = memberGroupIds.ToHashSet();
 
         var lower = q.ToLowerInvariant();
+        var hasGuid = Guid.TryParse(q, out var queryGuid);
         var groups = await db.GroupChats
             .AsNoTracking()
             .Where(g => g.IsPublic &&
-                (g.Title.ToLower().Contains(lower) || (g.Description != null && g.Description.ToLower().Contains(lower))))
-            .OrderBy(g => g.Title)
+                ((hasGuid && g.Id == queryGuid) || g.Title.ToLower().Contains(lower) || (g.Description != null && g.Description.ToLower().Contains(lower))))
+            .OrderBy(g => hasGuid && g.Id == queryGuid ? 0 : 1)
+            .ThenBy(g => g.Title)
             .Take(take)
             .ToListAsync(ct);
 

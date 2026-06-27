@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -112,6 +112,7 @@ namespace JaeZoo.Server.Controllers
 
             var qLower = query.ToLowerInvariant();
             var qUpper = query.ToUpperInvariant();
+            var hasGuid = Guid.TryParse(query, out var queryGuid);
 
             var prov = _db.Database.ProviderName ?? string.Empty;
             IQueryable<User> baseQuery = _db.Users.Where(u => u.Id != meId && !u.IsDisabled);
@@ -119,19 +120,22 @@ namespace JaeZoo.Server.Controllers
             if (prov.Contains("Npgsql", StringComparison.OrdinalIgnoreCase))
             {
                 baseQuery = baseQuery.Where(u =>
+                    (hasGuid && u.Id == queryGuid) ||
                     EF.Functions.ILike(u.DisplayName!, $"%{query}%") ||
                     EF.Functions.ILike(u.PublicId!, $"%{query}%"));
             }
             else
             {
                 baseQuery = baseQuery.Where(u =>
+                    (hasGuid && u.Id == queryGuid) ||
                     (u.DisplayName ?? "").ToLower().Contains(qLower) ||
                     (u.PublicId ?? "").ToUpper().Contains(qUpper));
             }
 
             var users = await baseQuery
                 .AsNoTracking()
-                .OrderBy(u => u.PublicId == qUpper ? 0 : 1)
+                .OrderBy(u => hasGuid && u.Id == queryGuid ? 0 : 1)
+                .ThenBy(u => u.PublicId == qUpper ? 0 : 1)
                 .ThenBy(u => u.DisplayName)
                 .Take(25)
                 .ToListAsync(ct);
