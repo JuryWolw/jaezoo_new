@@ -313,9 +313,20 @@ public sealed class GroupVoiceService(
         if (string.IsNullOrWhiteSpace(turnDomain))
             return Array.Empty<GroupVoiceIceServerDto>();
 
+        var stunServer = new GroupVoiceIceServerDto(new[] { $"stun:{turnDomain}:3478" });
+
+        var turnUsername = string.IsNullOrWhiteSpace(_options.TurnUsername) ? string.Empty : _options.TurnUsername.Trim();
+        var turnCredential = string.IsNullOrWhiteSpace(_options.TurnCredential) ? string.Empty : _options.TurnCredential.Trim();
+
+        // Browsers reject TURN URLs when username or credential is empty:
+        // "Failed to construct RTCPeerConnection: TURN server with empty username or password".
+        // LiveKit's embedded TURN can still be advertised by the SFU through signaling,
+        // so here we send explicit browser TURN servers only when credentials are configured.
+        if (string.IsNullOrWhiteSpace(turnUsername) || string.IsNullOrWhiteSpace(turnCredential))
+            return new[] { stunServer };
+
         var udpUrls = new[]
         {
-            $"stun:{turnDomain}:3478",
             $"turn:{turnDomain}:3478?transport=udp",
             $"turn:{turnDomain}:3478?transport=tcp",
             $"turns:{turnDomain}:5349?transport=tcp"
@@ -325,16 +336,19 @@ public sealed class GroupVoiceService(
         {
             $"turns:{turnDomain}:5349?transport=tcp",
             $"turn:{turnDomain}:3478?transport=tcp",
-            $"turn:{turnDomain}:3478?transport=udp",
-            $"stun:{turnDomain}:3478"
+            $"turn:{turnDomain}:3478?transport=udp"
         };
 
-        var urls = (_options.PreferTcpTurn ? tcpFirstUrls : udpUrls)
+        var turnUrls = (_options.PreferTcpTurn ? tcpFirstUrls : udpUrls)
             .Where(u => !string.IsNullOrWhiteSpace(u))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-        return new[] { new GroupVoiceIceServerDto(urls) };
+        return new[]
+        {
+            stunServer,
+            new GroupVoiceIceServerDto(turnUrls, turnUsername, turnCredential)
+        };
     }
 
     private string ResolveTurnDomain()

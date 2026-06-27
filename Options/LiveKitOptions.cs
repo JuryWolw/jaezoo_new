@@ -17,8 +17,14 @@ public sealed class LiveKitOptions
     /// <summary>How long a voice participant may be silent before being considered disconnected.</summary>
     public int ParticipantStaleSeconds { get; set; } = 90;
 
-    /// <summary>Public TURN domain for the LiveKit/SFU machine, for example turn-sfu.jaezoo.ru.</summary>
+    /// <summary>Public STUN/TURN domain for the LiveKit/SFU machine, for example turn-sfu.jaezoo.ru.</summary>
     public string TurnDomain { get; set; } = "";
+
+    /// <summary>Optional TURN username. Leave empty when LiveKit embedded TURN is used without explicit browser TURN credentials.</summary>
+    public string TurnUsername { get; set; } = "";
+
+    /// <summary>Optional TURN credential. TURN URLs are sent to the browser only when both username and credential are present.</summary>
+    public string TurnCredential { get; set; } = "";
 
     /// <summary>Browser ICE policy for group calls. Use "all" in production, "relay" for strict diagnostics.</summary>
     public string IceTransportPolicy { get; set; } = "all";
