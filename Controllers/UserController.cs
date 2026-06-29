@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -593,7 +593,9 @@ namespace JaeZoo.Server.Controllers
                 UserIdentityService.GetPublicName(u),
                 UserIdentityService.GetAvatarUrl(u),
                 u.Status, u.CustomStatus, u.ShowOnline ? u.LastSeen : null,
-                BannerProxyUrl(u)
+                BannerProxyUrl(u),
+                null,
+                u.About
             );
     }
 }

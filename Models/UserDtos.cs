@@ -31,7 +31,8 @@ namespace JaeZoo.Server.Models
         string? CustomStatus,
         DateTime? LastSeen,
         string? ProfileBannerUrl = null,
-        string? ProfileTextTheme = null
+        string? ProfileTextTheme = null,
+        string? About = null
     );
 
     public record UserAvatarDto(
