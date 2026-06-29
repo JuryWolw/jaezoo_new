@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -324,6 +324,28 @@ namespace JaeZoo.Server.Controllers
             var result = avatars
                 .Select(a => new UserAvatarDto(a.Id, string.IsNullOrWhiteSpace(a.Url) ? AvatarGalleryImageUrl(a.Id, a.CreatedAt) : AvatarGalleryImageUrl(a.Id, a.CreatedAt), a.IsCurrent, a.CreatedAt))
                 .ToList();
+            return Ok(result);
+        }
+
+        [AllowAnonymous]
+        [HttpGet("{id:guid}/avatar-gallery")]
+        public async Task<ActionResult<IReadOnlyList<UserAvatarDto>>> GetPublicAvatarGallery(Guid id, CancellationToken ct)
+        {
+            var exists = await _db.Users.AsNoTracking()
+                .AnyAsync(u => u.Id == id && !u.IsDisabled, ct);
+            if (!exists) return NotFound();
+
+            var avatars = await _db.UserAvatars.AsNoTracking()
+                .Where(a => a.UserId == id && a.DeletedAt == null)
+                .OrderByDescending(a => a.IsCurrent)
+                .ThenByDescending(a => a.CreatedAt)
+                .Select(a => new { a.Id, a.Url, a.IsCurrent, a.CreatedAt })
+                .ToListAsync(ct);
+
+            var result = avatars
+                .Select(a => new UserAvatarDto(a.Id, AvatarGalleryImageUrl(a.Id, a.CreatedAt), a.IsCurrent, a.CreatedAt))
+                .ToList();
+
             return Ok(result);
         }
 
