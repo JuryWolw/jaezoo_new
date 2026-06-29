@@ -1,4 +1,4 @@
-﻿namespace JaeZoo.Server.Models;
+namespace JaeZoo.Server.Models;
 
 public sealed class RegisterRequest
 {
@@ -119,6 +119,28 @@ public record AttachmentDto(
     bool IsScanned = false,
     bool IsSafeToDownload = false,
     string? ScanWarning = null
+);
+
+
+public record ChatAttachmentBrowserItemDto(
+    Guid Id,
+    Guid MessageId,
+    DateTime MessageSentAt,
+    Guid SenderId,
+    string SenderName,
+    string Kind,
+    string Title,
+    string? Url,
+    string ContentType,
+    long SizeBytes,
+    bool IsImage,
+    bool IsVideo,
+    bool IsAudio,
+    string ScanStatus = "NotScanned",
+    bool IsScanned = false,
+    bool IsSafeToDownload = false,
+    string? ScanWarning = null,
+    string? TextPreview = null
 );
 
 public record MessageForwardInfoDto(

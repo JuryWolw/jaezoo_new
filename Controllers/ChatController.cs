@@ -1,6 +1,7 @@
-﻿using JaeZoo.Server.Data;
+using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Models.Files;
 using JaeZoo.Server.Services.Chat;
 using JaeZoo.Server.Services.Files;
 using JaeZoo.Server.Security;
@@ -10,6 +11,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
+using System.Text.RegularExpressions;
 
 namespace JaeZoo.Server.Controllers;
 
@@ -1323,6 +1325,269 @@ public class ChatController(
         {
             log.LogError(ex, "ForwardMessagesToGroup failed: me={MeId}, group={GroupId}", MeId, groupId);
             return BadRequest(new { error = ex.Message });
+        }
+    }
+
+
+    private static readonly Regex UrlRegex = new(
+        @"(?i)\bhttps?://[^\s<>""']+",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
+        TimeSpan.FromMilliseconds(120));
+
+    private static bool IsAudioContent(string? contentType) =>
+        !string.IsNullOrWhiteSpace(contentType) && contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsImageContent(string? contentType) =>
+        !string.IsNullOrWhiteSpace(contentType) && contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsVideoContent(string? contentType) =>
+        !string.IsNullOrWhiteSpace(contentType) && contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizeAttachmentKind(string? type)
+    {
+        var t = (type ?? string.Empty).Trim().ToLowerInvariant();
+        return t switch
+        {
+            "image" or "images" or "photo" or "photos" or "фото" => "photo",
+            "video" or "videos" or "видео" => "video",
+            "audio" or "music" or "музыка" => "music",
+            "file" or "files" or "файлы" => "files",
+            "link" or "links" or "ссылки" => "links",
+            _ => "photo"
+        };
+    }
+
+    private static string CleanLink(string value)
+    {
+        var v = (value ?? string.Empty).Trim();
+        while (v.Length > 0 && ".,;:!?)]}".Contains(v[^1]))
+            v = v[..^1];
+        return v;
+    }
+
+    private static List<string> ExtractLinks(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text) || !text.Contains("http", StringComparison.OrdinalIgnoreCase))
+            return [];
+
+        try
+        {
+            return UrlRegex.Matches(text)
+                .Select(m => CleanLink(m.Value))
+                .Where(x => Uri.TryCreate(x, UriKind.Absolute, out var uri) &&
+                            (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(12)
+                .ToList();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static string BuildAttachmentFileKind(ChatFile f)
+    {
+        if (f.Kind == StoredFileKind.Photo || IsImageContent(f.ContentType)) return "photo";
+        if (f.Kind == StoredFileKind.Video || IsVideoContent(f.ContentType)) return "video";
+        if (f.Kind == StoredFileKind.Music || IsAudioContent(f.ContentType)) return "music";
+        return "files";
+    }
+
+    private static bool FileMatchesAttachmentType(ChatFile f, string normalizedType)
+    {
+        var contentType = f.ContentType ?? string.Empty;
+        return normalizedType switch
+        {
+            "photo" => f.Kind == StoredFileKind.Photo || IsImageContent(contentType),
+            "video" => f.Kind == StoredFileKind.Video || IsVideoContent(contentType),
+            "music" => f.Kind == StoredFileKind.Music || IsAudioContent(contentType),
+            "files" => f.Kind != StoredFileKind.Avatar &&
+                       f.Kind != StoredFileKind.Photo &&
+                       f.Kind != StoredFileKind.Video &&
+                       f.Kind != StoredFileKind.Music &&
+                       !IsImageContent(contentType) &&
+                       !IsVideoContent(contentType) &&
+                       !IsAudioContent(contentType),
+            _ => false
+        };
+    }
+
+    private ChatAttachmentBrowserItemDto ToAttachmentBrowserDto(ChatFile file, Guid messageId, DateTime sentAt, Guid senderId, string? senderName)
+    {
+        var kind = BuildAttachmentFileKind(file);
+        var contentType = string.IsNullOrWhiteSpace(file.ContentType) ? "application/octet-stream" : file.ContentType;
+        var scanStatus = file.ScanStatus.ToString();
+        var isSafe = file.ScanStatus == FileScanStatus.Clean;
+        return new ChatAttachmentBrowserItemDto(
+            file.Id,
+            messageId,
+            sentAt,
+            senderId,
+            string.IsNullOrWhiteSpace(senderName) ? "Пользователь" : senderName!,
+            kind,
+            string.IsNullOrWhiteSpace(file.OriginalFileName) ? "file" : file.OriginalFileName,
+            $"/api/files/{file.Id}/raw",
+            contentType,
+            file.SizeBytes,
+            kind == "photo",
+            kind == "video",
+            kind == "music",
+            scanStatus,
+            file.ScanStatus != FileScanStatus.NotScanned,
+            isSafe,
+            isSafe ? null : (file.RiskNote ?? "Файл ещё не прошёл антивирусную проверку."),
+            null);
+    }
+
+    [HttpGet("attachments/direct/{friendId:guid}")]
+    public async Task<ActionResult<IEnumerable<ChatAttachmentBrowserItemDto>>> DirectAttachments(Guid friendId, string? type = "photo", int take = 250, CancellationToken ct = default)
+    {
+        try
+        {
+            var normalizedType = NormalizeAttachmentKind(type);
+            if (!await chat.AreFriends(MeId, friendId, ct)) return Forbid();
+            var dlg = await chat.GetOrCreateDialogAsync(MeId, friendId, ct);
+            var safeTake = Math.Clamp(take, 1, 500);
+
+            if (normalizedType == "links")
+            {
+                var messages = await (
+                    from m in db.DirectMessages.AsNoTracking()
+                    join u in db.Users.AsNoTracking() on m.SenderId equals u.Id
+                    where m.DialogId == dlg.Id && m.DeletedAt == null && m.Text != null && m.Text != string.Empty
+                    orderby m.SentAt descending, m.Id descending
+                    select new { Message = m, SenderName = u.DisplayName ?? u.UserName }
+                ).Take(1000).ToListAsync(ct);
+
+                var links = new List<ChatAttachmentBrowserItemDto>();
+                foreach (var row in messages)
+                {
+                    foreach (var link in ExtractLinks(row.Message.Text))
+                    {
+                        links.Add(new ChatAttachmentBrowserItemDto(
+                            Guid.NewGuid(),
+                            row.Message.Id,
+                            row.Message.SentAt,
+                            row.Message.SenderId,
+                            string.IsNullOrWhiteSpace(row.SenderName) ? "Пользователь" : row.SenderName,
+                            "links",
+                            link,
+                            link,
+                            "text/uri-list",
+                            0,
+                            false,
+                            false,
+                            false,
+                            "Clean",
+                            true,
+                            true,
+                            null,
+                            row.Message.Text));
+                        if (links.Count >= safeTake) return Ok(links);
+                    }
+                }
+
+                return Ok(links);
+            }
+
+            var rows = await (
+                from a in db.DirectMessageAttachments.AsNoTracking()
+                join m in db.DirectMessages.AsNoTracking() on a.MessageId equals m.Id
+                join f in db.ChatFiles.AsNoTracking() on a.FileId equals f.Id
+                join u in db.Users.AsNoTracking() on m.SenderId equals u.Id
+                where m.DialogId == dlg.Id && m.DeletedAt == null && f.DeletedAt == null && f.BlockedAt == null
+                orderby m.SentAt descending, m.Id descending, a.CreatedAt descending
+                select new { File = f, Message = m, SenderName = u.DisplayName ?? u.UserName }
+            ).Take(1000).ToListAsync(ct);
+
+            var result = rows
+                .Where(x => FileMatchesAttachmentType(x.File, normalizedType))
+                .Select(x => ToAttachmentBrowserDto(x.File, x.Message.Id, x.Message.SentAt, x.Message.SenderId, x.SenderName))
+                .Take(safeTake)
+                .ToList();
+
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "DirectAttachments failed: me={MeId}, friend={FriendId}", MeId, friendId);
+            return Ok(Array.Empty<ChatAttachmentBrowserItemDto>());
+        }
+    }
+
+    [HttpGet("attachments/groups/{groupId:guid}")]
+    public async Task<ActionResult<IEnumerable<ChatAttachmentBrowserItemDto>>> GroupAttachments(Guid groupId, string? type = "photo", int take = 250, CancellationToken ct = default)
+    {
+        try
+        {
+            var normalizedType = NormalizeAttachmentKind(type);
+            if (!await groupChats.IsMemberAsync(groupId, MeId, ct)) return NotFound(new { error = "Group chat not found." });
+            var safeTake = Math.Clamp(take, 1, 500);
+
+            if (normalizedType == "links")
+            {
+                var messages = await (
+                    from m in db.GroupMessages.AsNoTracking()
+                    join u in db.Users.AsNoTracking() on m.SenderId equals u.Id
+                    where m.GroupChatId == groupId && m.DeletedAt == null && m.Text != null && m.Text != string.Empty
+                    orderby m.SentAt descending, m.Id descending
+                    select new { Message = m, SenderName = u.DisplayName ?? u.UserName }
+                ).Take(1000).ToListAsync(ct);
+
+                var links = new List<ChatAttachmentBrowserItemDto>();
+                foreach (var row in messages)
+                {
+                    foreach (var link in ExtractLinks(row.Message.Text))
+                    {
+                        links.Add(new ChatAttachmentBrowserItemDto(
+                            Guid.NewGuid(),
+                            row.Message.Id,
+                            row.Message.SentAt,
+                            row.Message.SenderId,
+                            string.IsNullOrWhiteSpace(row.SenderName) ? "Пользователь" : row.SenderName,
+                            "links",
+                            link,
+                            link,
+                            "text/uri-list",
+                            0,
+                            false,
+                            false,
+                            false,
+                            "Clean",
+                            true,
+                            true,
+                            null,
+                            row.Message.Text));
+                        if (links.Count >= safeTake) return Ok(links);
+                    }
+                }
+
+                return Ok(links);
+            }
+
+            var rows = await (
+                from a in db.GroupMessageAttachments.AsNoTracking()
+                join m in db.GroupMessages.AsNoTracking() on a.MessageId equals m.Id
+                join f in db.ChatFiles.AsNoTracking() on a.FileId equals f.Id
+                join u in db.Users.AsNoTracking() on m.SenderId equals u.Id
+                where m.GroupChatId == groupId && m.DeletedAt == null && f.DeletedAt == null && f.BlockedAt == null
+                orderby m.SentAt descending, m.Id descending, a.CreatedAt descending
+                select new { File = f, Message = m, SenderName = u.DisplayName ?? u.UserName }
+            ).Take(1000).ToListAsync(ct);
+
+            var result = rows
+                .Where(x => FileMatchesAttachmentType(x.File, normalizedType))
+                .Select(x => ToAttachmentBrowserDto(x.File, x.Message.Id, x.Message.SentAt, x.Message.SenderId, x.SenderName))
+                .Take(safeTake)
+                .ToList();
+
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "GroupAttachments failed: me={MeId}, group={GroupId}", MeId, groupId);
+            return Ok(Array.Empty<ChatAttachmentBrowserItemDto>());
         }
     }
 
