@@ -18,7 +18,11 @@ namespace JaeZoo.Server.Models
         bool EmailConfirmed,
         DateTime? EmailVerifiedAt,
         string? ProfileBannerUrl = null,
-        string? ProfileTextTheme = null
+        string? ProfileTextTheme = null,
+        LastSeenVisibility LastSeenVisibility = LastSeenVisibility.Approximate,
+        bool ShowActivity = true,
+        string? CurrentActivityName = null,
+        DateTime? CurrentActivityUpdatedAt = null
     );
 
     // Публичный профиль (для других)
@@ -32,7 +36,10 @@ namespace JaeZoo.Server.Models
         DateTime? LastSeen,
         string? ProfileBannerUrl = null,
         string? ProfileTextTheme = null,
-        string? About = null
+        string? About = null,
+        LastSeenVisibility LastSeenVisibility = LastSeenVisibility.Approximate,
+        string? CurrentActivityName = null,
+        DateTime? CurrentActivityUpdatedAt = null
     );
 
     public record UserAvatarDto(
@@ -56,6 +63,10 @@ namespace JaeZoo.Server.Models
     public record UpdateStatusRequest(
         UserStatus Status,
         string? CustomStatus
+    );
+
+    public record UserActivityRequest(
+        string? ActivityName
     );
 
     public record SetAvatarUrlRequest(

@@ -1,6 +1,7 @@
-﻿using System.Security.Claims;
+using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
+using JaeZoo.Server.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -28,15 +29,26 @@ public class UsersPresenceController : ControllerBase
 
     public sealed class PresenceVisibilityDto
     {
-        public bool ShowOnline { get; set; }
+        public bool ShowOnline { get; set; } = true;
+        public LastSeenVisibility LastSeenVisibility { get; set; } = LastSeenVisibility.Approximate;
+        public bool ShowActivity { get; set; } = true;
     }
 
     // GET api/users/presence-visibility
     [HttpGet("presence-visibility")]
     public async Task<ActionResult<PresenceVisibilityDto>> GetVisibility()
     {
-        var val = await _db.Users.Where(u => u.Id == MeId).Select(u => u.ShowOnline).FirstOrDefaultAsync();
-        return Ok(new PresenceVisibilityDto { ShowOnline = val });
+        var dto = await _db.Users
+            .Where(u => u.Id == MeId)
+            .Select(u => new PresenceVisibilityDto
+            {
+                ShowOnline = u.ShowOnline,
+                LastSeenVisibility = u.LastSeenVisibility,
+                ShowActivity = u.ShowActivity
+            })
+            .FirstOrDefaultAsync();
+
+        return Ok(dto ?? new PresenceVisibilityDto());
     }
 
     // PUT api/users/presence-visibility
@@ -48,6 +60,14 @@ public class UsersPresenceController : ControllerBase
 
         var old = user.ShowOnline;
         user.ShowOnline = dto.ShowOnline;
+        user.LastSeenVisibility = dto.LastSeenVisibility;
+        user.ShowActivity = dto.ShowActivity;
+        if (!user.ShowActivity)
+        {
+            user.CurrentActivityName = null;
+            user.CurrentActivityUpdatedAt = DateTime.UtcNow;
+        }
+        user.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync();
 
         // Если юзер сейчас подключён — уведомим остальных о смене видимости.
@@ -69,6 +89,60 @@ public class UsersPresenceController : ControllerBase
             }
         }
 
+        if (!user.ShowActivity)
+        {
+            var friendIds = await _db.Friendships.AsNoTracking()
+                .Where(f => f.Status == FriendshipStatus.Accepted && (f.RequesterId == MeId || f.AddresseeId == MeId))
+                .Select(f => f.RequesterId == MeId ? f.AddresseeId : f.RequesterId)
+                .Distinct()
+                .ToListAsync();
+
+            foreach (var friendId in friendIds)
+            {
+                await _hub.Clients.User(friendId.ToString()).SendAsync("UserActivityChanged", new
+                {
+                    userId = MeId.ToString("D"),
+                    activityName = (string?)null,
+                    updatedAt = user.CurrentActivityUpdatedAt
+                });
+            }
+        }
+
         return NoContent();
     }
+
+    // POST api/users/activity
+    [HttpPost("activity")]
+    public async Task<IActionResult> SetActivity([FromBody] UserActivityRequest dto)
+    {
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == MeId);
+        if (user == null) return Unauthorized();
+
+        var activity = (dto?.ActivityName ?? string.Empty).Trim();
+        if (activity.Length > 96)
+            activity = activity[..96].Trim();
+
+        user.CurrentActivityName = user.ShowActivity && !string.IsNullOrWhiteSpace(activity) ? activity : null;
+        user.CurrentActivityUpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+
+        var friendIds = await _db.Friendships.AsNoTracking()
+            .Where(f => f.Status == FriendshipStatus.Accepted && (f.RequesterId == MeId || f.AddresseeId == MeId))
+            .Select(f => f.RequesterId == MeId ? f.AddresseeId : f.RequesterId)
+            .Distinct()
+            .ToListAsync();
+
+        foreach (var friendId in friendIds)
+        {
+            await _hub.Clients.User(friendId.ToString()).SendAsync("UserActivityChanged", new
+            {
+                userId = MeId.ToString("D"),
+                activityName = user.CurrentActivityName,
+                updatedAt = user.CurrentActivityUpdatedAt
+            });
+        }
+
+        return NoContent();
+    }
+
 }

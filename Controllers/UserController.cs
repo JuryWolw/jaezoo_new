@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -592,6 +592,21 @@ namespace JaeZoo.Server.Controllers
             return File(avatar.Data, avatar.ContentType ?? "image/png");
         }
 
+
+        private static bool IsActivityFresh(User u)
+        {
+            if (!u.ShowActivity || string.IsNullOrWhiteSpace(u.CurrentActivityName) || u.CurrentActivityUpdatedAt == null)
+                return false;
+            return DateTime.UtcNow - u.CurrentActivityUpdatedAt.Value.ToUniversalTime() <= TimeSpan.FromMinutes(3);
+        }
+
+        private static DateTime? VisibleLastSeen(User u)
+        {
+            if (!u.ShowOnline || u.LastSeenVisibility == LastSeenVisibility.Hidden)
+                return null;
+            return u.LastSeen;
+        }
+
         private UserProfileDto ToProfileDto(User u) =>
             new UserProfileDto(
                 u.Id,
@@ -605,7 +620,12 @@ namespace JaeZoo.Server.Controllers
                 u.PublicId,
                 u.EmailConfirmed,
                 u.EmailVerifiedAt,
-                BannerProxyUrl(u)
+                BannerProxyUrl(u),
+                string.IsNullOrWhiteSpace(u.ProfileTextTheme) ? "Light" : u.ProfileTextTheme,
+                u.LastSeenVisibility,
+                u.ShowActivity,
+                IsActivityFresh(u) ? u.CurrentActivityName : null,
+                IsActivityFresh(u) ? u.CurrentActivityUpdatedAt : null
             );
 
         private PublicUserDto ToPublicDto(User u) =>
@@ -614,10 +634,13 @@ namespace JaeZoo.Server.Controllers
                 u.PublicId,
                 UserIdentityService.GetPublicName(u),
                 UserIdentityService.GetAvatarUrl(u),
-                u.Status, u.CustomStatus, u.ShowOnline ? u.LastSeen : null,
+                u.Status, u.CustomStatus, VisibleLastSeen(u),
                 BannerProxyUrl(u),
-                null,
-                u.About
+                string.IsNullOrWhiteSpace(u.ProfileTextTheme) ? "Light" : u.ProfileTextTheme,
+                u.About,
+                u.LastSeenVisibility,
+                IsActivityFresh(u) ? u.CurrentActivityName : null,
+                IsActivityFresh(u) ? u.CurrentActivityUpdatedAt : null
             );
     }
 }

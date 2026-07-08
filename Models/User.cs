@@ -12,6 +12,13 @@ namespace JaeZoo.Server.Models
         Invisible = 4
     }
 
+    public enum LastSeenVisibility
+    {
+        Exact = 0,
+        Approximate = 1,
+        Hidden = 2
+    }
+
     public class User
     {
         public Guid Id { get; set; }
@@ -85,9 +92,15 @@ namespace JaeZoo.Server.Models
 
         public UserStatus Status { get; set; } = UserStatus.Offline;
         public bool ShowOnline { get; set; } = true; // можно ли показывать, что юзер онлайн
+        public LastSeenVisibility LastSeenVisibility { get; set; } = LastSeenVisibility.Approximate;
+        public bool ShowActivity { get; set; } = true;
 
         [MaxLength(64)]
         public string? CustomStatus { get; set; } // произвольная подпись («Работаю», «AFK»)
+
+        [MaxLength(96)]
+        public string? CurrentActivityName { get; set; }
+        public DateTime? CurrentActivityUpdatedAt { get; set; }
 
         public DateTime? LastSeen { get; set; } // обновляем на каждом авторизованном запросе
     }

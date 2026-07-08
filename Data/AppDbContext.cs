@@ -51,6 +51,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<User>().Property(u => u.SecurityStamp).HasMaxLength(64);
         b.Entity<User>().Property(u => u.ProfileBannerUrl).HasMaxLength(512);
         b.Entity<User>().Property(u => u.ProfileTextTheme).HasMaxLength(16);
+        b.Entity<User>().Property(u => u.CurrentActivityName).HasMaxLength(96);
+        b.Entity<User>().Property(u => u.LastSeenVisibility).HasConversion<int>();
         b.Entity<User>().Property(u => u.DisabledReason).HasMaxLength(256);
 
         // Старые индексы оставляем, чтобы не ломать существующую схему и код.

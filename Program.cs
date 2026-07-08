@@ -361,6 +361,7 @@ using (var scope = app.Services.CreateScope())
     await EnsureE2eeKeySchemaAsync(db, logger);
     await EnsureGroupE2eeSecuritySchemaAsync(db, logger);
     await EnsurePublicGroupsSchemaAsync(db, logger);
+    await EnsureUserActivitySchemaAsync(db, logger);
 
     await IdentityDataProtector.BackfillUsersAsync(db, logger);
 
@@ -482,6 +483,49 @@ app.Run();
 
 
 
+
+
+static async Task EnsureUserActivitySchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                ALTER TABLE "Users"
+                    ADD COLUMN IF NOT EXISTS "LastSeenVisibility" integer NOT NULL DEFAULT 1,
+                    ADD COLUMN IF NOT EXISTS "ShowActivity" boolean NOT NULL DEFAULT true,
+                    ADD COLUMN IF NOT EXISTS "CurrentActivityName" character varying(96) NULL,
+                    ADD COLUMN IF NOT EXISTS "CurrentActivityUpdatedAt" timestamp with time zone NULL;
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            var columns = new Dictionary<string, string>
+            {
+                ["LastSeenVisibility"] = "INTEGER NOT NULL DEFAULT 1",
+                ["ShowActivity"] = "INTEGER NOT NULL DEFAULT 1",
+                ["CurrentActivityName"] = "TEXT NULL",
+                ["CurrentActivityUpdatedAt"] = "TEXT NULL"
+            };
+
+            foreach (var (name, definition) in columns)
+            {
+                var existingSql = "SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('Users') WHERE name = '" + name + "'";
+                var existing = await db.Database.SqlQueryRaw<int>(existingSql).SingleAsync();
+                if (existing == 0)
+                    await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"Users\" ADD COLUMN \"" + name + "\" " + definition + ";");
+            }
+        }
+
+        logger.LogInformation("User activity schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure user activity schema.");
+        throw;
+    }
+}
 
 static async Task EnsureIdentityPrivacySchemaAsync(AppDbContext db, ILogger logger)
 {
