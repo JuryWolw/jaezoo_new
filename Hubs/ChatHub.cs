@@ -55,6 +55,16 @@ public class ChatHub : Hub
         return text;
     }
 
+    private static bool IsKnownDirectSystemKey(string? systemKey) => systemKey is
+        "call.connected" or
+        "call.declined" or
+        "call.busy" or
+        "call.cancelled" or
+        "call.missed" or
+        "call.failed" or
+        "call.ended" or
+        "call.timedout";
+
     private static bool IsKnownGroupSystemKey(string? systemKey) => systemKey is
         GroupChatService.SystemUserAddedKey or
         GroupChatService.SystemHistoryAvailableKey or
@@ -72,6 +82,30 @@ public class ChatHub : Hub
         if (member is null) return false;
 
         return group.OwnerId == userId || member.Role == GroupChatRole.Admin;
+    }
+
+
+    private async Task EnsureUserEmailConfirmedAsync(Guid userId, string message, CancellationToken ct)
+    {
+        var confirmed = await _db.Users.AsNoTracking()
+            .Where(u => u.Id == userId)
+            .Select(u => u.EmailConfirmed)
+            .FirstOrDefaultAsync(ct);
+        if (!confirmed)
+            throw new HubException(message);
+    }
+
+    private async Task EnsureDirectChatWritableAsync(Guid me, Guid targetUserId, CancellationToken ct)
+    {
+        if (!await _chat.AreFriends(me, targetUserId, ct))
+            throw new HubException("Вы не друзья.");
+        await EnsureUserEmailConfirmedAsync(me, "Подтверди почту, чтобы отправлять сообщения.", ct);
+        await EnsureUserEmailConfirmedAsync(targetUserId, "Собеседник ещё не подтвердил почту.", ct);
+    }
+
+    private async Task EnsureGroupChatWritableAsync(Guid me, CancellationToken ct)
+    {
+        await EnsureUserEmailConfirmedAsync(me, "Подтверди почту, чтобы отправлять сообщения.", ct);
     }
 
     public override async Task OnConnectedAsync()
@@ -134,8 +168,7 @@ public class ChatHub : Hub
             var me = MeId;
             request ??= new SendMessageRequest(null, null);
 
-            if (!await _chat.AreFriends(me, targetUserId, Context.ConnectionAborted))
-                throw new HubException("Вы не друзья.");
+            await EnsureDirectChatWritableAsync(me, targetUserId, Context.ConnectionAborted);
 
             var created = await _chat.CreateMessageAsync(
                 me,
@@ -274,8 +307,7 @@ public class ChatHub : Hub
             var me = MeId;
             if (request?.MessageIds is null || request.MessageIds.Count == 0)
                 throw new HubException("MessageIds are required.");
-            if (!await _chat.AreFriends(me, targetUserId, Context.ConnectionAborted))
-                throw new HubException("Вы не друзья.");
+            await EnsureDirectChatWritableAsync(me, targetUserId, Context.ConnectionAborted);
 
             var ids = request.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
             var sources = await (
@@ -309,8 +341,9 @@ public class ChatHub : Hub
             var me = MeId;
             if (string.IsNullOrWhiteSpace(systemKey))
                 throw new HubException("SystemKey is required.");
-            if (!await _chat.AreFriends(me, targetUserId, Context.ConnectionAborted))
-                throw new HubException("Вы не друзья.");
+            if (!IsKnownDirectSystemKey(systemKey))
+                throw new HubException("Unknown system message key.");
+            await EnsureDirectChatWritableAsync(me, targetUserId, Context.ConnectionAborted);
 
             var created = await _chat.CreateMessageAsync(me, targetUserId, text, null, DirectMessageKind.System, systemKey, null, Context.ConnectionAborted);
             var dto = await _chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, Context.ConnectionAborted);
@@ -367,6 +400,7 @@ public class ChatHub : Hub
         {
             var me = MeId;
             request ??= new SendMessageRequest(null, null);
+            await EnsureGroupChatWritableAsync(me, Context.ConnectionAborted);
 
             var created = await _groupChats.CreateMessageAsync(me, groupId, request.Text, request.FileIds, DirectMessageKind.User, null, null, Context.ConnectionAborted);
             var dto = await _groupChats.GetMessageDtoAsync(groupId, created.message.Id, Context.ConnectionAborted);
@@ -406,6 +440,7 @@ public class ChatHub : Hub
                 throw new HubException("Unknown system message key.");
 
             var me = MeId;
+            await EnsureGroupChatWritableAsync(me, Context.ConnectionAborted);
             if (!await CanCreateGroupSystemMessageAsync(groupId, me, Context.ConnectionAborted))
                 throw new HubException("Only the owner or admin can create system messages.");
 
@@ -443,6 +478,7 @@ public class ChatHub : Hub
             var me = MeId;
             if (request?.MessageIds is null || request.MessageIds.Count == 0)
                 throw new HubException("MessageIds are required.");
+            await EnsureGroupChatWritableAsync(me, Context.ConnectionAborted);
             if (!await _groupChats.IsMemberAsync(groupId, me, Context.ConnectionAborted))
                 throw new HubException("Групповой чат не найден.");
 
@@ -474,8 +510,7 @@ public class ChatHub : Hub
             var me = MeId;
             if (request?.MessageIds is null || request.MessageIds.Count == 0)
                 throw new HubException("MessageIds are required.");
-            if (!await _chat.AreFriends(me, targetUserId, Context.ConnectionAborted))
-                throw new HubException("Вы не друзья.");
+            await EnsureDirectChatWritableAsync(me, targetUserId, Context.ConnectionAborted);
 
             var ids = request.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
             var source = (request.Source ?? string.Empty).Trim().ToLowerInvariant();
@@ -516,6 +551,7 @@ public class ChatHub : Hub
             var me = MeId;
             if (request?.MessageIds is null || request.MessageIds.Count == 0)
                 throw new HubException("MessageIds are required.");
+            await EnsureGroupChatWritableAsync(me, Context.ConnectionAborted);
             if (!await _groupChats.IsMemberAsync(groupId, me, Context.ConnectionAborted))
                 throw new HubException("Групповой чат не найден.");
 

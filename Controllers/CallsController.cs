@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
@@ -69,7 +69,6 @@ public sealed class CallsController : ControllerBase
     }
 
     [HttpGet("diagnostics")]
-    [AllowAnonymous]
     public ActionResult<TurnDiagnosticsResponse> GetDiagnostics()
         => Ok(_turn.GetDiagnostics());
 

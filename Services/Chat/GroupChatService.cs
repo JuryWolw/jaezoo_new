@@ -28,10 +28,12 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
     private static bool IsGroupE2eePayload(string? text) =>
         !string.IsNullOrWhiteSpace(text) && text.StartsWith(E2eeEnvelopeInspector.GroupPrefixV1, StringComparison.Ordinal);
 
-    private static void ValidateGroupE2eePayload(Guid groupId, int currentEpoch, string? text)
+    public static void ValidateGroupE2eePayload(Guid groupId, int currentEpoch, string? text)
     {
-        if (!IsGroupE2eePayload(text))
+        if (string.IsNullOrWhiteSpace(text))
             return;
+        if (!IsGroupE2eePayload(text))
+            throw new InvalidOperationException("Group user messages must be encrypted with E2EE.");
 
         try
         {
@@ -808,7 +810,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             ?? throw new InvalidOperationException("Group chat not found or access denied.");
 
         text = (text ?? string.Empty).Trim();
-        if (kind == DirectMessageKind.User)
+        if (kind == DirectMessageKind.User && !forwardedFromMessageId.HasValue)
             ValidateGroupE2eePayload(groupId, Math.Max(1, chat.SecurityEpoch), text);
 
         var ids = (fileIds ?? Array.Empty<Guid>())

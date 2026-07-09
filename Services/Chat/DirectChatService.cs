@@ -3,6 +3,8 @@ using JaeZoo.Server.Models;
 using JaeZoo.Server.Services.Storage;
 using JaeZoo.Server.Services.Security;
 using Microsoft.EntityFrameworkCore;
+using System.Text;
+using System.Text.Json;
 
 namespace JaeZoo.Server.Services.Chat;
 
@@ -82,6 +84,45 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
 
     public static bool IsVideo(string? ct) =>
         !string.IsNullOrWhiteSpace(ct) && ct.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsDirectE2eePayload(string? text) =>
+        !string.IsNullOrWhiteSpace(text) &&
+        (text.StartsWith(E2eeEnvelopeInspector.DirectPrefixV1, StringComparison.Ordinal) ||
+         text.StartsWith(E2eeEnvelopeInspector.DirectPrefixV2, StringComparison.Ordinal) ||
+         text.StartsWith(E2eeEnvelopeInspector.DirectPrefixV3, StringComparison.Ordinal));
+
+    public static void ValidateDirectE2eePayload(Guid senderId, Guid peerId, string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+        if (!IsDirectE2eePayload(text))
+            throw new InvalidOperationException("Direct user messages must be encrypted with E2EE.");
+
+        var prefix = text.StartsWith(E2eeEnvelopeInspector.DirectPrefixV3, StringComparison.Ordinal)
+            ? E2eeEnvelopeInspector.DirectPrefixV3
+            : text.StartsWith(E2eeEnvelopeInspector.DirectPrefixV2, StringComparison.Ordinal)
+                ? E2eeEnvelopeInspector.DirectPrefixV2
+                : E2eeEnvelopeInspector.DirectPrefixV1;
+
+        try
+        {
+            var json = Encoding.UTF8.GetString(Convert.FromBase64String(text[prefix.Length..]));
+            var envelope = JsonSerializer.Deserialize<DirectE2eeServerEnvelope>(json);
+            if (envelope is null)
+                throw new InvalidOperationException("Invalid direct E2EE envelope.");
+            if (envelope.senderId != senderId || envelope.recipientId != peerId)
+                throw new InvalidOperationException("Direct E2EE envelope belongs to another dialog.");
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("Invalid direct E2EE envelope.", ex);
+        }
+    }
+
+    private sealed record DirectE2eeServerEnvelope(int v, Guid senderId, Guid recipientId);
 
     public AttachmentDto ToAttachmentDto(ChatFile f)
     {
@@ -332,6 +373,9 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
             .Distinct()
             .Take(10)
             .ToList();
+
+        if (kind == DirectMessageKind.User && !forwardedFromMessageId.HasValue)
+            ValidateDirectE2eePayload(senderId, peerId, text);
 
         var hasSystemMarker = kind == DirectMessageKind.System && !string.IsNullOrWhiteSpace(systemKey);
         if (string.IsNullOrWhiteSpace(text) && ids.Count == 0 && !hasSystemMarker)

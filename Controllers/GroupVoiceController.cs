@@ -42,12 +42,10 @@ public sealed class GroupVoiceController(
         }
     }
 
-    [AllowAnonymous]
     [HttpGet("/api/groupvoice/ping")]
     public ActionResult<object> Ping()
         => Ok(BuildDiagnosticsPayload(includeRoutes: true));
 
-    [AllowAnonymous]
     [HttpGet("/api/groupvoice/diagnostics")]
     public ActionResult<object> Diagnostics()
         => Ok(BuildDiagnosticsPayload(includeRoutes: true));

@@ -95,8 +95,11 @@ public class FilesController(
         return await (
             from a in db.GroupMessageAttachments.AsNoTracking()
             join m in db.GroupMessages.AsNoTracking() on a.MessageId equals m.Id
+            join g in db.GroupChats.AsNoTracking() on m.GroupChatId equals g.Id
             join gm in db.GroupChatMembers.AsNoTracking() on m.GroupChatId equals gm.GroupChatId
-            where a.FileId == fileId && gm.UserId == me
+            where a.FileId == fileId
+                  && gm.UserId == me
+                  && (g.HistoryPolicy == 1 || m.SentAt >= gm.JoinedAt)
             select a.Id
         ).AnyAsync(ct);
     }

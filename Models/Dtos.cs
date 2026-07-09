@@ -1,4 +1,4 @@
-namespace JaeZoo.Server.Models;
+﻿namespace JaeZoo.Server.Models;
 
 public sealed class RegisterRequest
 {
@@ -271,7 +271,7 @@ public record E2eeDeviceApprovalRequestDto(
     string Status
 );
 
-public record E2eeDeviceApprovalDecisionRequest(string ApproverDeviceId, string? Reason = null);
+public record E2eeDeviceApprovalDecisionRequest(string ApproverDeviceId, string? Reason = null, string? SignatureBase64 = null);
 
 
 

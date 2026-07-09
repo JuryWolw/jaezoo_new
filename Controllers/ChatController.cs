@@ -29,6 +29,9 @@ public class ChatController(
     IHubContext<ChatHub> hub,
     IWebHostEnvironment env) : ControllerBase
 {
+    private const int E2eeTrustUnknown = 0;
+    private const int E2eeTrustRevoked = 3;
+
     private Guid MeId
     {
         get
@@ -59,6 +62,23 @@ public class ChatController(
             .Where(u => u.Id == userId)
             .Select(u => u.EmailConfirmed)
             .FirstOrDefaultAsync(ct);
+
+    private async Task<bool> IsTrustedE2eeDeviceAsync(Guid userId, string? deviceId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId)) return false;
+        var normalized = deviceId.Trim();
+        return await db.UserE2eeKeys.AsNoTracking().AnyAsync(x =>
+            x.UserId == userId &&
+            x.DeviceId == normalized &&
+            !x.IsRevoked &&
+            !x.RequiresUserVerification &&
+            x.TrustState != E2eeTrustUnknown &&
+            x.TrustState != E2eeTrustRevoked &&
+            (x.IsTrusted || x.TrustState != E2eeTrustUnknown) &&
+            !string.IsNullOrWhiteSpace(x.PublicKeyBase64) &&
+            !string.IsNullOrWhiteSpace(x.SigningPublicKeyBase64), ct);
+    }
+
 
     private async Task<ActionResult?> RequireUsersVerifiedAsync(IEnumerable<Guid> userIds, string message, CancellationToken ct)
     {
@@ -97,6 +117,16 @@ public class ChatController(
 
         return text;
     }
+
+    private static bool IsKnownDirectSystemKey(string? systemKey) => systemKey is
+        "call.connected" or
+        "call.declined" or
+        "call.busy" or
+        "call.cancelled" or
+        "call.missed" or
+        "call.failed" or
+        "call.ended" or
+        "call.timedout";
 
     private static bool IsKnownGroupSystemKey(string? systemKey) => systemKey is
         GroupChatService.SystemUserAddedKey or
@@ -411,12 +441,15 @@ public class ChatController(
     }
 
     [HttpPost("system/{friendId:guid}")]
+    [RequireVerifiedEmail]
     public async Task<ActionResult<MessageDto>> SendSystemMessage(Guid friendId, [FromBody] SendSystemMessageRequest body, CancellationToken ct)
     {
         try
         {
             if (body is null || string.IsNullOrWhiteSpace(body.SystemKey))
                 return BadRequest(new { error = "SystemKey is required." });
+            if (!IsKnownDirectSystemKey(body.SystemKey))
+                return BadRequest(new { error = "Unknown system message key." });
 
             if (!await chat.AreFriends(MeId, friendId, ct)) return Forbid();
             var peerVerified = await IsEmailConfirmedAsync(friendId, ct);
@@ -455,6 +488,10 @@ public class ChatController(
             if (string.IsNullOrWhiteSpace(newText) && !hasAttachments)
                 return BadRequest(new { error = "Text is required when message has no attachments." });
 
+            var dialog = await db.DirectDialogs.AsNoTracking().FirstAsync(d => d.Id == msg.DialogId, ct);
+            var peerId = dialog.User1Id == MeId ? dialog.User2Id : dialog.User1Id;
+            DirectChatService.ValidateDirectE2eePayload(MeId, peerId, newText);
+
             if (string.Equals(msg.Text, newText, StringComparison.Ordinal))
             {
                 var same = await chat.GetMessageDtoAsync(msg.DialogId, msg.Id, ct);
@@ -468,8 +505,6 @@ public class ChatController(
             msg.EditedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(ct);
 
-            var dialog = await db.DirectDialogs.AsNoTracking().FirstAsync(d => d.Id == msg.DialogId, ct);
-            var peerId = dialog.User1Id == MeId ? dialog.User2Id : dialog.User1Id;
             var dto = await chat.GetMessageDtoAsync(msg.DialogId, msg.Id, ct);
             if (dto is null) return NotFound();
 
@@ -910,6 +945,11 @@ public class ChatController(
                     skipped++;
                     continue;
                 }
+                if (!await IsTrustedE2eeDeviceAsync(MeId, providerDeviceId, ct) || !await IsTrustedE2eeDeviceAsync(package.TargetUserId, targetDeviceId, ct))
+                {
+                    skipped++;
+                    continue;
+                }
 
                 var epoch = Math.Clamp(package.SecurityEpoch, 1, Math.Max(1, chatEntity.SecurityEpoch));
                 var exists = await db.GroupHistoryKeyPackages.AnyAsync(x =>
@@ -980,6 +1020,7 @@ public class ChatController(
             var isMember = await db.GroupChatMembers.AsNoTracking()
                 .AnyAsync(m => m.GroupChatId == groupId && m.UserId == MeId, ct);
             if (!isMember) return Forbid();
+            if (!await IsTrustedE2eeDeviceAsync(MeId, normalizedDeviceId, ct)) return Forbid();
 
             var rows = await db.GroupHistoryKeyPackages
                 .Where(x => x.GroupChatId == groupId && x.TargetUserId == MeId && x.TargetDeviceId == normalizedDeviceId)
@@ -1442,6 +1483,12 @@ public class ChatController(
             var hasAttachments = await db.GroupMessageAttachments.AsNoTracking().AnyAsync(a => a.MessageId == msg.Id, ct);
             if (string.IsNullOrWhiteSpace(newText) && !hasAttachments)
                 return BadRequest(new { error = "Text is required when message has no attachments." });
+
+            var groupEpoch = await db.GroupChats.AsNoTracking()
+                .Where(g => g.Id == msg.GroupChatId)
+                .Select(g => g.SecurityEpoch)
+                .FirstOrDefaultAsync(ct);
+            GroupChatService.ValidateGroupE2eePayload(msg.GroupChatId, Math.Max(1, groupEpoch), newText);
 
             if (string.Equals(msg.Text, newText, StringComparison.Ordinal))
             {

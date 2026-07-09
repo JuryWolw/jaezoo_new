@@ -1,5 +1,6 @@
 ﻿using System.Security.Claims;
 using System.Security.Cryptography;
+using System.Text;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Security;
@@ -187,6 +188,8 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         var approver = await db.UserE2eeKeys.AsNoTracking().FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == approverDeviceId, ct);
         if (!IsDeviceAllowedToApprove(approver))
             return StatusCode(StatusCodes.Status403Forbidden, new { message = "Approver device is not trusted." });
+        if (!VerifyDeviceApprovalDecisionSignature(approver!, requestId, "approve", body?.SignatureBase64))
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Approver device signature is invalid." });
 
         var target = await db.UserE2eeKeys.FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == request.DeviceId && x.Fingerprint == request.Fingerprint, ct);
         if (target is null) return NotFound(new { message = "Target E2EE device was not found." });
@@ -227,6 +230,8 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         var approver = await db.UserE2eeKeys.AsNoTracking().FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == approverDeviceId, ct);
         if (!IsDeviceAllowedToApprove(approver))
             return StatusCode(StatusCodes.Status403Forbidden, new { message = "Approver device is not trusted." });
+        if (!VerifyDeviceApprovalDecisionSignature(approver!, requestId, "reject", body?.SignatureBase64))
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Approver device signature is invalid." });
 
         var target = await db.UserE2eeKeys.FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == request.DeviceId && x.Fingerprint == request.Fingerprint, ct);
         var now = DateTime.UtcNow;
@@ -307,6 +312,8 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         var device = await db.UserE2eeKeys.FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == deviceId && !x.IsRevoked, ct);
         if (device is null) return NotFound(new { message = "E2EE device is not registered." });
         if (string.IsNullOrWhiteSpace(device.SigningPublicKeyBase64)) return BadRequest(new { message = "E2EE signing key is not registered for this device." });
+        if (device.RequiresUserVerification || device.TrustState == TrustUnknown || device.TrustState == TrustRevoked || !device.IsTrusted)
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "E2EE device must be approved before uploading prekeys." });
 
         var signedKeyId = CleanText(request.SignedPreKey.KeyId, 64);
         if (string.IsNullOrWhiteSpace(signedKeyId)) return BadRequest(new { message = "Signed prekey id is required." });
@@ -386,7 +393,14 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
     {
         if (MeId == Guid.Empty) return Unauthorized();
         var devices = await db.UserE2eeKeys.AsNoTracking()
-            .Where(x => x.UserId == userId && !x.IsRevoked && !string.IsNullOrEmpty(x.PublicKeyBase64))
+            .Where(x => x.UserId == userId
+                        && !x.IsRevoked
+                        && !x.RequiresUserVerification
+                        && x.TrustState != TrustUnknown
+                        && x.TrustState != TrustRevoked
+                        && (x.IsTrusted || x.TrustState == TrustTofu || x.TrustState == TrustUserVerified)
+                        && !string.IsNullOrEmpty(x.PublicKeyBase64)
+                        && !string.IsNullOrEmpty(x.SigningPublicKeyBase64))
             .OrderByDescending(x => x.LastSeenAt ?? x.UpdatedAt)
             .ToListAsync(ct);
         if (devices.Count == 0) return Ok(Array.Empty<E2eePreKeyBundleDto>());
@@ -669,13 +683,38 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         await hub.Clients.User(device.UserId.ToString()).SendAsync("E2eeDeviceApprovalRequested", ToApprovalDto(request), ct);
     }
 
+
+    private static byte[] BuildDeviceApprovalSignaturePayload(Guid requestId, string action, string approverDeviceId) =>
+        Encoding.UTF8.GetBytes($"JaeZoo:E2EE:DeviceApproval:v1|{action}|{requestId:D}|{approverDeviceId}");
+
+    private static bool VerifyDeviceApprovalDecisionSignature(UserE2eeKey approver, Guid requestId, string action, string? signatureBase64)
+    {
+        if (string.IsNullOrWhiteSpace(signatureBase64) || string.IsNullOrWhiteSpace(approver.SigningPublicKeyBase64))
+            return false;
+
+        try
+        {
+            var publicRaw = Convert.FromBase64String(approver.SigningPublicKeyBase64.Trim());
+            var signatureRaw = Convert.FromBase64String(signatureBase64.Trim());
+            using var ecdsa = ECDsa.Create();
+            ecdsa.ImportSubjectPublicKeyInfo(publicRaw, out _);
+            var payload = BuildDeviceApprovalSignaturePayload(requestId, action, approver.DeviceId);
+            return ecdsa.VerifyData(payload, signatureRaw, HashAlgorithmName.SHA256);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool IsDeviceAllowedToApprove(UserE2eeKey? device) =>
         device is not null &&
         !device.IsRevoked &&
         !device.RequiresUserVerification &&
         device.TrustState != TrustUnknown &&
         device.TrustState != TrustRevoked &&
-        (device.IsTrusted || device.TrustState == TrustTofu || device.TrustState == TrustUserVerified);
+        (device.IsTrusted || device.TrustState == TrustTofu || device.TrustState == TrustUserVerified) &&
+        !string.IsNullOrWhiteSpace(device.SigningPublicKeyBase64);
 
 
     private async Task TryNotifySecurityKeyChangedAsync(Guid userId, string deviceId, string? deviceName, CancellationToken ct)
