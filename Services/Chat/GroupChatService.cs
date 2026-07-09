@@ -684,7 +684,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         var groupSources = await db.GroupMessages
             .AsNoTracking()
             .Where(m => sourceIds.Contains(m.Id))
-            .Select(m => new { m.Id, m.SenderId, m.Text, m.SentAt, m.Kind, m.SystemKey, m.DeletedAt })
+            .Select(m => new { m.Id, m.SenderId, m.Text, m.SentAt, m.Kind, m.SystemKey, m.DeletedAt, m.E2eeEnvelopeVersion, m.E2eeProtocol })
             .ToListAsync(ct);
 
         var groupAttachmentMessageIds = await db.GroupMessageAttachments
@@ -705,7 +705,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
                 groupHasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
                 x.Kind,
                 x.DeletedAt.HasValue ? null : x.SystemKey,
-                x.DeletedAt);
+                x.DeletedAt,
+                x.DeletedAt.HasValue ? 0 : x.E2eeEnvelopeVersion,
+                x.DeletedAt.HasValue ? null : x.E2eeProtocol);
         }
 
         var unresolvedIds = sourceIds.Where(id => !result.ContainsKey(id)).ToList();
@@ -714,7 +716,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             var directSources = await db.DirectMessages
                 .AsNoTracking()
                 .Where(m => unresolvedIds.Contains(m.Id))
-                .Select(m => new { m.Id, m.SenderId, m.Text, m.SentAt, m.Kind, m.SystemKey, m.DeletedAt })
+                .Select(m => new { m.Id, m.SenderId, m.Text, m.SentAt, m.Kind, m.SystemKey, m.DeletedAt, m.E2eeEnvelopeVersion, m.E2eeProtocol })
                 .ToListAsync(ct);
 
             var directAttachmentMessageIds = await db.DirectMessageAttachments
@@ -735,7 +737,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
                     directHasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
                     x.Kind,
                     x.DeletedAt.HasValue ? null : x.SystemKey,
-                    x.DeletedAt);
+                    x.DeletedAt,
+                    x.DeletedAt.HasValue ? 0 : x.E2eeEnvelopeVersion,
+                    x.DeletedAt.HasValue ? null : x.E2eeProtocol);
             }
         }
 
@@ -760,7 +764,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             message.DeletedAt,
             message.DeletedById,
             forwardedFrom,
-            Math.Max(1, message.GroupSecurityEpoch));
+            Math.Max(1, message.GroupSecurityEpoch),
+            message.DeletedAt.HasValue ? 0 : message.E2eeEnvelopeVersion,
+            message.DeletedAt.HasValue ? null : message.E2eeProtocol);
     }
 
     public async Task<List<MessageDto>> BuildMessageDtosAsync(IReadOnlyList<GroupMessage> messages, CancellationToken ct = default)
@@ -833,14 +839,15 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var now = DateTime.UtcNow;
+        var e2eeInfo = E2eeEnvelopeInspector.InspectGroup(text);
         var message = new GroupMessage
         {
             GroupChatId = groupId,
             SenderId = senderId,
             Text = text,
             SentAt = now,
-            E2eeEnvelopeVersion = E2eeEnvelopeInspector.InspectGroup(text).Version,
-            E2eeProtocol = E2eeEnvelopeInspector.InspectGroup(text).Protocol,
+            E2eeEnvelopeVersion = e2eeInfo.Version,
+            E2eeProtocol = e2eeInfo.Protocol,
             GroupSecurityEpoch = Math.Max(1, chat.SecurityEpoch),
             Kind = kind,
             SystemKey = string.IsNullOrWhiteSpace(systemKey) ? null : systemKey.Trim(),
@@ -929,6 +936,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             SenderId = senderId,
             Text = (source.Text ?? string.Empty).Trim(),
             SentAt = now,
+            E2eeEnvelopeVersion = source.E2eeEnvelopeVersion,
+            E2eeProtocol = source.E2eeProtocol,
             GroupSecurityEpoch = Math.Max(1, chat.SecurityEpoch),
             Kind = source.Kind,
             SystemKey = string.IsNullOrWhiteSpace(source.SystemKey) ? null : source.SystemKey.Trim(),
@@ -1014,6 +1023,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             SenderId = senderId,
             Text = (source.Text ?? string.Empty).Trim(),
             SentAt = now,
+            E2eeEnvelopeVersion = source.E2eeEnvelopeVersion,
+            E2eeProtocol = source.E2eeProtocol,
             GroupSecurityEpoch = Math.Max(1, chat.SecurityEpoch),
             Kind = source.Kind,
             SystemKey = string.IsNullOrWhiteSpace(source.SystemKey) ? null : source.SystemKey.Trim(),

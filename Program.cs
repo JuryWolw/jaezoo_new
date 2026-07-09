@@ -411,6 +411,8 @@ using (var scope = app.Services.CreateScope())
         await MessageEncryptionBackfill.EncryptExistingMessagesAsync(db, logger);
     }
 
+    await MessageEncryptionBackfill.BackfillE2eeEnvelopeMetadataAsync(db, logger);
+
     await RoleBootstrapService.EnsureOwnerAsync(db, app.Configuration, logger);
 
     if (db.Database.IsNpgsql())

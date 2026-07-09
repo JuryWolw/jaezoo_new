@@ -162,7 +162,9 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
                 m.SentAt,
                 m.Kind,
                 m.SystemKey,
-                m.DeletedAt
+                m.DeletedAt,
+                m.E2eeEnvelopeVersion,
+                m.E2eeProtocol
             })
             .ToListAsync(ct);
 
@@ -184,7 +186,9 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
                 directHasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
                 x.Kind,
                 x.DeletedAt.HasValue ? null : x.SystemKey,
-                x.DeletedAt);
+                x.DeletedAt,
+                x.DeletedAt.HasValue ? 0 : x.E2eeEnvelopeVersion,
+                x.DeletedAt.HasValue ? null : x.E2eeProtocol);
         }
 
         var unresolvedIds = sourceIds.Where(id => !result.ContainsKey(id)).ToList();
@@ -201,7 +205,9 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
                     m.SentAt,
                     m.Kind,
                     m.SystemKey,
-                    m.DeletedAt
+                    m.DeletedAt,
+                    m.E2eeEnvelopeVersion,
+                    m.E2eeProtocol
                 })
                 .ToListAsync(ct);
 
@@ -223,7 +229,9 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
                     groupHasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
                     x.Kind,
                     x.DeletedAt.HasValue ? null : x.SystemKey,
-                    x.DeletedAt);
+                    x.DeletedAt,
+                    x.DeletedAt.HasValue ? 0 : x.E2eeEnvelopeVersion,
+                    x.DeletedAt.HasValue ? null : x.E2eeProtocol);
             }
         }
 
@@ -250,7 +258,10 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
             message.EditedAt,
             message.DeletedAt,
             message.DeletedById,
-            forwardedFrom
+            forwardedFrom,
+            null,
+            message.DeletedAt.HasValue ? 0 : message.E2eeEnvelopeVersion,
+            message.DeletedAt.HasValue ? null : message.E2eeProtocol
         );
     }
 
@@ -346,14 +357,15 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var now = DateTime.UtcNow;
+        var e2eeInfo = E2eeEnvelopeInspector.InspectDirect(text);
         var message = new DirectMessage
         {
             DialogId = dlg.Id,
             SenderId = senderId,
             Text = text,
             SentAt = now,
-            E2eeEnvelopeVersion = E2eeEnvelopeInspector.InspectDirect(text).Version,
-            E2eeProtocol = E2eeEnvelopeInspector.InspectDirect(text).Protocol,
+            E2eeEnvelopeVersion = e2eeInfo.Version,
+            E2eeProtocol = e2eeInfo.Protocol,
             Kind = kind,
             SystemKey = string.IsNullOrWhiteSpace(systemKey) ? null : systemKey.Trim(),
             ForwardedFromMessageId = forwardedFromMessageId
@@ -440,6 +452,8 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
             SenderId = senderId,
             Text = (source.Text ?? string.Empty).Trim(),
             SentAt = now,
+            E2eeEnvelopeVersion = source.E2eeEnvelopeVersion,
+            E2eeProtocol = source.E2eeProtocol,
             Kind = source.Kind,
             SystemKey = string.IsNullOrWhiteSpace(source.SystemKey) ? null : source.SystemKey.Trim(),
             ForwardedFromMessageId = source.Id
@@ -522,6 +536,8 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
             SenderId = senderId,
             Text = (source.Text ?? string.Empty).Trim(),
             SentAt = now,
+            E2eeEnvelopeVersion = source.E2eeEnvelopeVersion,
+            E2eeProtocol = source.E2eeProtocol,
             Kind = source.Kind,
             SystemKey = string.IsNullOrWhiteSpace(source.SystemKey) ? null : source.SystemKey.Trim(),
             ForwardedFromMessageId = source.Id

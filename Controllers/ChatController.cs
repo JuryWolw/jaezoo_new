@@ -4,6 +4,7 @@ using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Files;
 using JaeZoo.Server.Services.Chat;
 using JaeZoo.Server.Services.Files;
+using JaeZoo.Server.Services.Security;
 using JaeZoo.Server.Security;
 using JaeZoo.Server.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -460,7 +461,10 @@ public class ChatController(
                 return Ok(same);
             }
 
+            var e2eeInfo = E2eeEnvelopeInspector.InspectDirect(newText);
             msg.Text = newText;
+            msg.E2eeEnvelopeVersion = e2eeInfo.Version;
+            msg.E2eeProtocol = e2eeInfo.Protocol;
             msg.EditedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(ct);
 
@@ -1445,7 +1449,10 @@ public class ChatController(
                 return Ok(same);
             }
 
+            var e2eeInfo = E2eeEnvelopeInspector.InspectGroup(newText);
             msg.Text = newText;
+            msg.E2eeEnvelopeVersion = e2eeInfo.Version;
+            msg.E2eeProtocol = e2eeInfo.Protocol;
             msg.EditedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(ct);
 

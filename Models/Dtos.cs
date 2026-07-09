@@ -151,7 +151,9 @@ public record MessageForwardInfoDto(
     bool HasAttachments,
     DirectMessageKind Kind,
     string? SystemKey,
-    DateTime? DeletedAt
+    DateTime? DeletedAt,
+    int E2eeEnvelopeVersion = 0,
+    string? E2eeProtocol = null
 );
 
 public record MessageDto(
@@ -167,7 +169,9 @@ public record MessageDto(
     DateTime? DeletedAt = null,
     Guid? DeletedById = null,
     MessageForwardInfoDto? ForwardedFrom = null,
-    int? GroupSecurityEpoch = null
+    int? GroupSecurityEpoch = null,
+    int E2eeEnvelopeVersion = 0,
+    string? E2eeProtocol = null
 );
 
 public record UnreadDialogDto(Guid FriendId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt)
