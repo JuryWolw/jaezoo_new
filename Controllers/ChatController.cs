@@ -5,6 +5,7 @@ using JaeZoo.Server.Models.Files;
 using JaeZoo.Server.Services.Chat;
 using JaeZoo.Server.Services.Files;
 using JaeZoo.Server.Security;
+using JaeZoo.Server.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -81,6 +82,76 @@ public class ChatController(
         var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
         if (summary is not null)
             await BroadcastGroupUpdated(summary, ct);
+    }
+
+    private static string CleanSystemMessageText(string? value, int maxLength = 500)
+    {
+        var text = (value ?? string.Empty)
+            .Replace("\r", " ")
+            .Replace("\n", " ")
+            .Trim();
+
+        if (text.Length > maxLength)
+            text = text[..maxLength].Trim();
+
+        return text;
+    }
+
+    private static bool IsKnownGroupSystemKey(string? systemKey) => systemKey is
+        GroupChatService.SystemUserAddedKey or
+        GroupChatService.SystemHistoryAvailableKey or
+        GroupChatService.SystemSecurityKeysUpdatedKey;
+
+    private async Task<bool> CanCreateGroupSystemMessageAsync(Guid groupId, Guid userId, CancellationToken ct)
+    {
+        var group = await db.GroupChats.AsNoTracking().FirstOrDefaultAsync(g => g.Id == groupId, ct);
+        if (group is null) return false;
+
+        var member = await db.GroupChatMembers.AsNoTracking()
+            .FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == userId, ct);
+        if (member is null) return false;
+
+        return group.OwnerId == userId || member.Role == GroupChatRole.Admin;
+    }
+
+    private async Task<MessageDto?> CreateAndBroadcastGroupSystemMessageAsync(
+        Guid groupId,
+        Guid senderId,
+        string systemKey,
+        string text,
+        CancellationToken ct)
+    {
+        if (groupId == Guid.Empty || senderId == Guid.Empty || !IsKnownGroupSystemKey(systemKey))
+            return null;
+
+        var cleanText = CleanSystemMessageText(text);
+        if (string.IsNullOrWhiteSpace(cleanText))
+            return null;
+
+        var created = await groupChats.CreateSystemMessageAsync(senderId, groupId, systemKey, cleanText, ct);
+        var dto = await groupChats.GetMessageDtoAsync(groupId, created.message.Id, ct);
+        if (dto is null) return null;
+
+        await BroadcastGroupCreated(groupId, dto, ct);
+        return dto;
+    }
+
+    private async Task<string> GetPublicUserNameAsync(Guid userId, CancellationToken ct)
+    {
+        var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId, ct);
+        return user is null ? "Пользователь" : UserIdentityService.GetPublicName(user);
+    }
+
+    private async Task<Dictionary<Guid, string>> GetPublicUserNamesAsync(IEnumerable<Guid> userIds, CancellationToken ct)
+    {
+        var ids = userIds.Where(x => x != Guid.Empty).Distinct().ToList();
+        if (ids.Count == 0) return new Dictionary<Guid, string>();
+
+        var users = await db.Users.AsNoTracking()
+            .Where(u => ids.Contains(u.Id))
+            .ToListAsync(ct);
+
+        return users.ToDictionary(u => u.Id, u => UserIdentityService.GetPublicName(u));
     }
 
     [HttpGet("history/{friendId:guid}")]
@@ -554,12 +625,32 @@ public class ChatController(
     {
         try
         {
+            var wasMember = await db.GroupChatMembers.AsNoTracking()
+                .AnyAsync(m => m.GroupChatId == groupId && m.UserId == MeId, ct);
+
             var chatEntity = await groupChats.JoinPublicAsync(groupId, MeId, ct);
             var details = await BuildGroupDetailsAsync(chatEntity.Id, ct);
             if (details is null) return Problem("Failed to build group chat dto.", statusCode: 500);
 
             await BroadcastGroupMembersChanged(chatEntity.Id, ct);
             await BroadcastGroupUpdated(details.Chat, ct);
+
+            if (!wasMember)
+            {
+                var joinedName = await GetPublicUserNameAsync(MeId, ct);
+                await CreateAndBroadcastGroupSystemMessageAsync(
+                    chatEntity.Id,
+                    MeId,
+                    GroupChatService.SystemUserAddedKey,
+                    $"Пользователь {joinedName} добавлен в группу.",
+                    ct);
+                await CreateAndBroadcastGroupSystemMessageAsync(
+                    chatEntity.Id,
+                    MeId,
+                    GroupChatService.SystemSecurityKeysUpdatedKey,
+                    "Ключи безопасности группы обновлены.",
+                    ct);
+            }
 
             var memberIds = await GetGroupMemberIdsAsync(chatEntity.Id, ct);
             foreach (var memberId in memberIds)
@@ -594,10 +685,11 @@ public class ChatController(
             foreach (var groupId in groups)
             {
                 var unread = await groupChats.GetUnreadForUserAsync(groupId, MeId, ct);
+                var visibleMessages = VisibleGroupMessagesForMe(groupId);
                 var lastReadByOtherMessageId = await db.GroupChatMembers
                     .AsNoTracking()
                     .Where(m => m.GroupChatId == groupId && m.UserId != MeId && m.LastReadMessageId != Guid.Empty)
-                    .Join(db.GroupMessages.AsNoTracking(),
+                    .Join(visibleMessages,
                         member => member.LastReadMessageId,
                         message => message.Id,
                         (member, message) => new { member.LastReadMessageId, message.SentAt })
@@ -703,13 +795,47 @@ public class ChatController(
             var verifyMembers = await RequireUsersVerifiedAsync(body.UserIds, "В группу можно добавлять только пользователей с подтверждённой почтой.", ct);
             if (verifyMembers is not null) return verifyMembers;
 
+            var beforeMemberIds = await db.GroupChatMembers.AsNoTracking()
+                .Where(m => m.GroupChatId == groupId)
+                .Select(m => m.UserId)
+                .ToListAsync(ct);
+            var beforeSet = beforeMemberIds.ToHashSet();
+
             await groupChats.AddMembersAsync(groupId, MeId, body.UserIds, ct);
             var members = await groupChats.GetMemberDtosAsync(groupId, ct);
+            var addedIds = members
+                .Select(m => m.UserId)
+                .Where(id => !beforeSet.Contains(id))
+                .Distinct()
+                .ToList();
+
             await BroadcastGroupMembersChanged(groupId, ct);
 
             var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
             if (summary is not null)
                 await BroadcastGroupUpdated(summary, ct);
+
+            var addedNames = await GetPublicUserNamesAsync(addedIds, ct);
+            foreach (var addedId in addedIds)
+            {
+                var name = addedNames.TryGetValue(addedId, out var publicName) ? publicName : "Пользователь";
+                await CreateAndBroadcastGroupSystemMessageAsync(
+                    groupId,
+                    MeId,
+                    GroupChatService.SystemUserAddedKey,
+                    $"Пользователь {name} добавлен в группу.",
+                    ct);
+            }
+
+            if (addedIds.Count > 0)
+            {
+                await CreateAndBroadcastGroupSystemMessageAsync(
+                    groupId,
+                    MeId,
+                    GroupChatService.SystemSecurityKeysUpdatedKey,
+                    "Ключи безопасности группы обновлены.",
+                    ct);
+            }
 
             return Ok(members);
         }
@@ -817,7 +943,15 @@ public class ChatController(
             }
 
             if (accepted > 0)
+            {
                 await db.SaveChangesAsync(ct);
+                await CreateAndBroadcastGroupSystemMessageAsync(
+                    groupId,
+                    MeId,
+                    GroupChatService.SystemHistoryAvailableKey,
+                    "История группы доступна новому участнику.",
+                    ct);
+            }
 
             return Ok(new GroupHistoryKeyPackageImportResult(accepted, skipped));
         }
@@ -903,6 +1037,13 @@ public class ChatController(
             if (summary is not null)
                 await BroadcastGroupUpdated(summary, ct);
 
+            await CreateAndBroadcastGroupSystemMessageAsync(
+                groupId,
+                MeId,
+                GroupChatService.SystemSecurityKeysUpdatedKey,
+                "Ключи безопасности группы обновлены.",
+                ct);
+
             return Ok(members);
         }
         catch (Exception ex)
@@ -943,7 +1084,23 @@ public class ChatController(
     {
         try
         {
+            var ownerId = await db.GroupChats.AsNoTracking()
+                .Where(g => g.Id == groupId)
+                .Select(g => g.OwnerId)
+                .FirstOrDefaultAsync(ct);
+
             await groupChats.LeaveAsync(groupId, MeId, ct);
+
+            if (ownerId != Guid.Empty)
+            {
+                await CreateAndBroadcastGroupSystemMessageAsync(
+                    groupId,
+                    ownerId,
+                    GroupChatService.SystemSecurityKeysUpdatedKey,
+                    "Ключи безопасности группы обновлены.",
+                    ct);
+            }
+
             var memberIds = await GetGroupMemberIdsAsync(groupId, ct);
             foreach (var memberId in memberIds)
             {
@@ -1080,10 +1237,22 @@ public class ChatController(
     {
         try
         {
-            if (!await groupChats.IsMemberAsync(groupId, MeId, ct))
+            var access = await (
+                from member in db.GroupChatMembers.AsNoTracking()
+                join groupChat in db.GroupChats.AsNoTracking() on member.GroupChatId equals groupChat.Id
+                where member.GroupChatId == groupId && member.UserId == MeId
+                select new { Member = member, Group = groupChat }
+            ).FirstOrDefaultAsync(ct);
+
+            if (access is null)
                 return NotFound(new { error = "Group chat not found." });
 
             var q = db.GroupMessages.AsNoTracking().Where(m => m.GroupChatId == groupId);
+            if (access.Group.HistoryPolicy != 1)
+            {
+                var joinedAt = DirectChatService.EnsureUtc(access.Member.JoinedAt);
+                q = q.Where(m => m.SentAt >= joinedAt);
+            }
 
             if (before.HasValue)
             {
@@ -1176,8 +1345,8 @@ public class ChatController(
             var member = await db.GroupChatMembers.FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == MeId, ct);
             if (member is null) return NotFound(new { error = "Group chat not found." });
 
-            var cursorMessage = await db.GroupMessages.AsNoTracking()
-                .Where(m => m.GroupChatId == groupId && m.Id == body.LastReadMessageId)
+            var cursorMessage = await VisibleGroupMessagesForMe(groupId)
+                .Where(m => m.Id == body.LastReadMessageId)
                 .Select(m => new { m.Id, m.SentAt })
                 .FirstOrDefaultAsync(ct);
 
@@ -1220,12 +1389,23 @@ public class ChatController(
         {
             if (body is null || string.IsNullOrWhiteSpace(body.SystemKey))
                 return BadRequest(new { error = "SystemKey is required." });
+            if (!IsKnownGroupSystemKey(body.SystemKey))
+                return BadRequest(new { error = "Unknown system message key." });
+            if (!await CanCreateGroupSystemMessageAsync(groupId, MeId, ct))
+                return StatusCode(StatusCodes.Status403Forbidden, new { error = "Only the owner or admin can create system messages." });
 
-            var created = await groupChats.CreateMessageAsync(MeId, groupId, body.Text, null, DirectMessageKind.System, body.SystemKey, null, ct);
-            var dto = await groupChats.GetMessageDtoAsync(groupId, created.message.Id, ct);
+            var text = CleanSystemMessageText(body.Text);
+            if (string.IsNullOrWhiteSpace(text))
+                text = body.SystemKey switch
+                {
+                    GroupChatService.SystemUserAddedKey => "Пользователь добавлен в группу.",
+                    GroupChatService.SystemHistoryAvailableKey => "История группы доступна новому участнику.",
+                    GroupChatService.SystemSecurityKeysUpdatedKey => "Ключи безопасности группы обновлены.",
+                    _ => "Системное сообщение."
+                };
+
+            var dto = await CreateAndBroadcastGroupSystemMessageAsync(groupId, MeId, body.SystemKey, text, ct);
             if (dto is null) return Problem("Failed to build message dto.", statusCode: 500);
-
-            await BroadcastGroupCreated(groupId, dto, ct);
             return Ok(dto);
         }
         catch (Exception ex)
@@ -1325,9 +1505,8 @@ public class ChatController(
             if (!await groupChats.IsMemberAsync(groupId, MeId, ct)) return NotFound(new { error = "Group chat not found." });
 
             var ids = body.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
-            var sources = await db.GroupMessages.AsNoTracking()
+            var sources = await VisibleGroupMessagesForMe(groupId)
                 .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
-                .Join(db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == MeId), m => m.GroupChatId, gm => gm.GroupChatId, (m, gm) => m)
                 .OrderBy(m => m.SentAt)
                 .ThenBy(m => m.Id)
                 .ToListAsync(ct);
@@ -1374,12 +1553,8 @@ public class ChatController(
 
             if (source == "group")
             {
-                var sourcesQuery = db.GroupMessages.AsNoTracking()
-                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
-                    .Join(db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == MeId), m => m.GroupChatId, gm => gm.GroupChatId, (m, gm) => m);
-
-                if (body.SourceChatId.HasValue && body.SourceChatId.Value != Guid.Empty)
-                    sourcesQuery = sourcesQuery.Where(m => m.GroupChatId == body.SourceChatId.Value);
+                var sourcesQuery = VisibleGroupMessagesForMe(body.SourceChatId)
+                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null);
 
                 var sources = await sourcesQuery.OrderBy(m => m.SentAt).ThenBy(m => m.Id).ToListAsync(ct);
                 foreach (var sourceMessage in sources)
@@ -1444,12 +1619,8 @@ public class ChatController(
 
             if (source == "group")
             {
-                var sourcesQuery = db.GroupMessages.AsNoTracking()
-                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
-                    .Join(db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == MeId), m => m.GroupChatId, gm => gm.GroupChatId, (m, gm) => m);
-
-                if (body.SourceChatId.HasValue && body.SourceChatId.Value != Guid.Empty)
-                    sourcesQuery = sourcesQuery.Where(m => m.GroupChatId == body.SourceChatId.Value);
+                var sourcesQuery = VisibleGroupMessagesForMe(body.SourceChatId)
+                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null);
 
                 var sources = await sourcesQuery.OrderBy(m => m.SentAt).ThenBy(m => m.Id).ToListAsync(ct);
                 foreach (var sourceMessage in sources)
@@ -1697,10 +1868,11 @@ public class ChatController(
 
             if (normalizedType == "links")
             {
+                var visibleMessages = VisibleGroupMessagesForMe(groupId);
                 var messages = await (
-                    from m in db.GroupMessages.AsNoTracking()
+                    from m in visibleMessages
                     join u in db.Users.AsNoTracking() on m.SenderId equals u.Id
-                    where m.GroupChatId == groupId && m.DeletedAt == null && m.Text != null && m.Text != string.Empty
+                    where m.DeletedAt == null && m.Text != null && m.Text != string.Empty
                     orderby m.SentAt descending, m.Id descending
                     select new { Message = m, SenderName = u.DisplayName ?? u.UserName }
                 ).Take(1000).ToListAsync(ct);
@@ -1736,12 +1908,13 @@ public class ChatController(
                 return Ok(links);
             }
 
+            var visibleAttachmentMessages = VisibleGroupMessagesForMe(groupId);
             var rows = await (
                 from a in db.GroupMessageAttachments.AsNoTracking()
-                join m in db.GroupMessages.AsNoTracking() on a.MessageId equals m.Id
+                join m in visibleAttachmentMessages on a.MessageId equals m.Id
                 join f in db.ChatFiles.AsNoTracking() on a.FileId equals f.Id
                 join u in db.Users.AsNoTracking() on m.SenderId equals u.Id
-                where m.GroupChatId == groupId && m.DeletedAt == null && f.DeletedAt == null && f.BlockedAt == null
+                where m.DeletedAt == null && f.DeletedAt == null && f.BlockedAt == null
                 orderby m.SentAt descending, m.Id descending, a.CreatedAt descending
                 select new { File = f, Message = m, SenderName = u.DisplayName ?? u.UserName }
             ).Take(1000).ToListAsync(ct);
@@ -1773,6 +1946,24 @@ public class ChatController(
     private async Task<List<Guid>> GetGroupMemberIdsAsync(Guid groupId, CancellationToken ct) =>
         await db.GroupChatMembers.AsNoTracking().Where(m => m.GroupChatId == groupId).Select(m => m.UserId).ToListAsync(ct);
 
+    private IQueryable<GroupMessage> VisibleGroupMessagesForMe(Guid? groupId = null)
+    {
+        var me = MeId;
+        var query =
+            from message in db.GroupMessages.AsNoTracking()
+            join member in db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == me)
+                on message.GroupChatId equals member.GroupChatId
+            join groupChat in db.GroupChats.AsNoTracking()
+                on message.GroupChatId equals groupChat.Id
+            where groupChat.HistoryPolicy == 1 || message.SentAt >= member.JoinedAt
+            select message;
+
+        if (groupId.HasValue && groupId.Value != Guid.Empty)
+            query = query.Where(message => message.GroupChatId == groupId.Value);
+
+        return query;
+    }
+
     private async Task BroadcastGroupCreated(Guid groupId, MessageDto dto, CancellationToken ct)
     {
         var memberIds = await GetGroupMemberIdsAsync(groupId, ct);
@@ -1781,7 +1972,7 @@ public class ChatController(
             await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatMessageCreated", new GroupChatRealtimeMessageDto(groupId, dto), ct);
         }
 
-        foreach (var memberId in memberIds.Where(x => x != MeId))
+        foreach (var memberId in memberIds.Where(x => x != dto.SenderId))
         {
             var unread = await groupChats.GetUnreadForUserAsync(groupId, memberId, ct);
             await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatUnreadChanged", new GroupChatUnreadChangedDto(groupId, unread.count, unread.firstId, unread.firstAt), ct);

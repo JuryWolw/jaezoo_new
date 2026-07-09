@@ -1,4 +1,4 @@
-﻿using JaeZoo.Server.Data;
+using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Services.Security;
@@ -11,6 +11,10 @@ namespace JaeZoo.Server.Services.Chat;
 public sealed class GroupChatService(AppDbContext db, DirectChatService directChat)
 {
     public const int MaxGroupMembers = 50;
+
+    public const string SystemUserAddedKey = "group_user_added";
+    public const string SystemHistoryAvailableKey = "group_history_available";
+    public const string SystemSecurityKeysUpdatedKey = "group_security_keys_updated";
 
     public static void AdvanceSecurityEpoch(GroupChat chat, DateTime now)
     {
@@ -110,6 +114,26 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             return null;
 
         return await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct);
+    }
+
+    public async Task<(GroupChat chat, GroupMessage message)> CreateSystemMessageAsync(
+        Guid senderId,
+        Guid groupId,
+        string systemKey,
+        string text,
+        CancellationToken ct = default)
+    {
+        var created = await CreateMessageAsync(
+            senderId,
+            groupId,
+            text,
+            null,
+            DirectMessageKind.System,
+            systemKey,
+            null,
+            ct);
+
+        return (created.chat, created.message);
     }
 
     public async Task<GroupChat> CreateChatAsync(Guid ownerId, string? title, string? description, IReadOnlyCollection<Guid>? memberIds, bool isPublic = false, int historyPolicy = 1, CancellationToken ct = default)
@@ -386,20 +410,30 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
     public async Task<(int count, Guid? firstId, DateTime? firstAt)> GetUnreadForUserAsync(Guid groupId, Guid userId, CancellationToken ct = default)
     {
-        var member = await db.GroupChatMembers
-            .AsNoTracking()
-            .FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == userId, ct);
+        var access = await (
+            from member in db.GroupChatMembers.AsNoTracking()
+            join groupChat in db.GroupChats.AsNoTracking() on member.GroupChatId equals groupChat.Id
+            where member.GroupChatId == groupId && member.UserId == userId
+            select new { Member = member, Group = groupChat }
+        ).FirstOrDefaultAsync(ct);
 
-        if (member is null)
+        if (access is null)
             return (0, null, null);
 
-        var at = DirectChatService.EnsureUtc(member.LastReadAt);
-        var id = member.LastReadMessageId;
+        var at = DirectChatService.EnsureUtc(access.Member.LastReadAt);
+        var id = access.Member.LastReadMessageId;
 
         var q = db.GroupMessages
             .AsNoTracking()
-            .Where(m => m.GroupChatId == groupId && m.SenderId != userId && m.DeletedAt == null)
-            .Where(m => m.SentAt > at || (m.SentAt == at && m.Id.CompareTo(id) > 0));
+            .Where(m => m.GroupChatId == groupId && m.SenderId != userId && m.DeletedAt == null);
+
+        if (access.Group.HistoryPolicy != 1)
+        {
+            var joinedAt = DirectChatService.EnsureUtc(access.Member.JoinedAt);
+            q = q.Where(m => m.SentAt >= joinedAt);
+        }
+
+        q = q.Where(m => m.SentAt > at || (m.SentAt == at && m.Id.CompareTo(id) > 0));
 
         var count = await q.CountAsync(ct);
         if (count == 0)
@@ -455,9 +489,17 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
         var myRole = GetEffectiveRole(chat, member);
         var memberCount = await db.GroupChatMembers.AsNoTracking().CountAsync(m => m.GroupChatId == groupId, ct);
-        var lastMessage = await db.GroupMessages
+        var lastMessageQuery = db.GroupMessages
             .AsNoTracking()
-            .Where(m => m.GroupChatId == groupId)
+            .Where(m => m.GroupChatId == groupId);
+
+        if (chat.HistoryPolicy != 1)
+        {
+            var joinedAt = DirectChatService.EnsureUtc(member.JoinedAt);
+            lastMessageQuery = lastMessageQuery.Where(m => m.SentAt >= joinedAt);
+        }
+
+        var lastMessage = await lastMessageQuery
             .OrderByDescending(m => m.SentAt)
             .ThenByDescending(m => m.Id)
             .FirstOrDefaultAsync(ct);

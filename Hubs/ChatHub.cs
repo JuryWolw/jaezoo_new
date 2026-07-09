@@ -41,6 +41,37 @@ public class ChatHub : Hub
         }
     }
 
+
+    private static string CleanSystemMessageText(string? value, int maxLength = 500)
+    {
+        var text = (value ?? string.Empty)
+            .Replace("\r", " ")
+            .Replace("\n", " ")
+            .Trim();
+
+        if (text.Length > maxLength)
+            text = text[..maxLength].Trim();
+
+        return text;
+    }
+
+    private static bool IsKnownGroupSystemKey(string? systemKey) => systemKey is
+        GroupChatService.SystemUserAddedKey or
+        GroupChatService.SystemHistoryAvailableKey or
+        GroupChatService.SystemSecurityKeysUpdatedKey;
+
+    private async Task<bool> CanCreateGroupSystemMessageAsync(Guid groupId, Guid userId, CancellationToken ct)
+    {
+        var group = await _db.GroupChats.AsNoTracking().FirstOrDefaultAsync(g => g.Id == groupId, ct);
+        if (group is null) return false;
+
+        var member = await _db.GroupChatMembers.AsNoTracking()
+            .FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == userId, ct);
+        if (member is null) return false;
+
+        return group.OwnerId == userId || member.Role == GroupChatRole.Admin;
+    }
+
     public override async Task OnConnectedAsync()
     {
         var userId = MeId.ToString();
@@ -310,6 +341,24 @@ public class ChatHub : Hub
     }
 
 
+
+    private IQueryable<GroupMessage> VisibleGroupMessagesForUser(Guid userId, Guid? groupId = null)
+    {
+        var query =
+            from message in _db.GroupMessages.AsNoTracking()
+            join member in _db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == userId)
+                on message.GroupChatId equals member.GroupChatId
+            join groupChat in _db.GroupChats.AsNoTracking()
+                on message.GroupChatId equals groupChat.Id
+            where groupChat.HistoryPolicy == 1 || message.SentAt >= member.JoinedAt
+            select message;
+
+        if (groupId.HasValue && groupId.Value != Guid.Empty)
+            query = query.Where(message => message.GroupChatId == groupId.Value);
+
+        return query;
+    }
+
     public async Task SendGroupMessage(Guid groupId, SendMessageRequest request)
     {
         try
@@ -351,9 +400,26 @@ public class ChatHub : Hub
         {
             if (string.IsNullOrWhiteSpace(systemKey))
                 throw new HubException("SystemKey is required.");
+            if (!IsKnownGroupSystemKey(systemKey))
+                throw new HubException("Unknown system message key.");
 
             var me = MeId;
-            var created = await _groupChats.CreateMessageAsync(me, groupId, text, null, DirectMessageKind.System, systemKey, null, Context.ConnectionAborted);
+            if (!await CanCreateGroupSystemMessageAsync(groupId, me, Context.ConnectionAborted))
+                throw new HubException("Only the owner or admin can create system messages.");
+
+            var cleanText = CleanSystemMessageText(text);
+            if (string.IsNullOrWhiteSpace(cleanText))
+            {
+                cleanText = systemKey switch
+                {
+                    GroupChatService.SystemUserAddedKey => "Пользователь добавлен в группу.",
+                    GroupChatService.SystemHistoryAvailableKey => "История группы доступна новому участнику.",
+                    GroupChatService.SystemSecurityKeysUpdatedKey => "Ключи безопасности группы обновлены.",
+                    _ => "Системное сообщение."
+                };
+            }
+
+            var created = await _groupChats.CreateSystemMessageAsync(me, groupId, systemKey, cleanText, Context.ConnectionAborted);
             var dto = await _groupChats.GetMessageDtoAsync(groupId, created.message.Id, Context.ConnectionAborted);
             if (dto is null)
                 throw new HubException("Не удалось сформировать системное сообщение.");
@@ -377,9 +443,8 @@ public class ChatHub : Hub
                 throw new HubException("Групповой чат не найден.");
 
             var ids = request.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
-            var sources = await _db.GroupMessages.AsNoTracking()
+            var sources = await VisibleGroupMessagesForUser(me, groupId)
                 .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
-                .Join(_db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == me), m => m.GroupChatId, gm => gm.GroupChatId, (m, gm) => m)
                 .OrderBy(m => m.SentAt)
                 .ThenBy(m => m.Id)
                 .ToListAsync(Context.ConnectionAborted);
@@ -413,12 +478,8 @@ public class ChatHub : Hub
 
             if (source == "group")
             {
-                var sourcesQuery = _db.GroupMessages.AsNoTracking()
-                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
-                    .Join(_db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == me), m => m.GroupChatId, gm => gm.GroupChatId, (m, gm) => m);
-
-                if (request.SourceChatId.HasValue && request.SourceChatId.Value != Guid.Empty)
-                    sourcesQuery = sourcesQuery.Where(m => m.GroupChatId == request.SourceChatId.Value);
+                var sourcesQuery = VisibleGroupMessagesForUser(me, request.SourceChatId)
+                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null);
 
                 var sources = await sourcesQuery.OrderBy(m => m.SentAt).ThenBy(m => m.Id).ToListAsync(Context.ConnectionAborted);
                 foreach (var sourceMessage in sources)
@@ -459,12 +520,8 @@ public class ChatHub : Hub
 
             if (source == "group")
             {
-                var sourcesQuery = _db.GroupMessages.AsNoTracking()
-                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
-                    .Join(_db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == me), m => m.GroupChatId, gm => gm.GroupChatId, (m, gm) => m);
-
-                if (request.SourceChatId.HasValue && request.SourceChatId.Value != Guid.Empty)
-                    sourcesQuery = sourcesQuery.Where(m => m.GroupChatId == request.SourceChatId.Value);
+                var sourcesQuery = VisibleGroupMessagesForUser(me, request.SourceChatId)
+                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null);
 
                 var sources = await sourcesQuery.OrderBy(m => m.SentAt).ThenBy(m => m.Id).ToListAsync(Context.ConnectionAborted);
                 foreach (var sourceMessage in sources)
