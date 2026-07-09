@@ -720,6 +720,176 @@ public class ChatController(
         }
     }
 
+    [HttpPost("groups/{groupId:guid}/history-key-packages")]
+    [RequireVerifiedEmail]
+    public async Task<ActionResult<GroupHistoryKeyPackageImportResult>> UploadGroupHistoryKeyPackages(Guid groupId, [FromBody] GroupHistoryKeyPackagesUploadRequest body, CancellationToken ct)
+    {
+        try
+        {
+            if (body?.Packages is null || body.Packages.Count == 0)
+                return Ok(new GroupHistoryKeyPackageImportResult(0, 0));
+
+            var chatEntity = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct);
+            if (chatEntity is null) return NotFound(new { error = "Group chat not found." });
+
+            var actor = await db.GroupChatMembers.AsNoTracking()
+                .FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == MeId, ct);
+            if (actor is null) return Forbid();
+            if (chatEntity.OwnerId != MeId && actor.Role != GroupChatRole.Admin)
+                return StatusCode(StatusCodes.Status403Forbidden, new { error = "Only the owner or admin can share group history." });
+            if (chatEntity.HistoryPolicy != 1)
+                return BadRequest(new { error = "Old history is disabled for new members in this group." });
+
+            var memberIds = await db.GroupChatMembers.AsNoTracking()
+                .Where(m => m.GroupChatId == groupId)
+                .Select(m => m.UserId)
+                .ToListAsync(ct);
+            var memberSet = memberIds.ToHashSet();
+
+            var accepted = 0;
+            var skipped = 0;
+            var now = DateTime.UtcNow;
+
+            foreach (var package in body.Packages.Take(1000))
+            {
+                var targetDeviceId = CleanHistoryPackageText(package.TargetDeviceId, 128);
+                var senderDeviceId = CleanHistoryPackageText(package.SenderDeviceId, 128);
+                var senderKeyId = CleanHistoryPackageText(package.SenderKeyId, 128);
+                var providerDeviceId = CleanHistoryPackageText(package.ProviderDeviceId, 128);
+                var algorithm = CleanHistoryPackageText(package.Algorithm, 96) ?? "JZ-GROUP-HISTORY-KEY-P256-AESGCM-v1";
+                var providerPublic = CleanHistoryPackageText(package.ProviderPublicKeyBase64, 8192);
+                var targetPublic = CleanHistoryPackageText(package.TargetPublicKeyBase64, 8192);
+                var nonce = CleanHistoryPackageText(package.NonceBase64, 256);
+                var cipher = CleanHistoryPackageText(package.CiphertextBase64, 8192);
+                var tag = CleanHistoryPackageText(package.TagBase64, 256);
+
+                if (package.TargetUserId == Guid.Empty || package.SenderUserId == Guid.Empty ||
+                    string.IsNullOrWhiteSpace(targetDeviceId) || string.IsNullOrWhiteSpace(senderDeviceId) ||
+                    string.IsNullOrWhiteSpace(senderKeyId) || string.IsNullOrWhiteSpace(providerDeviceId) ||
+                    string.IsNullOrWhiteSpace(providerPublic) || string.IsNullOrWhiteSpace(targetPublic) ||
+                    string.IsNullOrWhiteSpace(nonce) || string.IsNullOrWhiteSpace(cipher) || string.IsNullOrWhiteSpace(tag))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                if (!memberSet.Contains(package.TargetUserId))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                var epoch = Math.Clamp(package.SecurityEpoch, 1, Math.Max(1, chatEntity.SecurityEpoch));
+                var exists = await db.GroupHistoryKeyPackages.AnyAsync(x =>
+                    x.GroupChatId == groupId &&
+                    x.SecurityEpoch == epoch &&
+                    x.TargetUserId == package.TargetUserId &&
+                    x.TargetDeviceId == targetDeviceId &&
+                    x.SenderUserId == package.SenderUserId &&
+                    x.SenderDeviceId == senderDeviceId &&
+                    x.SenderKeyId == senderKeyId, ct);
+                if (exists)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                db.GroupHistoryKeyPackages.Add(new GroupHistoryKeyPackage
+                {
+                    GroupChatId = groupId,
+                    SenderUserId = package.SenderUserId,
+                    SenderDeviceId = senderDeviceId,
+                    SenderKeyId = senderKeyId,
+                    SecurityEpoch = epoch,
+                    ProviderUserId = MeId,
+                    ProviderDeviceId = providerDeviceId,
+                    TargetUserId = package.TargetUserId,
+                    TargetDeviceId = targetDeviceId,
+                    ProviderPublicKeyBase64 = providerPublic,
+                    TargetPublicKeyBase64 = targetPublic,
+                    NonceBase64 = nonce,
+                    CiphertextBase64 = cipher,
+                    TagBase64 = tag,
+                    Algorithm = algorithm,
+                    CreatedAt = now
+                });
+                accepted++;
+            }
+
+            if (accepted > 0)
+                await db.SaveChangesAsync(ct);
+
+            return Ok(new GroupHistoryKeyPackageImportResult(accepted, skipped));
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "UploadGroupHistoryKeyPackages failed: me={MeId}, group={GroupId}", MeId, groupId);
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpGet("groups/{groupId:guid}/history-key-packages")]
+    public async Task<ActionResult<IReadOnlyList<GroupHistoryKeyPackageDto>>> GetGroupHistoryKeyPackages(Guid groupId, [FromQuery] string? deviceId, CancellationToken ct)
+    {
+        try
+        {
+            var normalizedDeviceId = CleanHistoryPackageText(deviceId, 128);
+            if (string.IsNullOrWhiteSpace(normalizedDeviceId))
+                return BadRequest(new { error = "DeviceId is required." });
+
+            var isMember = await db.GroupChatMembers.AsNoTracking()
+                .AnyAsync(m => m.GroupChatId == groupId && m.UserId == MeId, ct);
+            if (!isMember) return Forbid();
+
+            var rows = await db.GroupHistoryKeyPackages
+                .Where(x => x.GroupChatId == groupId && x.TargetUserId == MeId && x.TargetDeviceId == normalizedDeviceId)
+                .OrderBy(x => x.SecurityEpoch)
+                .ThenBy(x => x.CreatedAt)
+                .Take(1000)
+                .ToListAsync(ct);
+
+            if (rows.Count > 0)
+            {
+                var now = DateTime.UtcNow;
+                foreach (var row in rows.Where(x => x.DeliveredAt == null))
+                    row.DeliveredAt = now;
+                await db.SaveChangesAsync(ct);
+            }
+
+            return Ok(rows.Select(x => new GroupHistoryKeyPackageDto(
+                x.Id,
+                x.GroupChatId,
+                x.SenderUserId,
+                x.SenderDeviceId,
+                x.SenderKeyId,
+                Math.Max(1, x.SecurityEpoch),
+                x.ProviderUserId,
+                x.ProviderDeviceId,
+                x.TargetUserId,
+                x.TargetDeviceId,
+                x.ProviderPublicKeyBase64,
+                x.TargetPublicKeyBase64,
+                x.NonceBase64,
+                x.CiphertextBase64,
+                x.TagBase64,
+                x.Algorithm,
+                x.CreatedAt)).ToList());
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "GetGroupHistoryKeyPackages failed: me={MeId}, group={GroupId}", MeId, groupId);
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private static string? CleanHistoryPackageText(string? value, int maxLength)
+    {
+        var normalized = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+        if (normalized is not null && normalized.Length > maxLength)
+            normalized = normalized[..maxLength];
+        return normalized;
+    }
+
     [HttpDelete("groups/{groupId:guid}/members/{userId:guid}")]
     public async Task<ActionResult<IReadOnlyList<GroupChatMemberDto>>> RemoveGroupMember(Guid groupId, Guid userId, CancellationToken ct)
     {

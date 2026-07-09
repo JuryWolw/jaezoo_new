@@ -1,4 +1,4 @@
-﻿namespace JaeZoo.Server.Models;
+namespace JaeZoo.Server.Models;
 
 public sealed class RegisterRequest
 {
@@ -342,6 +342,46 @@ public record FileUploadResponse(
 public record CreateGroupChatRequest(string Title, string? Description = null, IReadOnlyList<Guid>? MemberIds = null, bool IsPublic = false, int HistoryPolicy = 1);
 public record UpdateGroupChatRequest(string Title, string? Description = null, bool? IsPublic = null, int? HistoryPolicy = null);
 public record UpdateGroupMembersRequest(IReadOnlyList<Guid> UserIds);
+
+public record GroupHistoryKeyPackageUploadDto(
+    Guid SenderUserId,
+    string SenderDeviceId,
+    string SenderKeyId,
+    int SecurityEpoch,
+    Guid TargetUserId,
+    string TargetDeviceId,
+    string ProviderDeviceId,
+    string ProviderPublicKeyBase64,
+    string TargetPublicKeyBase64,
+    string NonceBase64,
+    string CiphertextBase64,
+    string TagBase64,
+    string Algorithm = "JZ-GROUP-HISTORY-KEY-P256-AESGCM-v1"
+);
+
+public record GroupHistoryKeyPackagesUploadRequest(IReadOnlyList<GroupHistoryKeyPackageUploadDto> Packages);
+
+public record GroupHistoryKeyPackageDto(
+    Guid Id,
+    Guid GroupId,
+    Guid SenderUserId,
+    string SenderDeviceId,
+    string SenderKeyId,
+    int SecurityEpoch,
+    Guid ProviderUserId,
+    string ProviderDeviceId,
+    Guid TargetUserId,
+    string TargetDeviceId,
+    string ProviderPublicKeyBase64,
+    string TargetPublicKeyBase64,
+    string NonceBase64,
+    string CiphertextBase64,
+    string TagBase64,
+    string Algorithm,
+    DateTime CreatedAt
+);
+
+public record GroupHistoryKeyPackageImportResult(int Imported, int Skipped);
 public record UpdateGroupMemberRoleRequest(string Role);
 
 public record GroupChatMemberDto(

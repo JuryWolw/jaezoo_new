@@ -252,6 +252,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             .FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == me, ct)
             ?? throw new InvalidOperationException("Only group members can add members.");
 
+        if (!CanEditGroup(chat, actor))
+            throw new InvalidOperationException("Only the owner or admin can add members.");
+
         var requested = (userIds ?? Array.Empty<Guid>())
             .Where(x => x != Guid.Empty)
             .Distinct()
@@ -481,7 +484,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             GroupChatRoleInfo.GetColorHex(myRole),
             GroupChatRoleInfo.GetColorName(myRole),
             CanEditGroup(chat, member),
-            true,
+            CanEditGroup(chat, member),
             CanManageRoles(chat, member),
             unread.count,
             unread.firstId,

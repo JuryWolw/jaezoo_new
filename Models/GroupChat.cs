@@ -34,10 +34,9 @@ public class GroupChat
     /// Future E2EE history policy.
     /// 0 = new members read only future messages.
     /// 1 = owner/admin can share encrypted old history keys.
-    /// 2 = history sharing disabled for this group.
-    /// Current patch only stores the policy and does not change access logic yet.
+    /// Current E9.2 patch uses this policy to decide whether encrypted old-history keys can be shared.
     /// </summary>
-    public int HistoryPolicy { get; set; } = 0;
+    public int HistoryPolicy { get; set; } = 1;
 
     public DateTime? HistoryPolicyChangedAt { get; set; }
 

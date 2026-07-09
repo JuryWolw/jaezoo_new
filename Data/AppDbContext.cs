@@ -22,6 +22,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GroupMessage> GroupMessages => Set<GroupMessage>();
     public DbSet<GroupMessageAttachment> GroupMessageAttachments => Set<GroupMessageAttachment>();
     public DbSet<GroupAvatar> GroupAvatars => Set<GroupAvatar>();
+    public DbSet<GroupHistoryKeyPackage> GroupHistoryKeyPackages => Set<GroupHistoryKeyPackage>();
     public DbSet<GroupVoiceSession> GroupVoiceSessions => Set<GroupVoiceSession>();
     public DbSet<GroupVoiceParticipant> GroupVoiceParticipants => Set<GroupVoiceParticipant>();
     public DbSet<UserRole> UserRoles => Set<UserRole>();
@@ -91,11 +92,60 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<GroupChat>()
             .Property(g => g.HistoryPolicy)
-            .HasDefaultValue(0);
+            .HasDefaultValue(1);
 
         b.Entity<GroupMessage>()
             .Property(m => m.GroupSecurityEpoch)
             .HasDefaultValue(1);
+
+        b.Entity<GroupHistoryKeyPackage>()
+            .Property(p => p.SenderDeviceId)
+            .HasMaxLength(128);
+
+        b.Entity<GroupHistoryKeyPackage>()
+            .Property(p => p.SenderKeyId)
+            .HasMaxLength(128);
+
+        b.Entity<GroupHistoryKeyPackage>()
+            .Property(p => p.ProviderDeviceId)
+            .HasMaxLength(128);
+
+        b.Entity<GroupHistoryKeyPackage>()
+            .Property(p => p.TargetDeviceId)
+            .HasMaxLength(128);
+
+        b.Entity<GroupHistoryKeyPackage>()
+            .Property(p => p.ProviderPublicKeyBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<GroupHistoryKeyPackage>()
+            .Property(p => p.TargetPublicKeyBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<GroupHistoryKeyPackage>()
+            .Property(p => p.NonceBase64)
+            .HasMaxLength(256);
+
+        b.Entity<GroupHistoryKeyPackage>()
+            .Property(p => p.CiphertextBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<GroupHistoryKeyPackage>()
+            .Property(p => p.TagBase64)
+            .HasMaxLength(256);
+
+        b.Entity<GroupHistoryKeyPackage>()
+            .Property(p => p.Algorithm)
+            .HasMaxLength(96);
+
+        b.Entity<GroupHistoryKeyPackage>()
+            .HasIndex(p => new { p.GroupChatId, p.TargetUserId, p.TargetDeviceId })
+            .HasDatabaseName("IX_GroupHistoryKeyPackages_Target");
+
+        b.Entity<GroupHistoryKeyPackage>()
+            .HasIndex(p => new { p.GroupChatId, p.SecurityEpoch, p.TargetUserId, p.TargetDeviceId, p.SenderUserId, p.SenderDeviceId, p.SenderKeyId })
+            .HasDatabaseName("IX_GroupHistoryKeyPackages_UniquePackage")
+            .IsUnique();
 
         b.Entity<DirectMessage>()
             .Property(m => m.E2eeEnvelopeVersion)
