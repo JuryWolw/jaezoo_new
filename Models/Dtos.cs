@@ -1,4 +1,4 @@
-﻿namespace JaeZoo.Server.Models;
+namespace JaeZoo.Server.Models;
 
 public sealed class RegisterRequest
 {
@@ -64,6 +64,21 @@ public record UserSessionDto(
     string ClientVersion,
     string IpAddress,
     bool IsCurrent
+);
+
+public record UserLoginHistoryDto(
+    Guid Id,
+    DateTime CreatedAt,
+    DateTime ExpiresAt,
+    DateTime? LastSeenAt,
+    DateTime? LastRefreshAt,
+    DateTime? RevokedAt,
+    string DeviceName,
+    string Platform,
+    string ClientVersion,
+    string IpAddress,
+    bool IsCurrent,
+    bool IsActive
 );
 
 public record UserDto(

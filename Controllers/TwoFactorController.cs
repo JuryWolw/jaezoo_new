@@ -1,4 +1,4 @@
-﻿using System.Security.Claims;
+using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Security;
@@ -27,7 +27,11 @@ public sealed class TwoFactorController(
         var user = await db.Users.FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null) return Unauthorized();
 
-        return new TwoFactorStatusDto(user.TwoFactorEnabled, user.TwoFactorEnabledAt, 0);
+        var remaining = user.TwoFactorEnabled
+            ? await db.TwoFactorRecoveryCodes.CountAsync(c => c.UserId == uid && c.UsedAt == null, ct)
+            : 0;
+
+        return new TwoFactorStatusDto(user.TwoFactorEnabled, user.TwoFactorEnabledAt, remaining);
     }
 
     [HttpPost("setup")]
@@ -76,13 +80,11 @@ public sealed class TwoFactorController(
         user.TwoFactorDisabledAt = null;
         user.UpdatedAt = now;
 
-        var oldCodes = await db.TwoFactorRecoveryCodes.Where(c => c.UserId == uid).ToListAsync(ct);
-        if (oldCodes.Count > 0)
-            db.TwoFactorRecoveryCodes.RemoveRange(oldCodes);
+        var recoveryCodes = await ReplaceRecoveryCodesAsync(uid, ct);
 
         await db.SaveChangesAsync(ct);
-        await securityAudit.TryWriteAsync(User, HttpContext, "Security.2FAEnabled", "User", user.Id.ToString(), $"2FA enabled without separate 2FA recovery codes. publicId={user.PublicId}", ct);
-        return new TwoFactorEnableResponse(true, Array.Empty<string>());
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.2FAEnabled", "User", user.Id.ToString(), $"2FA enabled. recoveryCodes={recoveryCodes.Count}; publicId={user.PublicId}", ct);
+        return new TwoFactorEnableResponse(true, recoveryCodes);
     }
 
     [HttpPost("disable")]
@@ -116,8 +118,48 @@ public sealed class TwoFactorController(
     }
 
     [HttpPost("recovery-codes/regenerate")]
-    public ActionResult<TwoFactorEnableResponse> RegenerateRecoveryCodes([FromBody] TwoFactorRegenerateRecoveryCodesRequest request)
-        => StatusCode(410, "Отдельные recovery-коды для входа отключены. Для истории используется один Recovery ключ, а вход защищается приложением-аутентификатором или почтой.");
+    public async Task<ActionResult<TwoFactorEnableResponse>> RegenerateRecoveryCodes([FromBody] TwoFactorRegenerateRecoveryCodesRequest request, CancellationToken ct)
+    {
+        var uid = GetCurrentUserId();
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == uid, ct);
+        if (user == null) return Unauthorized();
+        if (!user.TwoFactorEnabled)
+            return BadRequest("Сначала включите двухфакторную защиту.");
+
+        if (_hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password ?? string.Empty) == PasswordVerificationResult.Failed)
+            return Unauthorized("Неверный пароль.");
+
+        if (!VerifyAuthenticatorCode(user, request.Code))
+            return BadRequest("Неверный код из приложения-аутентификатора.");
+
+        var recoveryCodes = await ReplaceRecoveryCodesAsync(uid, ct);
+        user.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.2FARecoveryCodesRegenerated", "User", user.Id.ToString(), $"2FA recovery codes regenerated. count={recoveryCodes.Count}; publicId={user.PublicId}", ct);
+        return new TwoFactorEnableResponse(true, recoveryCodes);
+    }
+
+
+    private async Task<IReadOnlyList<string>> ReplaceRecoveryCodesAsync(Guid userId, CancellationToken ct)
+    {
+        var oldCodes = await db.TwoFactorRecoveryCodes.Where(c => c.UserId == userId).ToListAsync(ct);
+        if (oldCodes.Count > 0)
+            db.TwoFactorRecoveryCodes.RemoveRange(oldCodes);
+
+        var recoveryCodes = TotpService.GenerateRecoveryCodes(10);
+        foreach (var code in recoveryCodes)
+        {
+            db.TwoFactorRecoveryCodes.Add(new TwoFactorRecoveryCode
+            {
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                CodeHash = TotpService.HashRecoveryCode(userId, code),
+                CreatedAt = DateTime.UtcNow
+            });
+        }
+
+        return recoveryCodes;
+    }
 
     private bool VerifyAuthenticatorCode(User user, string? code)
     {

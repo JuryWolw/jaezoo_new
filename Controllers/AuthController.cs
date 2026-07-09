@@ -1,4 +1,4 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations;
 using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
@@ -304,7 +304,7 @@ public class AuthController(
 
         var normalizedOtp = TotpService.NormalizeCode(code);
         var verified = false;
-        const bool usedRecoveryCode = false;
+        var usedRecoveryCode = false;
         if (normalizedOtp.Length == 6 && normalizedOtp.All(char.IsDigit))
         {
             var secret = IdentityDataProtector.UnprotectSecret(user.TwoFactorSecretEncrypted);
@@ -313,8 +313,26 @@ public class AuthController(
 
         if (!verified)
         {
+            var normalizedRecovery = TotpService.NormalizeRecoveryCode(code);
+            if (normalizedRecovery.Length >= 8)
+            {
+                var recoveryHash = TotpService.HashRecoveryCode(user.Id, normalizedRecovery);
+                var recovery = await db.TwoFactorRecoveryCodes
+                    .FirstOrDefaultAsync(c => c.UserId == user.Id && c.CodeHash == recoveryHash && c.UsedAt == null, ct);
+                if (recovery is not null)
+                {
+                    recovery.UsedAt = now;
+                    recovery.UsedIpAddress = UserSessionService.GetRemoteIp(HttpContext);
+                    verified = true;
+                    usedRecoveryCode = true;
+                }
+            }
+        }
+
+        if (!verified)
+        {
             await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FAFailed", "User", user.Id.ToString(), $"Wrong 2FA code. publicId={user.PublicId}", ct);
-            return Unauthorized("Неверный код из приложения-аутентификатора.");
+            return Unauthorized("Неверный код из приложения-аутентификатора или recovery-код.");
         }
 
         challenge.UsedAt = now;
@@ -368,7 +386,7 @@ public class AuthController(
 
         var accessExpiresAt = now.AddMinutes(60);
         var token = tokens.Create(user, roles, session?.Id, accessExpiresAt);
-        await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FASucceeded", "User", user.Id.ToString(), $"2FA login succeeded. rememberMe={challenge.RememberMe}; sessionId={session?.Id.ToString() ?? "none"}; knownDevice={knownDevice}; publicId={user.PublicId}", ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FASucceeded", "User", user.Id.ToString(), $"2FA login succeeded. rememberMe={challenge.RememberMe}; recoveryCode={usedRecoveryCode}; sessionId={session?.Id.ToString() ?? "none"}; knownDevice={knownDevice}; publicId={user.PublicId}", ct);
         return new TokenResponse(
             token,
             ToUserDto(user),
@@ -528,6 +546,37 @@ public class AuthController(
             .ToListAsync(ct);
 
         return sessions;
+    }
+
+
+    [Authorize]
+    [HttpGet("login-history")]
+    public async Task<ActionResult<IReadOnlyList<UserLoginHistoryDto>>> LoginHistory(CancellationToken ct)
+    {
+        var uid = GetCurrentUserId();
+        var currentSid = GetCurrentSessionId();
+        var now = DateTime.UtcNow;
+
+        var history = await db.UserSessions
+            .Where(s => s.UserId == uid)
+            .OrderByDescending(s => s.LastSeenAt ?? s.LastRefreshAt ?? s.CreatedAt)
+            .Take(40)
+            .Select(s => new UserLoginHistoryDto(
+                s.Id,
+                s.CreatedAt,
+                s.ExpiresAt,
+                s.LastSeenAt,
+                s.LastRefreshAt,
+                s.RevokedAt,
+                s.DeviceName,
+                s.Platform,
+                s.ClientVersion,
+                s.IpAddress,
+                currentSid.HasValue && s.Id == currentSid.Value,
+                s.RevokedAt == null && s.ExpiresAt > now))
+            .ToListAsync(ct);
+
+        return history;
     }
 
     [Authorize]
