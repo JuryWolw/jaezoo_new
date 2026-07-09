@@ -21,6 +21,7 @@ public class AuthController(
     AppDbContext db,
     TokenService tokens,
     EmailVerificationService emailVerification,
+    LoginNotificationService loginNotifications,
     SmartCaptchaService captcha,
     SecurityAuditService securityAudit,
     ILogger<AuthController> log) : ControllerBase
@@ -221,6 +222,14 @@ public class AuthController(
             .Select(role => role.Role)
             .ToListAsync(ct);
 
+        var now = DateTime.UtcNow;
+        var ipAddress = UserSessionService.GetRemoteIp(HttpContext);
+        var userAgent = UserSessionService.CleanHeader(Request.Headers.UserAgent.ToString(), 256);
+        var deviceName = UserSessionService.CleanHeader(r.DeviceName, 128);
+        var platform = UserSessionService.CleanHeader(r.Platform, 64);
+        var clientVersion = UserSessionService.CleanHeader(r.ClientVersion, 32);
+        var knownDevice = await IsKnownLoginDeviceAsync(user.Id, deviceName, platform, clientVersion, ct);
+
         UserSession? session = null;
         string? refreshToken = null;
         DateTime? refreshExpiresAt = null;
@@ -228,20 +237,20 @@ public class AuthController(
         if (r.RememberMe)
         {
             refreshToken = UserSessionService.NewRefreshToken();
-            refreshExpiresAt = DateTime.UtcNow.AddDays(30);
+            refreshExpiresAt = now.AddDays(30);
             session = new UserSession
             {
                 Id = Guid.NewGuid(),
                 UserId = user.Id,
                 RefreshTokenHash = UserSessionService.HashRefreshToken(refreshToken),
-                CreatedAt = DateTime.UtcNow,
+                CreatedAt = now,
                 ExpiresAt = refreshExpiresAt.Value,
-                LastSeenAt = DateTime.UtcNow,
-                IpAddress = UserSessionService.GetRemoteIp(HttpContext),
-                UserAgent = UserSessionService.CleanHeader(Request.Headers.UserAgent.ToString(), 256),
-                DeviceName = UserSessionService.CleanHeader(r.DeviceName, 128),
-                Platform = UserSessionService.CleanHeader(r.Platform, 64),
-                ClientVersion = UserSessionService.CleanHeader(r.ClientVersion, 32),
+                LastSeenAt = now,
+                IpAddress = ipAddress,
+                UserAgent = userAgent,
+                DeviceName = deviceName,
+                Platform = platform,
+                ClientVersion = clientVersion,
                 IsTrusted = false
             };
             db.UserSessions.Add(session);
@@ -249,9 +258,15 @@ public class AuthController(
 
         await db.SaveChangesAsync(ct);
 
-        var accessExpiresAt = DateTime.UtcNow.AddMinutes(60);
+        await loginNotifications.TrySendLoginNotificationAsync(
+            user,
+            new LoginNotificationContext(now, ipAddress, deviceName, platform, clientVersion, userAgent, knownDevice, UsedTwoFactor: false, UsedRecoveryCode: false, SessionId: session?.Id),
+            HttpContext,
+            ct);
+
+        var accessExpiresAt = now.AddMinutes(60);
         var token = tokens.Create(user, roles, session?.Id, accessExpiresAt);
-        await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginSucceeded", "User", user.Id.ToString(), $"Login succeeded. rememberMe={r.RememberMe}; sessionId={session?.Id.ToString() ?? "none"}; publicId={user.PublicId}", ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginSucceeded", "User", user.Id.ToString(), $"Login succeeded. rememberMe={r.RememberMe}; sessionId={session?.Id.ToString() ?? "none"}; knownDevice={knownDevice}; publicId={user.PublicId}", ct);
         return new TokenResponse(
             token,
             ToUserDto(user),
@@ -327,6 +342,13 @@ public class AuthController(
             .Select(role => role.Role)
             .ToListAsync(ct);
 
+        var ipAddress = UserSessionService.GetRemoteIp(HttpContext);
+        var userAgent = UserSessionService.CleanHeader(Request.Headers.UserAgent.ToString(), 256);
+        var deviceName = UserSessionService.CleanHeader(challenge.DeviceName, 128);
+        var platform = UserSessionService.CleanHeader(challenge.Platform, 64);
+        var clientVersion = UserSessionService.CleanHeader(challenge.ClientVersion, 32);
+        var knownDevice = await IsKnownLoginDeviceAsync(user.Id, deviceName, platform, clientVersion, ct);
+
         UserSession? session = null;
         string? refreshToken = null;
         DateTime? refreshExpiresAt = null;
@@ -343,11 +365,11 @@ public class AuthController(
                 CreatedAt = now,
                 ExpiresAt = refreshExpiresAt.Value,
                 LastSeenAt = now,
-                IpAddress = UserSessionService.GetRemoteIp(HttpContext),
-                UserAgent = UserSessionService.CleanHeader(Request.Headers.UserAgent.ToString(), 256),
-                DeviceName = challenge.DeviceName,
-                Platform = challenge.Platform,
-                ClientVersion = challenge.ClientVersion,
+                IpAddress = ipAddress,
+                UserAgent = userAgent,
+                DeviceName = deviceName,
+                Platform = platform,
+                ClientVersion = clientVersion,
                 IsTrusted = false
             };
             db.UserSessions.Add(session);
@@ -355,9 +377,15 @@ public class AuthController(
 
         await db.SaveChangesAsync(ct);
 
+        await loginNotifications.TrySendLoginNotificationAsync(
+            user,
+            new LoginNotificationContext(now, ipAddress, deviceName, platform, clientVersion, userAgent, knownDevice, UsedTwoFactor: true, UsedRecoveryCode: usedRecoveryCode, SessionId: session?.Id),
+            HttpContext,
+            ct);
+
         var accessExpiresAt = now.AddMinutes(60);
         var token = tokens.Create(user, roles, session?.Id, accessExpiresAt);
-        await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FASucceeded", "User", user.Id.ToString(), $"2FA login succeeded. rememberMe={challenge.RememberMe}; recovery={usedRecoveryCode}; sessionId={session?.Id.ToString() ?? "none"}; publicId={user.PublicId}", ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FASucceeded", "User", user.Id.ToString(), $"2FA login succeeded. rememberMe={challenge.RememberMe}; recovery={usedRecoveryCode}; sessionId={session?.Id.ToString() ?? "none"}; knownDevice={knownDevice}; publicId={user.PublicId}", ct);
         return new TokenResponse(
             token,
             ToUserDto(user),
@@ -366,6 +394,16 @@ public class AuthController(
             session?.Id,
             accessExpiresAt,
             refreshExpiresAt);
+    }
+
+
+    [AllowAnonymous]
+    [HttpGet("login-alerts/{token}/not-me")]
+    public async Task<IActionResult> MarkLoginAsSuspicious([FromRoute] string token, CancellationToken ct)
+    {
+        var result = await loginNotifications.HandleNotMeAsync(token, HttpContext, ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginMarkedSuspicious", "LoginAlert", SecurityAuditService.HashTarget(token ?? string.Empty), $"state={result.State}; revokedSessions={result.RevokedSessions}; publicId={result.PublicId}", ct);
+        return Content(LoginNotificationService.BuildResultHtml(result), "text/html; charset=utf-8");
     }
 
     [HttpPost("refresh")]
@@ -556,6 +594,24 @@ public class AuthController(
     {
         var sid = User.FindFirstValue("sid");
         return Guid.TryParse(sid, out var id) ? id : null;
+    }
+
+
+    private async Task<bool> IsKnownLoginDeviceAsync(Guid userId, string deviceName, string platform, string clientVersion, CancellationToken ct)
+    {
+        deviceName = UserSessionService.CleanHeader(deviceName, 128);
+        platform = UserSessionService.CleanHeader(platform, 64);
+        clientVersion = UserSessionService.CleanHeader(clientVersion, 32);
+        var now = DateTime.UtcNow;
+
+        return await db.UserSessions.AnyAsync(s =>
+            s.UserId == userId &&
+            s.RevokedAt == null &&
+            s.ExpiresAt > now &&
+            s.DeviceName == deviceName &&
+            s.Platform == platform &&
+            s.ClientVersion == clientVersion,
+            ct);
     }
 
     private static UserDto ToUserDto(User u) => new(

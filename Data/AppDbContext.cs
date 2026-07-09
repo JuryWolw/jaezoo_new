@@ -35,6 +35,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<UserE2eeKey> UserE2eeKeys => Set<UserE2eeKey>();
     public DbSet<TwoFactorRecoveryCode> TwoFactorRecoveryCodes => Set<TwoFactorRecoveryCode>();
     public DbSet<TwoFactorLoginChallenge> TwoFactorLoginChallenges => Set<TwoFactorLoginChallenge>();
+    public DbSet<LoginAlertToken> LoginAlertTokens => Set<LoginAlertToken>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -225,6 +226,44 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .HasOne(c => c.User)
             .WithMany()
             .HasForeignKey(c => c.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+
+        b.Entity<LoginAlertToken>()
+            .Property(a => a.TokenHash)
+            .HasMaxLength(128);
+
+        b.Entity<LoginAlertToken>()
+            .Property(a => a.IpAddress)
+            .HasMaxLength(64);
+
+        b.Entity<LoginAlertToken>()
+            .Property(a => a.DeviceName)
+            .HasMaxLength(128);
+
+        b.Entity<LoginAlertToken>()
+            .Property(a => a.Platform)
+            .HasMaxLength(64);
+
+        b.Entity<LoginAlertToken>()
+            .Property(a => a.ClientVersion)
+            .HasMaxLength(32);
+
+        b.Entity<LoginAlertToken>()
+            .Property(a => a.UsedIpAddress)
+            .HasMaxLength(64);
+
+        b.Entity<LoginAlertToken>()
+            .HasIndex(a => a.TokenHash)
+            .IsUnique();
+
+        b.Entity<LoginAlertToken>()
+            .HasIndex(a => new { a.UserId, a.ExpiresAt, a.UsedAt });
+
+        b.Entity<LoginAlertToken>()
+            .HasOne(a => a.User)
+            .WithMany()
+            .HasForeignKey(a => a.UserId)
             .OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<UserRole>()

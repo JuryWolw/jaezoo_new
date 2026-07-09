@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using System.Text;
+using System.Security.Claims;
 using System.Threading.RateLimiting;
 using Amazon.Runtime;
 using Amazon.S3;
@@ -89,11 +90,45 @@ builder.Services
             },
             OnTokenValidated = async context =>
             {
+                var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
+
+                var uidValue = context.Principal?.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                               ?? context.Principal?.FindFirst("sub")?.Value;
+                if (!Guid.TryParse(uidValue, out var userId))
+                {
+                    context.Fail("User id claim is missing.");
+                    return;
+                }
+
+                var tokenVersionValue = context.Principal?.FindFirst("token_version")?.Value;
+                var securityStampValue = context.Principal?.FindFirst("security_stamp")?.Value ?? string.Empty;
+                if (!int.TryParse(tokenVersionValue, out var tokenVersion))
+                {
+                    context.Fail("Token version claim is missing.");
+                    return;
+                }
+
+                var tokenUser = await db.Users
+                    .Where(u => u.Id == userId)
+                    .Select(u => new { u.TokenVersion, u.SecurityStamp, u.IsDisabled })
+                    .FirstOrDefaultAsync();
+
+                if (tokenUser is null || tokenUser.IsDisabled)
+                {
+                    context.Fail("User is missing or disabled.");
+                    return;
+                }
+
+                if (tokenUser.TokenVersion != tokenVersion || !string.Equals(tokenUser.SecurityStamp ?? string.Empty, securityStampValue, StringComparison.Ordinal))
+                {
+                    context.Fail("Token was revoked by security change.");
+                    return;
+                }
+
                 var sidValue = context.Principal?.FindFirst("sid")?.Value;
                 if (!Guid.TryParse(sidValue, out var sessionId))
                     return;
 
-                var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
                 var now = DateTime.UtcNow;
                 var active = await db.UserSessions.AnyAsync(s =>
                     s.Id == sessionId &&
@@ -140,6 +175,7 @@ builder.Services.AddScoped<DirectChatService>();
 builder.Services.AddScoped<GroupChatService>();
 builder.Services.AddScoped<AdminAuditService>();
 builder.Services.AddScoped<SecurityAuditService>();
+builder.Services.AddScoped<LoginNotificationService>();
 
 // ---------- Launcher updates ----------
 builder.Services.Configure<LauncherUpdatesOptions>(
@@ -363,6 +399,7 @@ using (var scope = app.Services.CreateScope())
     await EnsurePublicGroupsSchemaAsync(db, logger);
     await EnsureUserActivitySchemaAsync(db, logger);
     await EnsureTwoFactorSchemaAsync(db, logger);
+    await EnsureLoginNotificationSchemaAsync(db, logger);
 
     await IdentityDataProtector.BackfillUsersAsync(db, logger);
 
@@ -486,6 +523,73 @@ app.Run();
 
 
 
+
+
+static async Task EnsureLoginNotificationSchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "LoginAlertTokens" (
+                    "Id" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "SessionId" uuid NULL,
+                    "TokenHash" character varying(128) NOT NULL,
+                    "IpAddress" character varying(64) NOT NULL DEFAULT '',
+                    "DeviceName" character varying(128) NOT NULL DEFAULT '',
+                    "Platform" character varying(64) NOT NULL DEFAULT '',
+                    "ClientVersion" character varying(32) NOT NULL DEFAULT '',
+                    "IsKnownDevice" boolean NOT NULL DEFAULT false,
+                    "UsedTwoFactor" boolean NOT NULL DEFAULT false,
+                    "UsedRecoveryCode" boolean NOT NULL DEFAULT false,
+                    "CreatedAt" timestamp with time zone NOT NULL,
+                    "ExpiresAt" timestamp with time zone NOT NULL,
+                    "UsedAt" timestamp with time zone NULL,
+                    "UsedIpAddress" character varying(64) NULL,
+                    CONSTRAINT "PK_LoginAlertTokens" PRIMARY KEY ("Id"),
+                    CONSTRAINT "FK_LoginAlertTokens_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_LoginAlertTokens_TokenHash" ON "LoginAlertTokens" ("TokenHash");
+                CREATE INDEX IF NOT EXISTS "IX_LoginAlertTokens_UserId_ExpiresAt_UsedAt" ON "LoginAlertTokens" ("UserId", "ExpiresAt", "UsedAt");
+                CREATE INDEX IF NOT EXISTS "IX_LoginAlertTokens_SessionId" ON "LoginAlertTokens" ("SessionId");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "LoginAlertTokens" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_LoginAlertTokens" PRIMARY KEY,
+                    "UserId" TEXT NOT NULL,
+                    "SessionId" TEXT NULL,
+                    "TokenHash" TEXT NOT NULL,
+                    "IpAddress" TEXT NOT NULL DEFAULT '',
+                    "DeviceName" TEXT NOT NULL DEFAULT '',
+                    "Platform" TEXT NOT NULL DEFAULT '',
+                    "ClientVersion" TEXT NOT NULL DEFAULT '',
+                    "IsKnownDevice" INTEGER NOT NULL DEFAULT 0,
+                    "UsedTwoFactor" INTEGER NOT NULL DEFAULT 0,
+                    "UsedRecoveryCode" INTEGER NOT NULL DEFAULT 0,
+                    "CreatedAt" TEXT NOT NULL,
+                    "ExpiresAt" TEXT NOT NULL,
+                    "UsedAt" TEXT NULL,
+                    "UsedIpAddress" TEXT NULL,
+                    CONSTRAINT "FK_LoginAlertTokens_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_LoginAlertTokens_TokenHash" ON "LoginAlertTokens" ("TokenHash");
+                CREATE INDEX IF NOT EXISTS "IX_LoginAlertTokens_UserId_ExpiresAt_UsedAt" ON "LoginAlertTokens" ("UserId", "ExpiresAt", "UsedAt");
+                CREATE INDEX IF NOT EXISTS "IX_LoginAlertTokens_SessionId" ON "LoginAlertTokens" ("SessionId");
+                """);
+        }
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(ex, "Failed to ensure login notification schema. Continue startup; EF migrations may have already created it.");
+    }
+}
 
 static async Task EnsureTwoFactorSchemaAsync(AppDbContext db, ILogger logger)
 {
