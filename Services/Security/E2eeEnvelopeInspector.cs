@@ -24,10 +24,26 @@ public static class E2eeEnvelopeInspector
     public static E2eeEnvelopeInfo InspectGroup(string? text)
     {
         if (string.IsNullOrWhiteSpace(text)) return new E2eeEnvelopeInfo(0, null);
-        if (text.StartsWith(GroupPrefixV1, StringComparison.Ordinal)) return new E2eeEnvelopeInfo(1, "group-content-key-v1");
+        if (text.StartsWith(GroupPrefixV1, StringComparison.Ordinal)) return DetectGroupProtocol(text);
         return new E2eeEnvelopeInfo(0, null);
     }
 
+
+    private static E2eeEnvelopeInfo DetectGroupProtocol(string text)
+    {
+        try
+        {
+            var raw = text[GroupPrefixV1.Length..];
+            var json = Encoding.UTF8.GetString(Convert.FromBase64String(raw));
+            if (json.Contains("sender-keys-v2", StringComparison.OrdinalIgnoreCase)) return new E2eeEnvelopeInfo(2, "group-sender-keys-v2");
+            if (json.Contains("SENDER-KEYS", StringComparison.OrdinalIgnoreCase)) return new E2eeEnvelopeInfo(2, "group-sender-keys-v2");
+            return new E2eeEnvelopeInfo(1, "group-content-key-v1");
+        }
+        catch
+        {
+            return new E2eeEnvelopeInfo(1, "group-content-key-v1");
+        }
+    }
     private static string DetectDirectRatchetProtocol(string text)
     {
         try
