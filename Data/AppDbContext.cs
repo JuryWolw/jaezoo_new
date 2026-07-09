@@ -1,4 +1,4 @@
-using JaeZoo.Server.Models;
+﻿using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Files;
 using JaeZoo.Server.Models.Moderation;
 using JaeZoo.Server.Models.Security;
@@ -33,6 +33,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<ModerationWarning> ModerationWarnings => Set<ModerationWarning>();
     public DbSet<FileScanAllowList> FileScanAllowList => Set<FileScanAllowList>();
     public DbSet<UserE2eeKey> UserE2eeKeys => Set<UserE2eeKey>();
+    public DbSet<TwoFactorRecoveryCode> TwoFactorRecoveryCodes => Set<TwoFactorRecoveryCode>();
+    public DbSet<TwoFactorLoginChallenge> TwoFactorLoginChallenges => Set<TwoFactorLoginChallenge>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -52,6 +54,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<User>().Property(u => u.ProfileBannerUrl).HasMaxLength(512);
         b.Entity<User>().Property(u => u.ProfileTextTheme).HasMaxLength(16);
         b.Entity<User>().Property(u => u.CurrentActivityName).HasMaxLength(96);
+        b.Entity<User>().Property(u => u.TwoFactorSecretEncrypted).HasMaxLength(1024);
+        b.Entity<User>().Property(u => u.TwoFactorPendingSecretEncrypted).HasMaxLength(1024);
         b.Entity<User>().Property(u => u.LastSeenVisibility).HasConversion<int>();
         b.Entity<User>().Property(u => u.DisabledReason).HasMaxLength(256);
 
@@ -168,6 +172,60 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .HasForeignKey(k => k.UserId)
             .OnDelete(DeleteBehavior.Cascade);
 
+
+        b.Entity<TwoFactorRecoveryCode>()
+            .Property(c => c.CodeHash)
+            .HasMaxLength(128);
+
+        b.Entity<TwoFactorRecoveryCode>()
+            .Property(c => c.UsedIpAddress)
+            .HasMaxLength(64);
+
+        b.Entity<TwoFactorRecoveryCode>()
+            .HasIndex(c => new { c.UserId, c.UsedAt });
+
+        b.Entity<TwoFactorRecoveryCode>()
+            .HasOne(c => c.User)
+            .WithMany()
+            .HasForeignKey(c => c.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<TwoFactorLoginChallenge>()
+            .Property(c => c.ChallengeTokenHash)
+            .HasMaxLength(128);
+
+        b.Entity<TwoFactorLoginChallenge>()
+            .Property(c => c.DeviceName)
+            .HasMaxLength(128);
+
+        b.Entity<TwoFactorLoginChallenge>()
+            .Property(c => c.Platform)
+            .HasMaxLength(64);
+
+        b.Entity<TwoFactorLoginChallenge>()
+            .Property(c => c.ClientVersion)
+            .HasMaxLength(32);
+
+        b.Entity<TwoFactorLoginChallenge>()
+            .Property(c => c.IpAddress)
+            .HasMaxLength(64);
+
+        b.Entity<TwoFactorLoginChallenge>()
+            .Property(c => c.UserAgent)
+            .HasMaxLength(256);
+
+        b.Entity<TwoFactorLoginChallenge>()
+            .HasIndex(c => c.ChallengeTokenHash)
+            .IsUnique();
+
+        b.Entity<TwoFactorLoginChallenge>()
+            .HasIndex(c => new { c.UserId, c.ExpiresAt, c.UsedAt });
+
+        b.Entity<TwoFactorLoginChallenge>()
+            .HasOne(c => c.User)
+            .WithMany()
+            .HasForeignKey(c => c.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<UserRole>()
             .Property(r => r.Role)

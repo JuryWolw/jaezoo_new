@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.ComponentModel.DataAnnotations;
 
 namespace JaeZoo.Server.Models
@@ -94,6 +94,18 @@ namespace JaeZoo.Server.Models
         public bool ShowOnline { get; set; } = true; // можно ли показывать, что юзер онлайн
         public LastSeenVisibility LastSeenVisibility { get; set; } = LastSeenVisibility.Approximate;
         public bool ShowActivity { get; set; } = true;
+
+        public bool TwoFactorEnabled { get; set; } = false;
+
+        [MaxLength(1024)]
+        public string? TwoFactorSecretEncrypted { get; set; }
+
+        [MaxLength(1024)]
+        public string? TwoFactorPendingSecretEncrypted { get; set; }
+
+        public DateTime? TwoFactorPendingSecretExpiresAt { get; set; }
+        public DateTime? TwoFactorEnabledAt { get; set; }
+        public DateTime? TwoFactorDisabledAt { get; set; }
 
         [MaxLength(64)]
         public string? CustomStatus { get; set; } // произвольная подпись («Работаю», «AFK»)

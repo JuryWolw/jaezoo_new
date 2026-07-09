@@ -1,4 +1,4 @@
-using JaeZoo.Server.Data;
+﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Middleware;
@@ -362,6 +362,7 @@ using (var scope = app.Services.CreateScope())
     await EnsureGroupE2eeSecuritySchemaAsync(db, logger);
     await EnsurePublicGroupsSchemaAsync(db, logger);
     await EnsureUserActivitySchemaAsync(db, logger);
+    await EnsureTwoFactorSchemaAsync(db, logger);
 
     await IdentityDataProtector.BackfillUsersAsync(db, logger);
 
@@ -483,6 +484,118 @@ app.Run();
 
 
 
+
+
+
+static async Task EnsureTwoFactorSchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                ALTER TABLE "Users"
+                    ADD COLUMN IF NOT EXISTS "TwoFactorEnabled" boolean NOT NULL DEFAULT false,
+                    ADD COLUMN IF NOT EXISTS "TwoFactorSecretEncrypted" character varying(1024) NULL,
+                    ADD COLUMN IF NOT EXISTS "TwoFactorPendingSecretEncrypted" character varying(1024) NULL,
+                    ADD COLUMN IF NOT EXISTS "TwoFactorPendingSecretExpiresAt" timestamp with time zone NULL,
+                    ADD COLUMN IF NOT EXISTS "TwoFactorEnabledAt" timestamp with time zone NULL,
+                    ADD COLUMN IF NOT EXISTS "TwoFactorDisabledAt" timestamp with time zone NULL;
+
+                CREATE TABLE IF NOT EXISTS "TwoFactorRecoveryCodes" (
+                    "Id" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "CodeHash" character varying(128) NOT NULL,
+                    "CreatedAt" timestamp with time zone NOT NULL,
+                    "UsedAt" timestamp with time zone NULL,
+                    "UsedIpAddress" character varying(64) NULL,
+                    CONSTRAINT "PK_TwoFactorRecoveryCodes" PRIMARY KEY ("Id"),
+                    CONSTRAINT "FK_TwoFactorRecoveryCodes_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS "TwoFactorLoginChallenges" (
+                    "Id" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "ChallengeTokenHash" character varying(128) NOT NULL,
+                    "RememberMe" boolean NOT NULL,
+                    "DeviceName" character varying(128) NOT NULL DEFAULT '',
+                    "Platform" character varying(64) NOT NULL DEFAULT '',
+                    "ClientVersion" character varying(32) NOT NULL DEFAULT '',
+                    "IpAddress" character varying(64) NOT NULL DEFAULT '',
+                    "UserAgent" character varying(256) NOT NULL DEFAULT '',
+                    "CreatedAt" timestamp with time zone NOT NULL,
+                    "ExpiresAt" timestamp with time zone NOT NULL,
+                    "UsedAt" timestamp with time zone NULL,
+                    CONSTRAINT "PK_TwoFactorLoginChallenges" PRIMARY KEY ("Id"),
+                    CONSTRAINT "FK_TwoFactorLoginChallenges_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_TwoFactorLoginChallenges_ChallengeTokenHash" ON "TwoFactorLoginChallenges" ("ChallengeTokenHash");
+                CREATE INDEX IF NOT EXISTS "IX_TwoFactorLoginChallenges_UserId_ExpiresAt_UsedAt" ON "TwoFactorLoginChallenges" ("UserId", "ExpiresAt", "UsedAt");
+                CREATE INDEX IF NOT EXISTS "IX_TwoFactorRecoveryCodes_UserId_UsedAt" ON "TwoFactorRecoveryCodes" ("UserId", "UsedAt");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            var userColumns = new Dictionary<string, string>
+            {
+                ["TwoFactorEnabled"] = "INTEGER NOT NULL DEFAULT 0",
+                ["TwoFactorSecretEncrypted"] = "TEXT NULL",
+                ["TwoFactorPendingSecretEncrypted"] = "TEXT NULL",
+                ["TwoFactorPendingSecretExpiresAt"] = "TEXT NULL",
+                ["TwoFactorEnabledAt"] = "TEXT NULL",
+                ["TwoFactorDisabledAt"] = "TEXT NULL"
+            };
+
+            foreach (var (name, definition) in userColumns)
+            {
+                var existingSql = "SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('Users') WHERE name = '" + name + "'";
+                var existing = await db.Database.SqlQueryRaw<int>(existingSql).SingleAsync();
+                if (existing == 0)
+                    await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"Users\" ADD COLUMN \"" + name + "\" " + definition + ";");
+            }
+
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "TwoFactorRecoveryCodes" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_TwoFactorRecoveryCodes" PRIMARY KEY,
+                    "UserId" TEXT NOT NULL,
+                    "CodeHash" TEXT NOT NULL,
+                    "CreatedAt" TEXT NOT NULL,
+                    "UsedAt" TEXT NULL,
+                    "UsedIpAddress" TEXT NULL,
+                    CONSTRAINT "FK_TwoFactorRecoveryCodes_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS "TwoFactorLoginChallenges" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_TwoFactorLoginChallenges" PRIMARY KEY,
+                    "UserId" TEXT NOT NULL,
+                    "ChallengeTokenHash" TEXT NOT NULL,
+                    "RememberMe" INTEGER NOT NULL,
+                    "DeviceName" TEXT NOT NULL DEFAULT '',
+                    "Platform" TEXT NOT NULL DEFAULT '',
+                    "ClientVersion" TEXT NOT NULL DEFAULT '',
+                    "IpAddress" TEXT NOT NULL DEFAULT '',
+                    "UserAgent" TEXT NOT NULL DEFAULT '',
+                    "CreatedAt" TEXT NOT NULL,
+                    "ExpiresAt" TEXT NOT NULL,
+                    "UsedAt" TEXT NULL,
+                    CONSTRAINT "FK_TwoFactorLoginChallenges_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_TwoFactorLoginChallenges_ChallengeTokenHash" ON "TwoFactorLoginChallenges" ("ChallengeTokenHash");
+                CREATE INDEX IF NOT EXISTS "IX_TwoFactorLoginChallenges_UserId_ExpiresAt_UsedAt" ON "TwoFactorLoginChallenges" ("UserId", "ExpiresAt", "UsedAt");
+                CREATE INDEX IF NOT EXISTS "IX_TwoFactorRecoveryCodes_UserId_UsedAt" ON "TwoFactorRecoveryCodes" ("UserId", "UsedAt");
+                """);
+        }
+
+        logger.LogInformation("Two-factor authentication schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure two-factor authentication schema.");
+        throw;
+    }
+}
 
 
 static async Task EnsureUserActivitySchemaAsync(AppDbContext db, ILogger logger)

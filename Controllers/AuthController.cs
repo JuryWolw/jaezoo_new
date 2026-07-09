@@ -2,6 +2,7 @@
 using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Models.Security;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Services.Email;
 using JaeZoo.Server.Services.Security;
@@ -185,6 +186,36 @@ public class AuthController(
         user.SecurityStamp = string.IsNullOrWhiteSpace(user.SecurityStamp) ? UserIdentityService.NewSecurityStamp() : user.SecurityStamp;
         user.UpdatedAt = DateTime.UtcNow;
 
+        if (user.TwoFactorEnabled && !string.IsNullOrWhiteSpace(user.TwoFactorSecretEncrypted))
+        {
+            var challengeToken = TotpService.NewLoginChallengeToken();
+            var challenge = new TwoFactorLoginChallenge
+            {
+                Id = Guid.NewGuid(),
+                UserId = user.Id,
+                ChallengeTokenHash = TotpService.HashLoginChallengeToken(challengeToken),
+                RememberMe = r.RememberMe,
+                DeviceName = UserSessionService.CleanHeader(r.DeviceName, 128),
+                Platform = UserSessionService.CleanHeader(r.Platform, 64),
+                ClientVersion = UserSessionService.CleanHeader(r.ClientVersion, 32),
+                IpAddress = UserSessionService.GetRemoteIp(HttpContext),
+                UserAgent = UserSessionService.CleanHeader(Request.Headers.UserAgent.ToString(), 256),
+                CreatedAt = DateTime.UtcNow,
+                ExpiresAt = DateTime.UtcNow.AddMinutes(5)
+            };
+            db.TwoFactorLoginChallenges.Add(challenge);
+            await db.SaveChangesAsync(ct);
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginRequires2FA", "User", user.Id.ToString(), $"Password accepted. 2FA required. publicId={user.PublicId}", ct);
+
+            return StatusCode(428, new TwoFactorRequiredResponse(
+                "two_factor_required",
+                "Введите код из приложения-аутентификатора.",
+                challengeToken,
+                challenge.ExpiresAt,
+                user.PublicId,
+                UserIdentityService.GetPublicName(user)));
+        }
+
         var roles = await db.UserRoles
             .Where(role => role.UserId == user.Id && role.RevokedAt == null)
             .Select(role => role.Role)
@@ -221,6 +252,112 @@ public class AuthController(
         var accessExpiresAt = DateTime.UtcNow.AddMinutes(60);
         var token = tokens.Create(user, roles, session?.Id, accessExpiresAt);
         await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginSucceeded", "User", user.Id.ToString(), $"Login succeeded. rememberMe={r.RememberMe}; sessionId={session?.Id.ToString() ?? "none"}; publicId={user.PublicId}", ct);
+        return new TokenResponse(
+            token,
+            ToUserDto(user),
+            roles.Select(role => role.ToString()).ToList(),
+            refreshToken,
+            session?.Id,
+            accessExpiresAt,
+            refreshExpiresAt);
+    }
+
+
+    [HttpPost("login/2fa")]
+    public async Task<ActionResult<TokenResponse>> LoginWithTwoFactor([FromBody] TwoFactorLoginRequest r, CancellationToken ct)
+    {
+        var tokenValue = (r.ChallengeToken ?? string.Empty).Trim();
+        var code = (r.Code ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(tokenValue) || string.IsNullOrWhiteSpace(code))
+            return Unauthorized("Введите код двухфакторной защиты.");
+
+        var tokenHash = TotpService.HashLoginChallengeToken(tokenValue);
+        var now = DateTime.UtcNow;
+        var challenge = await db.TwoFactorLoginChallenges
+            .Include(c => c.User)
+            .FirstOrDefaultAsync(c => c.ChallengeTokenHash == tokenHash, ct);
+
+        if (challenge is null || challenge.User is null || challenge.UsedAt != null || challenge.ExpiresAt <= now)
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FAFailed", "2FA", SecurityAuditService.HashTarget(tokenValue), "2FA challenge invalid or expired.", ct);
+            return Unauthorized("Код входа истёк. Войдите заново.");
+        }
+
+        var user = challenge.User;
+        if (!user.TwoFactorEnabled || string.IsNullOrWhiteSpace(user.TwoFactorSecretEncrypted) || user.IsDisabled)
+            return Unauthorized("Двухфакторная защита недоступна.");
+
+        var verified = false;
+        var usedRecoveryCode = false;
+        var normalizedOtp = TotpService.NormalizeCode(code);
+        if (normalizedOtp.Length == 6 && normalizedOtp.All(char.IsDigit))
+        {
+            var secret = IdentityDataProtector.UnprotectSecret(user.TwoFactorSecretEncrypted);
+            verified = TotpService.VerifyTotp(secret, normalizedOtp);
+        }
+
+        if (!verified)
+        {
+            var recovery = TotpService.NormalizeRecoveryCode(code);
+            if (recovery.Length >= 8)
+            {
+                var recoveryHash = TotpService.HashRecoveryCode(user.Id, recovery);
+                var recoveryRow = await db.TwoFactorRecoveryCodes.FirstOrDefaultAsync(c => c.UserId == user.Id && c.CodeHash == recoveryHash && c.UsedAt == null, ct);
+                if (recoveryRow != null)
+                {
+                    recoveryRow.UsedAt = now;
+                    recoveryRow.UsedIpAddress = UserSessionService.GetRemoteIp(HttpContext);
+                    verified = true;
+                    usedRecoveryCode = true;
+                }
+            }
+        }
+
+        if (!verified)
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FAFailed", "User", user.Id.ToString(), $"Wrong 2FA code. publicId={user.PublicId}", ct);
+            return Unauthorized("Неверный код двухфакторной защиты.");
+        }
+
+        challenge.UsedAt = now;
+        user.UpdatedAt = now;
+
+        var roles = await db.UserRoles
+            .Where(role => role.UserId == user.Id && role.RevokedAt == null)
+            .Select(role => role.Role)
+            .ToListAsync(ct);
+
+        UserSession? session = null;
+        string? refreshToken = null;
+        DateTime? refreshExpiresAt = null;
+
+        if (challenge.RememberMe)
+        {
+            refreshToken = UserSessionService.NewRefreshToken();
+            refreshExpiresAt = now.AddDays(30);
+            session = new UserSession
+            {
+                Id = Guid.NewGuid(),
+                UserId = user.Id,
+                RefreshTokenHash = UserSessionService.HashRefreshToken(refreshToken),
+                CreatedAt = now,
+                ExpiresAt = refreshExpiresAt.Value,
+                LastSeenAt = now,
+                IpAddress = UserSessionService.GetRemoteIp(HttpContext),
+                UserAgent = UserSessionService.CleanHeader(Request.Headers.UserAgent.ToString(), 256),
+                DeviceName = challenge.DeviceName,
+                Platform = challenge.Platform,
+                ClientVersion = challenge.ClientVersion,
+                IsTrusted = false
+            };
+            db.UserSessions.Add(session);
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        var accessExpiresAt = now.AddMinutes(60);
+        var token = tokens.Create(user, roles, session?.Id, accessExpiresAt);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FASucceeded", "User", user.Id.ToString(), $"2FA login succeeded. rememberMe={challenge.RememberMe}; recovery={usedRecoveryCode}; sessionId={session?.Id.ToString() ?? "none"}; publicId={user.PublicId}", ct);
         return new TokenResponse(
             token,
             ToUserDto(user),

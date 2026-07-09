@@ -1,4 +1,4 @@
-namespace JaeZoo.Server.Models;
+﻿namespace JaeZoo.Server.Models;
 
 public sealed class RegisterRequest
 {
@@ -558,3 +558,39 @@ public sealed record AdminFileThreatDto(
 public sealed record AdminFileThreatsPageDto(int Total, IReadOnlyList<AdminFileThreatDto> Items);
 
 public sealed record AdminFileThreatActionRequest(string? Reason = null);
+
+
+public sealed record TwoFactorStatusDto(
+    bool Enabled,
+    DateTime? EnabledAt,
+    int RecoveryCodesRemaining
+);
+
+public sealed record TwoFactorSetupResponse(
+    string ManualKey,
+    string OtpAuthUri,
+    DateTime ExpiresAtUtc
+);
+
+public sealed record TwoFactorEnableRequest(string Code);
+public sealed record TwoFactorDisableRequest(string Password, string Code);
+public sealed record TwoFactorRegenerateRecoveryCodesRequest(string Password, string Code);
+
+public sealed record TwoFactorEnableResponse(
+    bool Enabled,
+    IReadOnlyList<string> RecoveryCodes
+);
+
+public sealed record TwoFactorRequiredResponse(
+    string Code,
+    string Message,
+    string ChallengeToken,
+    DateTime ExpiresAtUtc,
+    string PublicId,
+    string DisplayName
+);
+
+public sealed record TwoFactorLoginRequest(
+    string ChallengeToken,
+    string Code
+);

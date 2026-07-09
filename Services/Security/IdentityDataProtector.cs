@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
@@ -40,6 +40,14 @@ public static class IdentityDataProtector
 
     public static string ProtectLogin(string login) => Protect(NormalizeVisible(login));
     public static string ProtectEmail(string email) => Protect(NormalizeVisible(email));
+
+    public static string ProtectSecret(string secret) => Protect(NormalizeVisible(secret));
+
+    public static string UnprotectSecret(string? encryptedSecret)
+    {
+        EnsureConfigured();
+        return TryUnprotect(encryptedSecret);
+    }
 
     public static string UnprotectLogin(User user)
     {
