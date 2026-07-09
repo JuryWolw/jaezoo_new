@@ -15,7 +15,7 @@ public static class E2eeEnvelopeInspector
     {
         if (string.IsNullOrWhiteSpace(text)) return new E2eeEnvelopeInfo(0, null);
         if (text.StartsWith(DirectPrefixV3, StringComparison.Ordinal))
-            return new E2eeEnvelopeInfo(3, IsDirectDoubleRatchetV32(text) ? "direct-double-ratchet-v3.2" : "direct-ratchet-v3");
+            return new E2eeEnvelopeInfo(3, DetectDirectRatchetProtocol(text));
         if (text.StartsWith(DirectPrefixV2, StringComparison.Ordinal)) return new E2eeEnvelopeInfo(2, "direct-static-ecdh-v2");
         if (text.StartsWith(DirectPrefixV1, StringComparison.Ordinal)) return new E2eeEnvelopeInfo(1, "direct-static-ecdh-v1");
         return new E2eeEnvelopeInfo(0, null);
@@ -28,17 +28,20 @@ public static class E2eeEnvelopeInspector
         return new E2eeEnvelopeInfo(0, null);
     }
 
-    private static bool IsDirectDoubleRatchetV32(string text)
+    private static string DetectDirectRatchetProtocol(string text)
     {
         try
         {
             var raw = text[DirectPrefixV3.Length..];
             var json = Encoding.UTF8.GetString(Convert.FromBase64String(raw));
-            return json.Contains("double-ratchet-v3.2", StringComparison.OrdinalIgnoreCase);
+            if (json.Contains("double-ratchet-v3.3", StringComparison.OrdinalIgnoreCase)) return "direct-double-ratchet-v3.3";
+            if (json.Contains("double-ratchet-v3.2", StringComparison.OrdinalIgnoreCase)) return "direct-double-ratchet-v3.2";
+            if (json.Contains("X3DH", StringComparison.OrdinalIgnoreCase)) return "direct-x3dh-ratchet-v3.1";
+            return "direct-ratchet-v3";
         }
         catch
         {
-            return false;
+            return "direct-ratchet-v3";
         }
     }
 }
