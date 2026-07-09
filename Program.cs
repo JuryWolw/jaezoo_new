@@ -596,6 +596,13 @@ static async Task EnsureE2eeKeySchemaAsync(AppDbContext db, ILogger logger)
                     "IsTrusted" boolean NOT NULL DEFAULT true,
                     "RevokedAt" timestamp with time zone NULL,
                     "LastSeenAt" timestamp with time zone NULL,
+                    "DeviceKeyVersion" integer NOT NULL DEFAULT 2,
+                    "TrustState" integer NOT NULL DEFAULT 1,
+                    "RequiresUserVerification" boolean NOT NULL DEFAULT false,
+                    "UserVerifiedAt" timestamp with time zone NULL,
+                    "LastIpAddress" character varying(64) NULL,
+                    "Platform" character varying(64) NULL,
+                    "ClientVersion" character varying(32) NULL,
                     "CreatedAt" timestamp with time zone NOT NULL,
                     "UpdatedAt" timestamp with time zone NOT NULL,
                     CONSTRAINT "PK_UserE2eeKeys" PRIMARY KEY ("Id")
@@ -606,6 +613,13 @@ static async Task EnsureE2eeKeySchemaAsync(AppDbContext db, ILogger logger)
                 ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "IsTrusted" boolean NOT NULL DEFAULT true;
                 ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "RevokedAt" timestamp with time zone NULL;
                 ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "LastSeenAt" timestamp with time zone NULL;
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "DeviceKeyVersion" integer NOT NULL DEFAULT 2;
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "TrustState" integer NOT NULL DEFAULT 1;
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "RequiresUserVerification" boolean NOT NULL DEFAULT false;
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "UserVerifiedAt" timestamp with time zone NULL;
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "LastIpAddress" character varying(64) NULL;
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "Platform" character varying(64) NULL;
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "ClientVersion" character varying(32) NULL;
 
                 UPDATE "UserE2eeKeys" SET "DeviceId" = 'legacy' WHERE "DeviceId" IS NULL OR "DeviceId" = '';
 
@@ -641,6 +655,13 @@ static async Task EnsureE2eeKeySchemaAsync(AppDbContext db, ILogger logger)
                     "IsTrusted" INTEGER NOT NULL DEFAULT 1,
                     "RevokedAt" TEXT NULL,
                     "LastSeenAt" TEXT NULL,
+                    "DeviceKeyVersion" INTEGER NOT NULL DEFAULT 2,
+                    "TrustState" INTEGER NOT NULL DEFAULT 1,
+                    "RequiresUserVerification" INTEGER NOT NULL DEFAULT 0,
+                    "UserVerifiedAt" TEXT NULL,
+                    "LastIpAddress" TEXT NULL,
+                    "Platform" TEXT NULL,
+                    "ClientVersion" TEXT NULL,
                     "CreatedAt" TEXT NOT NULL,
                     "UpdatedAt" TEXT NOT NULL,
                     CONSTRAINT "FK_UserE2eeKeys_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
@@ -650,6 +671,25 @@ static async Task EnsureE2eeKeySchemaAsync(AppDbContext db, ILogger logger)
                 CREATE UNIQUE INDEX IF NOT EXISTS "IX_UserE2eeKeys_UserId_DeviceId" ON "UserE2eeKeys" ("UserId", "DeviceId");
                 CREATE INDEX IF NOT EXISTS "IX_UserE2eeKeys_Fingerprint" ON "UserE2eeKeys" ("Fingerprint");
                 """);
+
+            var deviceColumns = new Dictionary<string, string>
+            {
+                ["DeviceKeyVersion"] = "INTEGER NOT NULL DEFAULT 2",
+                ["TrustState"] = "INTEGER NOT NULL DEFAULT 1",
+                ["RequiresUserVerification"] = "INTEGER NOT NULL DEFAULT 0",
+                ["UserVerifiedAt"] = "TEXT NULL",
+                ["LastIpAddress"] = "TEXT NULL",
+                ["Platform"] = "TEXT NULL",
+                ["ClientVersion"] = "TEXT NULL"
+            };
+
+            foreach (var (name, definition) in deviceColumns)
+            {
+                var existingSql = "SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('UserE2eeKeys') WHERE name = '" + name + "'";
+                var existing = await db.Database.SqlQueryRaw<int>(existingSql).SingleAsync();
+                if (existing == 0)
+                    await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"UserE2eeKeys\" ADD COLUMN \"" + name + "\" " + definition + ";");
+            }
         }
 
         logger.LogInformation("E2EE device key schema ensured.");
@@ -673,7 +713,54 @@ static async Task EnsureMessageEncryptionSchemaAsync(AppDbContext db, ILogger lo
 
                 ALTER TABLE "GroupMessages"
                     ALTER COLUMN "Text" TYPE text;
+
+                ALTER TABLE "DirectMessages"
+                    ADD COLUMN IF NOT EXISTS "E2eeEnvelopeVersion" integer NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS "E2eeProtocol" character varying(64) NULL;
+
+                ALTER TABLE "GroupMessages"
+                    ADD COLUMN IF NOT EXISTS "E2eeEnvelopeVersion" integer NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS "E2eeProtocol" character varying(64) NULL;
+
+                CREATE INDEX IF NOT EXISTS "IX_DirectMessages_E2eeEnvelopeVersion"
+                    ON "DirectMessages" ("E2eeEnvelopeVersion");
+
+                CREATE INDEX IF NOT EXISTS "IX_GroupMessages_E2eeEnvelopeVersion"
+                    ON "GroupMessages" ("E2eeEnvelopeVersion");
                 """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            var directColumns = new Dictionary<string, string>
+            {
+                ["E2eeEnvelopeVersion"] = "INTEGER NOT NULL DEFAULT 0",
+                ["E2eeProtocol"] = "TEXT NULL"
+            };
+
+            foreach (var (name, definition) in directColumns)
+            {
+                var existingSql = "SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('DirectMessages') WHERE name = '" + name + "'";
+                var existing = await db.Database.SqlQueryRaw<int>(existingSql).SingleAsync();
+                if (existing == 0)
+                    await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"DirectMessages\" ADD COLUMN \"" + name + "\" " + definition + ";");
+            }
+
+            var groupColumns = new Dictionary<string, string>
+            {
+                ["E2eeEnvelopeVersion"] = "INTEGER NOT NULL DEFAULT 0",
+                ["E2eeProtocol"] = "TEXT NULL"
+            };
+
+            foreach (var (name, definition) in groupColumns)
+            {
+                var existingSql = "SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('GroupMessages') WHERE name = '" + name + "'";
+                var existing = await db.Database.SqlQueryRaw<int>(existingSql).SingleAsync();
+                if (existing == 0)
+                    await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"GroupMessages\" ADD COLUMN \"" + name + "\" " + definition + ";");
+            }
+
+            await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_DirectMessages_E2eeEnvelopeVersion\" ON \"DirectMessages\" (\"E2eeEnvelopeVersion\");");
+            await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_GroupMessages_E2eeEnvelopeVersion\" ON \"GroupMessages\" (\"E2eeEnvelopeVersion\");");
         }
 
         logger.LogInformation("Message encryption schema ensured.");
@@ -1056,6 +1143,10 @@ static async Task EnsureGroupE2eeSecuritySchemaAsync(AppDbContext db, ILogger lo
                 ALTER TABLE "GroupMessages"
                     ADD COLUMN IF NOT EXISTS "GroupSecurityEpoch" integer NOT NULL DEFAULT 1;
 
+                ALTER TABLE "GroupChats"
+                    ADD COLUMN IF NOT EXISTS "HistoryPolicy" integer NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS "HistoryPolicyChangedAt" timestamptz NULL;
+
                 UPDATE "GroupChats"
                 SET "SecurityEpoch" = 1
                 WHERE "SecurityEpoch" IS NULL OR "SecurityEpoch" < 1;
@@ -1096,6 +1187,22 @@ static async Task EnsureGroupE2eeSecuritySchemaAsync(AppDbContext db, ILogger lo
             {
                 await db.Database.ExecuteSqlRawAsync("""
                     ALTER TABLE "GroupMessages" ADD COLUMN "GroupSecurityEpoch" INTEGER NOT NULL DEFAULT 1;
+                    """);
+            }
+            catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase)) { }
+
+            try
+            {
+                await db.Database.ExecuteSqlRawAsync("""
+                    ALTER TABLE "GroupChats" ADD COLUMN "HistoryPolicy" INTEGER NOT NULL DEFAULT 0;
+                    """);
+            }
+            catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase)) { }
+
+            try
+            {
+                await db.Database.ExecuteSqlRawAsync("""
+                    ALTER TABLE "GroupChats" ADD COLUMN "HistoryPolicyChangedAt" TEXT NULL;
                     """);
             }
             catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase)) { }

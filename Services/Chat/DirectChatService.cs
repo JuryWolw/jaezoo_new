@@ -1,6 +1,7 @@
 ﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services.Storage;
+using JaeZoo.Server.Services.Security;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Services.Chat;
@@ -351,6 +352,8 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
             SenderId = senderId,
             Text = text,
             SentAt = now,
+            E2eeEnvelopeVersion = E2eeEnvelopeInspector.InspectDirect(text).Version,
+            E2eeProtocol = E2eeEnvelopeInspector.InspectDirect(text).Protocol,
             Kind = kind,
             SystemKey = string.IsNullOrWhiteSpace(systemKey) ? null : systemKey.Trim(),
             ForwardedFromMessageId = forwardedFromMessageId

@@ -30,6 +30,17 @@ public class GroupChat
 
     public DateTime SecurityEpochChangedAt { get; set; } = DateTime.UtcNow;
 
+    /// <summary>
+    /// Future E2EE history policy.
+    /// 0 = new members read only future messages.
+    /// 1 = owner/admin can share encrypted old history keys.
+    /// 2 = history sharing disabled for this group.
+    /// Current patch only stores the policy and does not change access logic yet.
+    /// </summary>
+    public int HistoryPolicy { get; set; } = 0;
+
+    public DateTime? HistoryPolicyChangedAt { get; set; }
+
     [MaxLength(512)]
     public string? AvatarUrl { get; set; }
 

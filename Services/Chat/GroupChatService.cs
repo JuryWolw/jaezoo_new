@@ -1,6 +1,7 @@
 ﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
+using JaeZoo.Server.Services.Security;
 using Microsoft.EntityFrameworkCore;
 using System.Text;
 using System.Text.Json;
@@ -10,7 +11,6 @@ namespace JaeZoo.Server.Services.Chat;
 public sealed class GroupChatService(AppDbContext db, DirectChatService directChat)
 {
     public const int MaxGroupMembers = 50;
-    private const string GroupE2eePrefixV1 = "jze2eeg1:";
 
     public static void AdvanceSecurityEpoch(GroupChat chat, DateTime now)
     {
@@ -20,7 +20,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
     }
 
     private static bool IsGroupE2eePayload(string? text) =>
-        !string.IsNullOrWhiteSpace(text) && text.StartsWith(GroupE2eePrefixV1, StringComparison.Ordinal);
+        !string.IsNullOrWhiteSpace(text) && text.StartsWith(E2eeEnvelopeInspector.GroupPrefixV1, StringComparison.Ordinal);
 
     private static void ValidateGroupE2eePayload(Guid groupId, int currentEpoch, string? text)
     {
@@ -29,7 +29,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
         try
         {
-            var base64 = text![GroupE2eePrefixV1.Length..];
+            var base64 = text![E2eeEnvelopeInspector.GroupPrefixV1.Length..];
             var json = Encoding.UTF8.GetString(Convert.FromBase64String(base64));
             var payload = JsonSerializer.Deserialize<GroupE2eeServerEnvelope>(json);
             if (payload is null)
@@ -764,6 +764,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             SenderId = senderId,
             Text = text,
             SentAt = now,
+            E2eeEnvelopeVersion = E2eeEnvelopeInspector.InspectGroup(text).Version,
+            E2eeProtocol = E2eeEnvelopeInspector.InspectGroup(text).Protocol,
             GroupSecurityEpoch = Math.Max(1, chat.SecurityEpoch),
             Kind = kind,
             SystemKey = string.IsNullOrWhiteSpace(systemKey) ? null : systemKey.Trim(),

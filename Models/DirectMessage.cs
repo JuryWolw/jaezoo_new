@@ -11,6 +11,17 @@ public class DirectMessage
 
     public string Text { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Server-side marker of the client E2EE envelope version.
+    /// 0 means plaintext or legacy server-side protected text, 1 means direct v1,
+    /// 2 means current multi-device direct envelope.
+    /// The server never decrypts the payload. This marker is only for safe migration.
+    /// </summary>
+    public int E2eeEnvelopeVersion { get; set; } = 0;
+
+    [MaxLength(64)]
+    public string? E2eeProtocol { get; set; }
+
     public DateTime SentAt { get; set; } = DateTime.UtcNow;
 
     public DirectMessageKind Kind { get; set; } = DirectMessageKind.User;

@@ -81,9 +81,29 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .Property(g => g.SecurityEpochChangedAt)
             .HasDefaultValueSql("CURRENT_TIMESTAMP");
 
+        b.Entity<GroupChat>()
+            .Property(g => g.HistoryPolicy)
+            .HasDefaultValue(0);
+
         b.Entity<GroupMessage>()
             .Property(m => m.GroupSecurityEpoch)
             .HasDefaultValue(1);
+
+        b.Entity<DirectMessage>()
+            .Property(m => m.E2eeEnvelopeVersion)
+            .HasDefaultValue(0);
+
+        b.Entity<DirectMessage>()
+            .Property(m => m.E2eeProtocol)
+            .HasMaxLength(64);
+
+        b.Entity<GroupMessage>()
+            .Property(m => m.E2eeEnvelopeVersion)
+            .HasDefaultValue(0);
+
+        b.Entity<GroupMessage>()
+            .Property(m => m.E2eeProtocol)
+            .HasMaxLength(64);
 
         b.Entity<GroupMessage>()
             .HasIndex(m => new { m.GroupChatId, m.GroupSecurityEpoch, m.SentAt });
@@ -107,6 +127,30 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<UserE2eeKey>()
             .Property(k => k.DeviceId)
             .HasMaxLength(64);
+
+        b.Entity<UserE2eeKey>()
+            .Property(k => k.LastIpAddress)
+            .HasMaxLength(64);
+
+        b.Entity<UserE2eeKey>()
+            .Property(k => k.Platform)
+            .HasMaxLength(64);
+
+        b.Entity<UserE2eeKey>()
+            .Property(k => k.ClientVersion)
+            .HasMaxLength(32);
+
+        b.Entity<UserE2eeKey>()
+            .Property(k => k.DeviceKeyVersion)
+            .HasDefaultValue(2);
+
+        b.Entity<UserE2eeKey>()
+            .Property(k => k.TrustState)
+            .HasDefaultValue(1);
+
+        b.Entity<UserE2eeKey>()
+            .Property(k => k.RequiresUserVerification)
+            .HasDefaultValue(false);
 
         b.Entity<UserE2eeKey>()
             .HasIndex(k => new { k.UserId, k.DeviceId })
