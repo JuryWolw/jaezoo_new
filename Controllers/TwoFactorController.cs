@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Security;
@@ -27,8 +27,7 @@ public sealed class TwoFactorController(
         var user = await db.Users.FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null) return Unauthorized();
 
-        var remaining = await db.TwoFactorRecoveryCodes.CountAsync(c => c.UserId == uid && c.UsedAt == null, ct);
-        return new TwoFactorStatusDto(user.TwoFactorEnabled, user.TwoFactorEnabledAt, remaining);
+        return new TwoFactorStatusDto(user.TwoFactorEnabled, user.TwoFactorEnabledAt, 0);
     }
 
     [HttpPost("setup")]
@@ -78,23 +77,12 @@ public sealed class TwoFactorController(
         user.UpdatedAt = now;
 
         var oldCodes = await db.TwoFactorRecoveryCodes.Where(c => c.UserId == uid).ToListAsync(ct);
-        db.TwoFactorRecoveryCodes.RemoveRange(oldCodes);
-
-        var codes = TotpService.GenerateRecoveryCodes();
-        foreach (var code in codes)
-        {
-            db.TwoFactorRecoveryCodes.Add(new TwoFactorRecoveryCode
-            {
-                Id = Guid.NewGuid(),
-                UserId = uid,
-                CodeHash = TotpService.HashRecoveryCode(uid, code),
-                CreatedAt = now
-            });
-        }
+        if (oldCodes.Count > 0)
+            db.TwoFactorRecoveryCodes.RemoveRange(oldCodes);
 
         await db.SaveChangesAsync(ct);
-        await securityAudit.TryWriteAsync(User, HttpContext, "Security.2FAEnabled", "User", user.Id.ToString(), $"2FA enabled. publicId={user.PublicId}", ct);
-        return new TwoFactorEnableResponse(true, codes);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.2FAEnabled", "User", user.Id.ToString(), $"2FA enabled without separate 2FA recovery codes. publicId={user.PublicId}", ct);
+        return new TwoFactorEnableResponse(true, Array.Empty<string>());
     }
 
     [HttpPost("disable")]
@@ -109,8 +97,8 @@ public sealed class TwoFactorController(
         if (_hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password ?? string.Empty) == PasswordVerificationResult.Failed)
             return Unauthorized("Неверный пароль.");
 
-        if (!await VerifyCodeOrRecoveryAsync(user, request.Code, consumeRecoveryCode: true, ct))
-            return BadRequest("Неверный код двухфакторной защиты.");
+        if (!VerifyAuthenticatorCode(user, request.Code))
+            return BadRequest("Неверный код из приложения-аутентификатора.");
 
         user.TwoFactorEnabled = false;
         user.TwoFactorSecretEncrypted = null;
@@ -128,71 +116,20 @@ public sealed class TwoFactorController(
     }
 
     [HttpPost("recovery-codes/regenerate")]
-    public async Task<ActionResult<TwoFactorEnableResponse>> RegenerateRecoveryCodes([FromBody] TwoFactorRegenerateRecoveryCodesRequest request, CancellationToken ct)
-    {
-        var uid = GetCurrentUserId();
-        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == uid, ct);
-        if (user == null) return Unauthorized();
-        if (!user.TwoFactorEnabled)
-            return BadRequest("Сначала включите двухфакторную защиту.");
+    public ActionResult<TwoFactorEnableResponse> RegenerateRecoveryCodes([FromBody] TwoFactorRegenerateRecoveryCodesRequest request)
+        => StatusCode(410, "Отдельные recovery-коды для входа отключены. Для истории используется один Recovery ключ, а вход защищается приложением-аутентификатором или почтой.");
 
-        if (_hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password ?? string.Empty) == PasswordVerificationResult.Failed)
-            return Unauthorized("Неверный пароль.");
-
-        if (!await VerifyCodeOrRecoveryAsync(user, request.Code, consumeRecoveryCode: true, ct))
-            return BadRequest("Неверный код двухфакторной защиты.");
-
-        var oldCodes = await db.TwoFactorRecoveryCodes.Where(c => c.UserId == uid).ToListAsync(ct);
-        db.TwoFactorRecoveryCodes.RemoveRange(oldCodes);
-
-        var now = DateTime.UtcNow;
-        var codes = TotpService.GenerateRecoveryCodes();
-        foreach (var code in codes)
-        {
-            db.TwoFactorRecoveryCodes.Add(new TwoFactorRecoveryCode
-            {
-                Id = Guid.NewGuid(),
-                UserId = uid,
-                CodeHash = TotpService.HashRecoveryCode(uid, code),
-                CreatedAt = now
-            });
-        }
-
-        await db.SaveChangesAsync(ct);
-        await securityAudit.TryWriteAsync(User, HttpContext, "Security.2FARecoveryCodesRegenerated", "User", user.Id.ToString(), $"2FA recovery codes regenerated. publicId={user.PublicId}", ct);
-        return new TwoFactorEnableResponse(true, codes);
-    }
-
-    private async Task<bool> VerifyCodeOrRecoveryAsync(User user, string? code, bool consumeRecoveryCode, CancellationToken ct)
+    private bool VerifyAuthenticatorCode(User user, string? code)
     {
         if (!user.TwoFactorEnabled || string.IsNullOrWhiteSpace(user.TwoFactorSecretEncrypted))
             return false;
 
         var normalized = TotpService.NormalizeCode(code);
-        if (normalized.Length == 6 && normalized.All(char.IsDigit))
-        {
-            var secret = IdentityDataProtector.UnprotectSecret(user.TwoFactorSecretEncrypted);
-            if (TotpService.VerifyTotp(secret, normalized))
-                return true;
-        }
+        if (normalized.Length != 6 || !normalized.All(char.IsDigit))
+            return false;
 
-        var recovery = TotpService.NormalizeRecoveryCode(code);
-        if (recovery.Length >= 8)
-        {
-            var hash = TotpService.HashRecoveryCode(user.Id, recovery);
-            var row = await db.TwoFactorRecoveryCodes.FirstOrDefaultAsync(c => c.UserId == user.Id && c.CodeHash == hash && c.UsedAt == null, ct);
-            if (row != null)
-            {
-                if (consumeRecoveryCode)
-                {
-                    row.UsedAt = DateTime.UtcNow;
-                    row.UsedIpAddress = UserSessionService.GetRemoteIp(HttpContext);
-                }
-                return true;
-            }
-        }
-
-        return false;
+        var secret = IdentityDataProtector.UnprotectSecret(user.TwoFactorSecretEncrypted);
+        return TotpService.VerifyTotp(secret, normalized);
     }
 
     private Guid GetCurrentUserId()

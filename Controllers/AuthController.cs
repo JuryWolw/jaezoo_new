@@ -302,9 +302,9 @@ public class AuthController(
         if (!user.TwoFactorEnabled || string.IsNullOrWhiteSpace(user.TwoFactorSecretEncrypted) || user.IsDisabled)
             return Unauthorized("Двухфакторная защита недоступна.");
 
-        var verified = false;
-        var usedRecoveryCode = false;
         var normalizedOtp = TotpService.NormalizeCode(code);
+        var verified = false;
+        const bool usedRecoveryCode = false;
         if (normalizedOtp.Length == 6 && normalizedOtp.All(char.IsDigit))
         {
             var secret = IdentityDataProtector.UnprotectSecret(user.TwoFactorSecretEncrypted);
@@ -313,25 +313,8 @@ public class AuthController(
 
         if (!verified)
         {
-            var recovery = TotpService.NormalizeRecoveryCode(code);
-            if (recovery.Length >= 8)
-            {
-                var recoveryHash = TotpService.HashRecoveryCode(user.Id, recovery);
-                var recoveryRow = await db.TwoFactorRecoveryCodes.FirstOrDefaultAsync(c => c.UserId == user.Id && c.CodeHash == recoveryHash && c.UsedAt == null, ct);
-                if (recoveryRow != null)
-                {
-                    recoveryRow.UsedAt = now;
-                    recoveryRow.UsedIpAddress = UserSessionService.GetRemoteIp(HttpContext);
-                    verified = true;
-                    usedRecoveryCode = true;
-                }
-            }
-        }
-
-        if (!verified)
-        {
             await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FAFailed", "User", user.Id.ToString(), $"Wrong 2FA code. publicId={user.PublicId}", ct);
-            return Unauthorized("Неверный код двухфакторной защиты.");
+            return Unauthorized("Неверный код из приложения-аутентификатора.");
         }
 
         challenge.UsedAt = now;
@@ -385,7 +368,7 @@ public class AuthController(
 
         var accessExpiresAt = now.AddMinutes(60);
         var token = tokens.Create(user, roles, session?.Id, accessExpiresAt);
-        await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FASucceeded", "User", user.Id.ToString(), $"2FA login succeeded. rememberMe={challenge.RememberMe}; recovery={usedRecoveryCode}; sessionId={session?.Id.ToString() ?? "none"}; knownDevice={knownDevice}; publicId={user.PublicId}", ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FASucceeded", "User", user.Id.ToString(), $"2FA login succeeded. rememberMe={challenge.RememberMe}; sessionId={session?.Id.ToString() ?? "none"}; knownDevice={knownDevice}; publicId={user.PublicId}", ct);
         return new TokenResponse(
             token,
             ToUserDto(user),
