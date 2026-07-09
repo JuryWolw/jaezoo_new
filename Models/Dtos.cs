@@ -1,4 +1,4 @@
-namespace JaeZoo.Server.Models;
+﻿namespace JaeZoo.Server.Models;
 
 public sealed class RegisterRequest
 {
@@ -237,6 +237,24 @@ public record UpsertE2eeDeviceKeyRequest(
 );
 
 public record RenameE2eeDeviceRequest(string? DeviceName);
+
+public record E2eeDeviceApprovalRequestDto(
+    Guid Id,
+    Guid UserId,
+    string DeviceId,
+    string Fingerprint,
+    string? DeviceName,
+    string? Platform,
+    string? ClientVersion,
+    string? LastIpAddress,
+    DateTime RequestedAt,
+    DateTime ExpiresAt,
+    string Status
+);
+
+public record E2eeDeviceApprovalDecisionRequest(string ApproverDeviceId, string? Reason = null);
+
+
 
 public record E2eeSignedPreKeyUploadDto(
     string KeyId,

@@ -1,12 +1,15 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
+using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Options;
+using JaeZoo.Server.Services.Chat;
 using JaeZoo.Server.Services.Voice;
 using JaeZoo.Server.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
 namespace JaeZoo.Server.Controllers;
@@ -16,6 +19,8 @@ namespace JaeZoo.Server.Controllers;
 public sealed class GroupVoiceController(
     GroupVoiceService voice,
     IHubContext<ChatHub> hub,
+    AppDbContext db,
+    GroupChatService groupChats,
     LiveKitTokenService liveKitTokens,
     IOptions<LiveKitOptions> liveKitOptions,
     ILogger<GroupVoiceController> logger) : ControllerBase
@@ -101,6 +106,16 @@ public sealed class GroupVoiceController(
             logger.LogInformation("GroupVoice join.ok group={GroupId} user={UserId} session={SessionId} room={Room} new={IsNew} participants={Participants}", groupId, userId, response.SessionId, response.RoomName, response.IsNewSession, response.State.ActiveParticipantCount);
             await BroadcastStateAsync(groupId, response.State, response.IsNewSession ? "GroupVoiceStarted" : "GroupVoiceJoined", ct);
             await BroadcastParticipantAsync(groupId, response.SessionId, userId, response.State, "GroupVoiceParticipantJoined", ct);
+            if (response.IsNewSession)
+            {
+                var userName = await GetPublicUserNameAsync(userId, ct);
+                await CreateAndBroadcastGroupVoiceSystemMessageAsync(
+                    groupId,
+                    userId,
+                    GroupChatService.SystemGroupCallStartedKey,
+                    $"Пользователь {userName} открыл групповой канал.",
+                    ct);
+            }
             return Ok(response);
         }
         catch (InvalidOperationException ex)
@@ -136,6 +151,7 @@ public sealed class GroupVoiceController(
         logger.LogInformation("GroupVoice leave.begin group={GroupId} user={UserId}", groupId, userId);
         try
         {
+            var sessionStartedAt = await GetActiveVoiceSessionStartedAtAsync(groupId, ct);
             var state = await voice.LeaveAsync(groupId, userId, ct);
             logger.LogInformation("GroupVoice leave.ok group={GroupId} user={UserId} active={Active} session={SessionId} participants={Participants}", groupId, userId, state.IsActive, state.SessionId, state.ActiveParticipantCount);
             if (state.IsActive)
@@ -146,6 +162,15 @@ public sealed class GroupVoiceController(
             else
             {
                 await BroadcastStateAsync(groupId, state, "GroupVoiceEnded", ct);
+                if (sessionStartedAt.HasValue)
+                {
+                    await CreateAndBroadcastGroupVoiceSystemMessageAsync(
+                        groupId,
+                        userId,
+                        GroupChatService.SystemGroupCallEndedKey,
+                        $"Групповой звонок закончился. Время звонка {FormatCallDuration(DateTime.UtcNow - sessionStartedAt.Value)}.",
+                        ct);
+                }
             }
 
             return Ok(state);
@@ -165,9 +190,19 @@ public sealed class GroupVoiceController(
         logger.LogInformation("GroupVoice end.begin group={GroupId} user={UserId}", groupId, userId);
         try
         {
+            var sessionStartedAt = await GetActiveVoiceSessionStartedAtAsync(groupId, ct);
             var state = await voice.EndAsync(groupId, userId, ct);
             logger.LogInformation("GroupVoice end.ok group={GroupId} user={UserId} active={Active} session={SessionId}", groupId, userId, state.IsActive, state.SessionId);
             await BroadcastStateAsync(groupId, state, "GroupVoiceEnded", ct);
+            if (sessionStartedAt.HasValue)
+            {
+                await CreateAndBroadcastGroupVoiceSystemMessageAsync(
+                    groupId,
+                    userId,
+                    GroupChatService.SystemGroupCallEndedKey,
+                    $"Групповой звонок закончился. Время звонка {FormatCallDuration(DateTime.UtcNow - sessionStartedAt.Value)}.",
+                    ct);
+            }
             return Ok(state);
         }
         catch (InvalidOperationException ex)
@@ -176,6 +211,55 @@ public sealed class GroupVoiceController(
             return NotFound(new { error = ex.Message });
         }
     }
+
+    private async Task<DateTime?> GetActiveVoiceSessionStartedAtAsync(Guid groupId, CancellationToken ct)
+    {
+        return await db.GroupVoiceSessions.AsNoTracking()
+            .Where(s => s.GroupChatId == groupId && s.State == GroupVoiceSessionState.Active)
+            .OrderByDescending(s => s.StartedAt)
+            .Select(s => (DateTime?)s.StartedAt)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    private async Task CreateAndBroadcastGroupVoiceSystemMessageAsync(Guid groupId, Guid senderId, string systemKey, string text, CancellationToken ct)
+    {
+        try
+        {
+            var created = await groupChats.CreateSystemMessageAsync(senderId, groupId, systemKey, text, ct);
+            var dto = await groupChats.GetMessageDtoAsync(groupId, created.message.Id, ct);
+            if (dto is null) return;
+
+            var payload = new GroupChatRealtimeMessageDto(groupId, dto);
+            var memberIds = await voice.GetGroupMemberIdsAsync(groupId, ct);
+            foreach (var memberId in memberIds)
+                await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatMessageCreated", payload, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to create group voice system message. group={GroupId} key={SystemKey}", groupId, systemKey);
+        }
+    }
+
+    private async Task<string> GetPublicUserNameAsync(Guid userId, CancellationToken ct)
+    {
+        var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Id == userId, ct);
+        return user is null ? "Пользователь" : JaeZoo.Server.Services.UserIdentityService.GetPublicName(user);
+    }
+
+    private static string FormatCallDuration(TimeSpan duration)
+    {
+        if (duration < TimeSpan.Zero) duration = TimeSpan.Zero;
+        var totalMinutes = Math.Max(1, (int)Math.Round(duration.TotalMinutes, MidpointRounding.AwayFromZero));
+        if (totalMinutes < 60)
+            return totalMinutes == 1 ? "1 минута" : $"{totalMinutes} минут";
+
+        var hours = totalMinutes / 60;
+        var minutes = totalMinutes % 60;
+        if (minutes == 0)
+            return hours == 1 ? "1 час" : $"{hours} часов";
+        return $"{hours} ч {minutes} мин";
+    }
+
 
     private async Task BroadcastStateAsync(Guid groupId, GroupVoiceStateDto state, string eventName, CancellationToken ct)
     {

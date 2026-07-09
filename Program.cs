@@ -395,6 +395,7 @@ using (var scope = app.Services.CreateScope())
     await EnsureMessageEncryptionSchemaAsync(db, logger);
     await EnsureIdentityPrivacySchemaAsync(db, logger);
     await EnsureE2eeKeySchemaAsync(db, logger);
+    await EnsureE2eeDeviceApprovalSchemaAsync(db, logger);
     await EnsureE2eePreKeySchemaAsync(db, logger);
     await EnsureE2eeBackupSchemaAsync(db, logger);
     await EnsureGroupE2eeSecuritySchemaAsync(db, logger);
@@ -921,6 +922,80 @@ static async Task EnsureE2eeKeySchemaAsync(AppDbContext db, ILogger logger)
 }
 
 
+
+
+static async Task EnsureE2eeDeviceApprovalSchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "E2eeDeviceApprovalRequests" (
+                    "Id" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "DeviceId" character varying(64) NOT NULL,
+                    "Fingerprint" character varying(128) NOT NULL,
+                    "DeviceName" character varying(128) NULL,
+                    "Platform" character varying(64) NULL,
+                    "ClientVersion" character varying(32) NULL,
+                    "LastIpAddress" character varying(64) NULL,
+                    "Status" character varying(32) NOT NULL DEFAULT 'Pending',
+                    "ApprovedByDeviceId" character varying(64) NULL,
+                    "Reason" character varying(256) NULL,
+                    "RequestedAt" timestamp with time zone NOT NULL DEFAULT now(),
+                    "ExpiresAt" timestamp with time zone NOT NULL,
+                    "ApprovedAt" timestamp with time zone NULL,
+                    "RejectedAt" timestamp with time zone NULL,
+                    CONSTRAINT "PK_E2eeDeviceApprovalRequests" PRIMARY KEY ("Id"),
+                    CONSTRAINT "FK_E2eeDeviceApprovalRequests_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS "IX_E2eeDeviceApprovalRequests_User_Status_Expires"
+                    ON "E2eeDeviceApprovalRequests" ("UserId", "Status", "ExpiresAt");
+
+                CREATE INDEX IF NOT EXISTS "IX_E2eeDeviceApprovalRequests_User_Device_Fingerprint_Status"
+                    ON "E2eeDeviceApprovalRequests" ("UserId", "DeviceId", "Fingerprint", "Status");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "E2eeDeviceApprovalRequests" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_E2eeDeviceApprovalRequests" PRIMARY KEY,
+                    "UserId" TEXT NOT NULL,
+                    "DeviceId" TEXT NOT NULL,
+                    "Fingerprint" TEXT NOT NULL,
+                    "DeviceName" TEXT NULL,
+                    "Platform" TEXT NULL,
+                    "ClientVersion" TEXT NULL,
+                    "LastIpAddress" TEXT NULL,
+                    "Status" TEXT NOT NULL DEFAULT 'Pending',
+                    "ApprovedByDeviceId" TEXT NULL,
+                    "Reason" TEXT NULL,
+                    "RequestedAt" TEXT NOT NULL,
+                    "ExpiresAt" TEXT NOT NULL,
+                    "ApprovedAt" TEXT NULL,
+                    "RejectedAt" TEXT NULL,
+                    CONSTRAINT "FK_E2eeDeviceApprovalRequests_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS "IX_E2eeDeviceApprovalRequests_User_Status_Expires"
+                    ON "E2eeDeviceApprovalRequests" ("UserId", "Status", "ExpiresAt");
+
+                CREATE INDEX IF NOT EXISTS "IX_E2eeDeviceApprovalRequests_User_Device_Fingerprint_Status"
+                    ON "E2eeDeviceApprovalRequests" ("UserId", "DeviceId", "Fingerprint", "Status");
+                """);
+        }
+
+        logger.LogInformation("E2EE device approval schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure E2EE device approval schema.");
+        throw;
+    }
+}
 
 static async Task EnsureE2eePreKeySchemaAsync(AppDbContext db, ILogger logger)
 {

@@ -40,6 +40,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<E2eeEncryptedBackup> E2eeEncryptedBackups => Set<E2eeEncryptedBackup>();
     public DbSet<E2eeSignedPreKey> E2eeSignedPreKeys => Set<E2eeSignedPreKey>();
     public DbSet<E2eeOneTimePreKey> E2eeOneTimePreKeys => Set<E2eeOneTimePreKey>();
+    public DbSet<E2eeDeviceApprovalRequest> E2eeDeviceApprovalRequests => Set<E2eeDeviceApprovalRequest>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -232,6 +233,54 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .HasOne(k => k.User)
             .WithMany()
             .HasForeignKey(k => k.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<E2eeDeviceApprovalRequest>()
+            .Property(r => r.DeviceId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeDeviceApprovalRequest>()
+            .Property(r => r.Fingerprint)
+            .HasMaxLength(128);
+
+        b.Entity<E2eeDeviceApprovalRequest>()
+            .Property(r => r.DeviceName)
+            .HasMaxLength(128);
+
+        b.Entity<E2eeDeviceApprovalRequest>()
+            .Property(r => r.Platform)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeDeviceApprovalRequest>()
+            .Property(r => r.ClientVersion)
+            .HasMaxLength(32);
+
+        b.Entity<E2eeDeviceApprovalRequest>()
+            .Property(r => r.LastIpAddress)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeDeviceApprovalRequest>()
+            .Property(r => r.Status)
+            .HasMaxLength(32);
+
+        b.Entity<E2eeDeviceApprovalRequest>()
+            .Property(r => r.ApprovedByDeviceId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeDeviceApprovalRequest>()
+            .Property(r => r.Reason)
+            .HasMaxLength(256);
+
+        b.Entity<E2eeDeviceApprovalRequest>()
+            .HasIndex(r => new { r.UserId, r.Status, r.ExpiresAt });
+
+        b.Entity<E2eeDeviceApprovalRequest>()
+            .HasIndex(r => new { r.UserId, r.DeviceId, r.Fingerprint, r.Status });
+
+        b.Entity<E2eeDeviceApprovalRequest>()
+            .HasOne(r => r.User)
+            .WithMany()
+            .HasForeignKey(r => r.UserId)
             .OnDelete(DeleteBehavior.Cascade);
 
 

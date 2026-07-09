@@ -1,4 +1,4 @@
-using JaeZoo.Server.Data;
+﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Hubs;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Files;
@@ -100,7 +100,9 @@ public class ChatController(
     private static bool IsKnownGroupSystemKey(string? systemKey) => systemKey is
         GroupChatService.SystemUserAddedKey or
         GroupChatService.SystemHistoryAvailableKey or
-        GroupChatService.SystemSecurityKeysUpdatedKey;
+        GroupChatService.SystemSecurityKeysUpdatedKey or
+        GroupChatService.SystemGroupCallStartedKey or
+        GroupChatService.SystemGroupCallEndedKey;
 
     private async Task<bool> CanCreateGroupSystemMessageAsync(Guid groupId, Guid userId, CancellationToken ct)
     {
@@ -1401,6 +1403,8 @@ public class ChatController(
                     GroupChatService.SystemUserAddedKey => "Пользователь добавлен в группу.",
                     GroupChatService.SystemHistoryAvailableKey => "История группы доступна новому участнику.",
                     GroupChatService.SystemSecurityKeysUpdatedKey => "Ключи безопасности группы обновлены.",
+                    GroupChatService.SystemGroupCallStartedKey => "Пользователь открыл групповой канал.",
+                    GroupChatService.SystemGroupCallEndedKey => "Групповой звонок закончился.",
                     _ => "Системное сообщение."
                 };
 

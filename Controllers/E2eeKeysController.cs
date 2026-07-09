@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using System.Security.Cryptography;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
@@ -32,7 +32,7 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
     public async Task<ActionResult<E2eePublicKeyDto>> GetPublicKey(Guid userId, CancellationToken ct)
     {
         var key = await db.UserE2eeKeys.AsNoTracking()
-            .Where(x => x.UserId == userId && !x.IsRevoked && !string.IsNullOrEmpty(x.PublicKeyBase64))
+            .Where(x => x.UserId == userId && !x.IsRevoked && !x.RequiresUserVerification && x.TrustState != TrustUnknown && x.TrustState != TrustRevoked && !string.IsNullOrEmpty(x.PublicKeyBase64))
             .OrderByDescending(x => x.LastSeenAt ?? x.UpdatedAt)
             .ThenByDescending(x => x.UpdatedAt)
             .FirstOrDefaultAsync(ct);
@@ -45,7 +45,7 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
     {
         if (MeId == Guid.Empty) return Unauthorized();
         var key = await db.UserE2eeKeys.AsNoTracking()
-            .Where(x => x.UserId == MeId && !x.IsRevoked && !string.IsNullOrEmpty(x.PublicKeyBase64))
+            .Where(x => x.UserId == MeId && !x.IsRevoked && !x.RequiresUserVerification && x.TrustState != TrustUnknown && x.TrustState != TrustRevoked && !string.IsNullOrEmpty(x.PublicKeyBase64))
             .OrderByDescending(x => x.LastSeenAt ?? x.UpdatedAt)
             .ThenByDescending(x => x.UpdatedAt)
             .FirstOrDefaultAsync(ct);
@@ -92,7 +92,7 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
     public async Task<ActionResult<IReadOnlyList<E2eeDeviceKeyDto>>> GetUserDevices(Guid userId, CancellationToken ct)
     {
         var keys = await db.UserE2eeKeys.AsNoTracking()
-            .Where(x => x.UserId == userId && !x.IsRevoked && !string.IsNullOrEmpty(x.PublicKeyBase64))
+            .Where(x => x.UserId == userId && !x.IsRevoked && !x.RequiresUserVerification && x.TrustState != TrustUnknown && x.TrustState != TrustRevoked && !string.IsNullOrEmpty(x.PublicKeyBase64))
             .OrderByDescending(x => x.LastSeenAt ?? x.UpdatedAt)
             .ThenByDescending(x => x.UpdatedAt)
             .ToListAsync(ct);
@@ -148,6 +148,109 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eeDeviceUserVerified", "E2EEDevice", key.DeviceId, $"E2EE device user verified. fingerprint={key.Fingerprint}", ct);
         return Ok(ToDeviceDto(key));
     }
+
+
+
+    [HttpGet("devices/approval-requests/pending")]
+    public async Task<ActionResult<IReadOnlyList<E2eeDeviceApprovalRequestDto>>> GetPendingDeviceApprovalRequests(CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        var now = DateTime.UtcNow;
+        var requests = await db.E2eeDeviceApprovalRequests.AsNoTracking()
+            .Where(r => r.UserId == MeId && r.Status == "Pending" && r.ExpiresAt > now)
+            .OrderByDescending(r => r.RequestedAt)
+            .Take(20)
+            .ToListAsync(ct);
+        return Ok(requests.Select(ToApprovalDto).ToList());
+    }
+
+    [HttpPost("devices/approval-requests/{requestId:guid}/approve")]
+    public async Task<ActionResult<E2eeDeviceApprovalRequestDto>> ApproveDeviceApprovalRequest(Guid requestId, [FromBody] E2eeDeviceApprovalDecisionRequest? body, CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        var approverDeviceId = NormalizeDeviceId(body?.ApproverDeviceId);
+        if (string.IsNullOrWhiteSpace(approverDeviceId)) return BadRequest(new { message = "ApproverDeviceId is required." });
+
+        var request = await db.E2eeDeviceApprovalRequests.FirstOrDefaultAsync(r => r.Id == requestId && r.UserId == MeId, ct);
+        if (request is null) return NotFound();
+        if (request.Status != "Pending") return Ok(ToApprovalDto(request));
+        if (request.ExpiresAt <= DateTime.UtcNow)
+        {
+            request.Status = "Expired";
+            await db.SaveChangesAsync(ct);
+            return BadRequest(new { message = "Device approval request expired." });
+        }
+
+        if (string.Equals(request.DeviceId, approverDeviceId, StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { message = "New device cannot approve itself." });
+
+        var approver = await db.UserE2eeKeys.AsNoTracking().FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == approverDeviceId, ct);
+        if (!IsDeviceAllowedToApprove(approver))
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Approver device is not trusted." });
+
+        var target = await db.UserE2eeKeys.FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == request.DeviceId && x.Fingerprint == request.Fingerprint, ct);
+        if (target is null) return NotFound(new { message = "Target E2EE device was not found." });
+        if (target.IsRevoked) return BadRequest(new { message = "Revoked device cannot be approved." });
+
+        var now = DateTime.UtcNow;
+        target.IsTrusted = true;
+        target.TrustState = TrustUserVerified;
+        target.RequiresUserVerification = false;
+        target.UserVerifiedAt = now;
+        target.UpdatedAt = now;
+
+        request.Status = "Approved";
+        request.ApprovedAt = now;
+        request.ApprovedByDeviceId = approverDeviceId;
+        request.Reason = CleanText(body?.Reason, 256);
+        await db.SaveChangesAsync(ct);
+
+        await hub.Clients.User(MeId.ToString()).SendAsync("E2eeDeviceApprovalResolved", ToApprovalDto(request), ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eeDeviceApprovedFromOldDevice", "E2EEDevice", target.DeviceId, $"E2EE new device approved from old device. fingerprint={target.Fingerprint}; approver={approverDeviceId}", ct);
+        return Ok(ToApprovalDto(request));
+    }
+
+    [HttpPost("devices/approval-requests/{requestId:guid}/reject")]
+    public async Task<ActionResult<E2eeDeviceApprovalRequestDto>> RejectDeviceApprovalRequest(Guid requestId, [FromBody] E2eeDeviceApprovalDecisionRequest? body, CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        var approverDeviceId = NormalizeDeviceId(body?.ApproverDeviceId);
+        if (string.IsNullOrWhiteSpace(approverDeviceId)) return BadRequest(new { message = "ApproverDeviceId is required." });
+
+        var request = await db.E2eeDeviceApprovalRequests.FirstOrDefaultAsync(r => r.Id == requestId && r.UserId == MeId, ct);
+        if (request is null) return NotFound();
+        if (request.Status != "Pending") return Ok(ToApprovalDto(request));
+
+        if (string.Equals(request.DeviceId, approverDeviceId, StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { message = "New device cannot reject itself." });
+
+        var approver = await db.UserE2eeKeys.AsNoTracking().FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == approverDeviceId, ct);
+        if (!IsDeviceAllowedToApprove(approver))
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Approver device is not trusted." });
+
+        var target = await db.UserE2eeKeys.FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == request.DeviceId && x.Fingerprint == request.Fingerprint, ct);
+        var now = DateTime.UtcNow;
+        if (target is not null)
+        {
+            target.IsTrusted = false;
+            target.IsRevoked = true;
+            target.TrustState = TrustRevoked;
+            target.RequiresUserVerification = true;
+            target.RevokedAt = now;
+            target.UpdatedAt = now;
+        }
+
+        request.Status = "Rejected";
+        request.RejectedAt = now;
+        request.ApprovedByDeviceId = approverDeviceId;
+        request.Reason = CleanText(body?.Reason, 256);
+        await db.SaveChangesAsync(ct);
+
+        await hub.Clients.User(MeId.ToString()).SendAsync("E2eeDeviceApprovalResolved", ToApprovalDto(request), ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eeDeviceRejectedFromOldDevice", "E2EEDevice", request.DeviceId, $"E2EE new device rejected from old device. fingerprint={request.Fingerprint}; approver={approverDeviceId}", ct);
+        return Ok(ToApprovalDto(request));
+    }
+
 
     [HttpPost("devices/{deviceId}/revoke")]
     public async Task<IActionResult> RevokeMyDevice(string deviceId, CancellationToken ct)
@@ -440,6 +543,7 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
 
         var now = DateTime.UtcNow;
         var fingerprint = Fingerprint(raw);
+        var hasTrustedDeviceForApproval = await HasTrustedDeviceForApprovalAsync(userId, deviceId, ct);
         var existing = await db.UserE2eeKeys.FirstOrDefaultAsync(x => x.UserId == userId && x.DeviceId == deviceId, ct);
         if (existing is not null && !replaceExisting)
         {
@@ -455,6 +559,7 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         var fingerprintChanged = existing is not null
             && !string.IsNullOrWhiteSpace(existing.Fingerprint)
             && !string.Equals(existing.Fingerprint, fingerprint, StringComparison.OrdinalIgnoreCase);
+        var wasRevokedOrPending = existing is not null && (existing.IsRevoked || existing.RequiresUserVerification || existing.TrustState == TrustRevoked);
 
         if (existing is null)
         {
@@ -489,13 +594,14 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         existing.Platform = CleanText(platform, 64) ?? existing.Platform;
         existing.ClientVersion = CleanText(clientVersion, 32) ?? existing.ClientVersion;
 
-        if (isNew)
+        var needsOldDeviceApproval = (isNew && hasTrustedDeviceForApproval) || fingerprintChanged || wasRevokedOrPending;
+        if (isNew && !needsOldDeviceApproval)
         {
             existing.IsTrusted = true;
             existing.TrustState = TrustTofu;
             existing.RequiresUserVerification = false;
         }
-        else if (fingerprintChanged)
+        else if (needsOldDeviceApproval)
         {
             existing.IsTrusted = false;
             existing.TrustState = TrustUnknown;
@@ -506,11 +612,71 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         existing.UpdatedAt = now;
 
         await db.SaveChangesAsync(ct);
+        if (needsOldDeviceApproval)
+            await CreateOrRefreshDeviceApprovalRequestAsync(existing, ct);
         if (fingerprintChanged)
             await TryNotifySecurityKeyChangedAsync(userId, deviceId, existing.DeviceName, ct);
         log.LogInformation("E2EE device key registered. UserId={UserId} DeviceId={DeviceId} Fingerprint={Fingerprint} TrustState={TrustState}", userId, deviceId, existing.Fingerprint, existing.TrustState);
         return existing;
     }
+
+
+
+    private async Task<bool> HasTrustedDeviceForApprovalAsync(Guid userId, string exceptDeviceId, CancellationToken ct)
+    {
+        return await db.UserE2eeKeys.AsNoTracking()
+            .AnyAsync(x => x.UserId == userId &&
+                           x.DeviceId != exceptDeviceId &&
+                           !x.IsRevoked &&
+                           !x.RequiresUserVerification &&
+                           (x.IsTrusted || x.TrustState == TrustTofu || x.TrustState == TrustUserVerified), ct);
+    }
+
+    private async Task CreateOrRefreshDeviceApprovalRequestAsync(UserE2eeKey device, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        var request = await db.E2eeDeviceApprovalRequests
+            .FirstOrDefaultAsync(r => r.UserId == device.UserId &&
+                                      r.DeviceId == device.DeviceId &&
+                                      r.Fingerprint == device.Fingerprint &&
+                                      r.Status == "Pending", ct);
+
+        if (request is null)
+        {
+            request = new E2eeDeviceApprovalRequest
+            {
+                Id = Guid.NewGuid(),
+                UserId = device.UserId,
+                DeviceId = device.DeviceId,
+                Fingerprint = device.Fingerprint,
+                RequestedAt = now
+            };
+            db.E2eeDeviceApprovalRequests.Add(request);
+        }
+
+        request.DeviceName = device.DeviceName;
+        request.Platform = device.Platform;
+        request.ClientVersion = device.ClientVersion;
+        request.LastIpAddress = device.LastIpAddress;
+        request.ExpiresAt = now.AddDays(7);
+        request.Status = "Pending";
+        request.ApprovedAt = null;
+        request.RejectedAt = null;
+        request.ApprovedByDeviceId = null;
+        request.Reason = null;
+
+        await db.SaveChangesAsync(ct);
+        await hub.Clients.User(device.UserId.ToString()).SendAsync("E2eeDeviceApprovalRequested", ToApprovalDto(request), ct);
+    }
+
+    private static bool IsDeviceAllowedToApprove(UserE2eeKey? device) =>
+        device is not null &&
+        !device.IsRevoked &&
+        !device.RequiresUserVerification &&
+        device.TrustState != TrustUnknown &&
+        device.TrustState != TrustRevoked &&
+        (device.IsTrusted || device.TrustState == TrustTofu || device.TrustState == TrustUserVerified);
+
 
     private async Task TryNotifySecurityKeyChangedAsync(Guid userId, string deviceId, string? deviceName, CancellationToken ct)
     {
@@ -626,6 +792,20 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         key.UpdatedAt,
         key.DeviceId,
         key.DeviceName);
+
+
+    private static E2eeDeviceApprovalRequestDto ToApprovalDto(E2eeDeviceApprovalRequest request) => new(
+        request.Id,
+        request.UserId,
+        request.DeviceId,
+        request.Fingerprint,
+        request.DeviceName,
+        request.Platform,
+        request.ClientVersion,
+        request.LastIpAddress,
+        request.RequestedAt,
+        request.ExpiresAt,
+        request.Status);
 
     private static E2eeDeviceKeyDto ToDeviceDto(UserE2eeKey key) => new(
         key.Id,

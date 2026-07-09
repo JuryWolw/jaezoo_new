@@ -1,4 +1,4 @@
-using JaeZoo.Server.Data;
+﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Services.Security;
@@ -15,6 +15,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
     public const string SystemUserAddedKey = "group_user_added";
     public const string SystemHistoryAvailableKey = "group_history_available";
     public const string SystemSecurityKeysUpdatedKey = "group_security_keys_updated";
+    public const string SystemGroupCallStartedKey = "group_call_started";
+    public const string SystemGroupCallEndedKey = "group_call_ended";
 
     public static void AdvanceSecurityEpoch(GroupChat chat, DateTime now)
     {
