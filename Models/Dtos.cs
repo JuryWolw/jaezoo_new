@@ -339,8 +339,8 @@ public record FileUploadResponse(
 );
 
 
-public record CreateGroupChatRequest(string Title, string? Description = null, IReadOnlyList<Guid>? MemberIds = null, bool IsPublic = false);
-public record UpdateGroupChatRequest(string Title, string? Description = null, bool? IsPublic = null);
+public record CreateGroupChatRequest(string Title, string? Description = null, IReadOnlyList<Guid>? MemberIds = null, bool IsPublic = false, int HistoryPolicy = 1);
+public record UpdateGroupChatRequest(string Title, string? Description = null, bool? IsPublic = null, int? HistoryPolicy = null);
 public record UpdateGroupMembersRequest(IReadOnlyList<Guid> UserIds);
 public record UpdateGroupMemberRoleRequest(string Role);
 
@@ -384,7 +384,9 @@ public record GroupChatSummaryDto(
     int SecurityEpoch = 1,
     DateTime? SecurityEpochChangedAt = null,
     bool IsPublic = false,
-    bool IsMember = true
+    bool IsMember = true,
+    int HistoryPolicy = 1,
+    DateTime? HistoryPolicyChangedAt = null
 );
 
 public record GroupChatDetailsDto(GroupChatSummaryDto Chat, IReadOnlyList<GroupChatMemberDto> Members);

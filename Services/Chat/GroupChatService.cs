@@ -62,6 +62,21 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return normalized;
     }
 
+    private static int NormalizeHistoryPolicy(int? historyPolicy)
+    {
+        // 0 = новые участники видят только новые сообщения.
+        // 1 = новые участники смогут получить старую историю, если админ передаст её в E9.2.
+        // 2 = история явно закрыта для новых участников. Пока в UI не выводится.
+        var value = historyPolicy ?? 1;
+        return value switch
+        {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => 1
+        };
+    }
+
     private static GroupChatRole GetEffectiveRole(GroupChat chat, GroupChatMember member) =>
         chat.OwnerId == member.UserId ? GroupChatRole.Admin : member.Role;
 
@@ -97,7 +112,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct);
     }
 
-    public async Task<GroupChat> CreateChatAsync(Guid ownerId, string? title, string? description, IReadOnlyCollection<Guid>? memberIds, bool isPublic = false, CancellationToken ct = default)
+    public async Task<GroupChat> CreateChatAsync(Guid ownerId, string? title, string? description, IReadOnlyCollection<Guid>? memberIds, bool isPublic = false, int historyPolicy = 1, CancellationToken ct = default)
     {
         var normalizedTitle = (title ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(normalizedTitle))
@@ -145,6 +160,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             OwnerId = ownerId,
             MemberLimit = MaxGroupMembers,
             IsPublic = isPublic,
+            HistoryPolicy = NormalizeHistoryPolicy(historyPolicy),
+            HistoryPolicyChangedAt = now,
             SecurityEpoch = 1,
             SecurityEpochChangedAt = now,
             CreatedAt = now,
@@ -174,7 +191,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return chat;
     }
 
-    public async Task<GroupChat> UpdateChatAsync(Guid groupId, Guid me, string? title, string? description, bool? isPublic = null, CancellationToken ct = default)
+    public async Task<GroupChat> UpdateChatAsync(Guid groupId, Guid me, string? title, string? description, bool? isPublic = null, int? historyPolicy = null, CancellationToken ct = default)
     {
         var chat = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct)
             ?? throw new InvalidOperationException("Group chat not found.");
@@ -195,6 +212,15 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         chat.Description = NormalizeDescription(description);
         if (isPublic.HasValue)
             chat.IsPublic = isPublic.Value;
+        if (historyPolicy.HasValue)
+        {
+            var normalizedPolicy = NormalizeHistoryPolicy(historyPolicy.Value);
+            if (chat.HistoryPolicy != normalizedPolicy)
+            {
+                chat.HistoryPolicy = normalizedPolicy;
+                chat.HistoryPolicyChangedAt = DateTime.UtcNow;
+            }
+        }
         chat.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         return chat;
@@ -463,7 +489,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             Math.Max(1, chat.SecurityEpoch),
             chat.SecurityEpochChangedAt,
             chat.IsPublic,
-            true);
+            true,
+            chat.HistoryPolicy,
+            chat.HistoryPolicyChangedAt);
     }
 
     public async Task<List<GroupChatSummaryDto>> ListForUserAsync(Guid me, CancellationToken ct = default)

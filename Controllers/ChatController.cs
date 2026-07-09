@@ -632,7 +632,7 @@ public class ChatController(
             var verifyMembers = await RequireUsersVerifiedAsync(memberIds, "В группу можно добавлять только пользователей с подтверждённой почтой.", ct);
             if (verifyMembers is not null) return verifyMembers;
 
-            var group = await groupChats.CreateChatAsync(MeId, body.Title, body.Description, body.MemberIds, body.IsPublic, ct);
+            var group = await groupChats.CreateChatAsync(MeId, body.Title, body.Description, body.MemberIds, body.IsPublic, body.HistoryPolicy, ct);
             var details = await BuildGroupDetailsAsync(group.Id, ct);
             if (details is null) return Problem("Failed to build group chat dto.", statusCode: 500);
 
@@ -677,7 +677,7 @@ public class ChatController(
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
 
-            await groupChats.UpdateChatAsync(groupId, MeId, body.Title, body.Description, body.IsPublic, ct);
+            await groupChats.UpdateChatAsync(groupId, MeId, body.Title, body.Description, body.IsPublic, body.HistoryPolicy, ct);
             var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
             if (summary is null) return NotFound(new { error = "Group chat not found." });
 
