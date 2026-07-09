@@ -3,18 +3,21 @@ using System.Security.Cryptography;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Security;
+using JaeZoo.Server.Services.Chat;
 using JaeZoo.Server.Services.Security;
+using JaeZoo.Server.Hubs;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.SignalR;
 
 namespace JaeZoo.Server.Controllers;
 
 [ApiController]
 [Route("api/e2ee")]
 [Authorize]
-public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService securityAudit, ILogger<E2eeKeysController> log) : ControllerBase
+public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService securityAudit, DirectChatService directChat, IHubContext<ChatHub> hub, ILogger<E2eeKeysController> log) : ControllerBase
 {
     private const int TrustUnknown = 0;
     private const int TrustTofu = 1;
@@ -165,6 +168,77 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         return NoContent();
     }
 
+    [HttpGet("backup/status")]
+    public async Task<ActionResult<E2eeBackupStatusDto>> GetBackupStatus(CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        var backup = await db.E2eeEncryptedBackups.AsNoTracking()
+            .Where(x => x.UserId == MeId)
+            .Select(x => new E2eeBackupStatusDto(true, x.UpdatedAt, x.DeviceId, x.Version))
+            .FirstOrDefaultAsync(ct);
+        return Ok(backup ?? new E2eeBackupStatusDto(false, null, null, 0));
+    }
+
+    [HttpGet("backup")]
+    public async Task<ActionResult<E2eeBackupDto>> GetBackup(CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        var backup = await db.E2eeEncryptedBackups.AsNoTracking().FirstOrDefaultAsync(x => x.UserId == MeId, ct);
+        if (backup is null) return NotFound(new { message = "Encrypted backup not found." });
+        return Ok(ToBackupDto(backup));
+    }
+
+    [HttpPut("backup")]
+    public async Task<ActionResult<E2eeBackupStatusDto>> SaveBackup([FromBody] E2eeBackupSaveRequest request, CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        if (request is null) return BadRequest(new { message = "Backup payload is required." });
+
+        var deviceId = CleanText(request.DeviceId, 64);
+        if (string.IsNullOrWhiteSpace(deviceId)) return BadRequest(new { message = "DeviceId is required." });
+        if (!LooksLikeBase64(request.SaltBase64, 256) || !LooksLikeBase64(request.NonceBase64, 256) || !LooksLikeBase64(request.TagBase64, 256) || !LooksLikeBase64(request.CiphertextBase64, 2_000_000))
+            return BadRequest(new { message = "Invalid encrypted backup payload." });
+
+        var now = DateTime.UtcNow;
+        var backup = await db.E2eeEncryptedBackups.FirstOrDefaultAsync(x => x.UserId == MeId, ct);
+        if (backup is null)
+        {
+            backup = new E2eeEncryptedBackup
+            {
+                Id = Guid.NewGuid(),
+                UserId = MeId,
+                CreatedAt = now
+            };
+            db.E2eeEncryptedBackups.Add(backup);
+        }
+
+        backup.DeviceId = deviceId;
+        backup.PublicKeyFingerprint = CleanText(request.PublicKeyFingerprint, 128);
+        backup.Kdf = CleanText(request.Kdf, 64) ?? "PBKDF2-SHA256-250000";
+        backup.SaltBase64 = request.SaltBase64.Trim();
+        backup.NonceBase64 = request.NonceBase64.Trim();
+        backup.CiphertextBase64 = request.CiphertextBase64.Trim();
+        backup.TagBase64 = request.TagBase64.Trim();
+        backup.Version = Math.Clamp(request.Version, 1, 10);
+        backup.UpdatedAt = now;
+
+        await db.SaveChangesAsync(ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eeBackupSaved", "E2EEBackup", backup.Id.ToString("D"), $"Encrypted E2EE backup saved. device={backup.DeviceId}; version={backup.Version}", ct);
+        return Ok(new E2eeBackupStatusDto(true, backup.UpdatedAt, backup.DeviceId, backup.Version));
+    }
+
+    [HttpDelete("backup")]
+    public async Task<IActionResult> DeleteBackup(CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        var backup = await db.E2eeEncryptedBackups.FirstOrDefaultAsync(x => x.UserId == MeId, ct);
+        if (backup is null) return NoContent();
+        db.E2eeEncryptedBackups.Remove(backup);
+        await db.SaveChangesAsync(ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eeBackupDeleted", "E2EEBackup", backup.Id.ToString("D"), "Encrypted E2EE backup deleted.", ct);
+        return NoContent();
+    }
+
     private async Task<UserE2eeKey> UpsertDeviceInternalAsync(Guid userId, string deviceId, string publicKeyBase64, string? deviceName, bool replaceExisting, string? platform, string? clientVersion, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(publicKeyBase64)) throw new BadHttpRequestException("Public key is required.");
@@ -246,8 +320,79 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         existing.UpdatedAt = now;
 
         await db.SaveChangesAsync(ct);
+        if (fingerprintChanged)
+            await TryNotifySecurityKeyChangedAsync(userId, deviceId, existing.DeviceName, ct);
         log.LogInformation("E2EE device key registered. UserId={UserId} DeviceId={DeviceId} Fingerprint={Fingerprint} TrustState={TrustState}", userId, deviceId, existing.Fingerprint, existing.TrustState);
         return existing;
+    }
+
+    private async Task TryNotifySecurityKeyChangedAsync(Guid userId, string deviceId, string? deviceName, CancellationToken ct)
+    {
+        try
+        {
+            var userName = await db.Users.AsNoTracking()
+                .Where(x => x.Id == userId)
+                .Select(x => x.UserName)
+                .FirstOrDefaultAsync(ct);
+            userName = string.IsNullOrWhiteSpace(userName) ? "Пользователь" : userName.Trim();
+
+            var peers = await db.Friendships.AsNoTracking()
+                .Where(f => f.Status == FriendshipStatus.Accepted && (f.RequesterId == userId || f.AddresseeId == userId))
+                .Select(f => f.RequesterId == userId ? f.AddresseeId : f.RequesterId)
+                .Distinct()
+                .ToListAsync(ct);
+
+            if (peers.Count == 0) return;
+
+            var safeDeviceName = string.IsNullOrWhiteSpace(deviceName) ? "устройстве" : deviceName.Trim();
+            var text = $"{userName} обновил ключи безопасности на {safeDeviceName}. Если это выглядит неожиданно, уточните у него, всё ли в порядке.";
+
+            foreach (var peerId in peers)
+            {
+                try
+                {
+                    var created = await directChat.CreateMessageAsync(userId, peerId, text, null, DirectMessageKind.System, "security-key-changed", null, ct);
+                    var dto = await directChat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, ct);
+                    if (dto is null) continue;
+
+                    await hub.Clients.User(userId.ToString()).SendAsync("ChatMessageCreated", new ChatRealtimeMessageDto(peerId, dto), ct);
+                    await hub.Clients.User(peerId.ToString()).SendAsync("ChatMessageCreated", new ChatRealtimeMessageDto(userId, dto), ct);
+                }
+                catch (Exception ex)
+                {
+                    log.LogWarning(ex, "Failed to notify peer about E2EE security key change. UserId={UserId} PeerId={PeerId}", userId, peerId);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Failed to create E2EE security key change notifications. UserId={UserId} DeviceId={DeviceId}", userId, deviceId);
+        }
+    }
+
+    private static E2eeBackupDto ToBackupDto(E2eeEncryptedBackup backup) => new(
+        backup.DeviceId,
+        backup.PublicKeyFingerprint,
+        backup.Kdf,
+        backup.SaltBase64,
+        backup.NonceBase64,
+        backup.CiphertextBase64,
+        backup.TagBase64,
+        backup.Version,
+        backup.UpdatedAt);
+
+    private static bool LooksLikeBase64(string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > maxLength) return false;
+        try
+        {
+            _ = Convert.FromBase64String(value.Trim());
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static E2eePublicKeyDto ToLegacyDto(UserE2eeKey key) => new(

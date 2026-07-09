@@ -235,6 +235,37 @@ public record UpsertE2eeDeviceKeyRequest(
 
 public record RenameE2eeDeviceRequest(string? DeviceName);
 
+public record E2eeBackupStatusDto(
+    bool Enabled,
+    DateTime? UpdatedAt,
+    string? DeviceId,
+    int Version
+);
+
+public record E2eeBackupSaveRequest(
+    string DeviceId,
+    string? PublicKeyFingerprint,
+    string Kdf,
+    string SaltBase64,
+    string NonceBase64,
+    string CiphertextBase64,
+    string TagBase64,
+    int Version = 1
+);
+
+public record E2eeBackupDto(
+    string DeviceId,
+    string? PublicKeyFingerprint,
+    string Kdf,
+    string SaltBase64,
+    string NonceBase64,
+    string CiphertextBase64,
+    string TagBase64,
+    int Version,
+    DateTime UpdatedAt
+);
+
+
 public record ChatRealtimeMessageDto(Guid PeerId, MessageDto Message);
 public record ChatMessageUpdatedDto(Guid PeerId, MessageDto Message);
 public record ChatMessageDeletedDto(Guid PeerId, Guid MessageId, DateTime DeletedAt, Guid DeletedById);

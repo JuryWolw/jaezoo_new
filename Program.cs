@@ -395,6 +395,7 @@ using (var scope = app.Services.CreateScope())
     await EnsureMessageEncryptionSchemaAsync(db, logger);
     await EnsureIdentityPrivacySchemaAsync(db, logger);
     await EnsureE2eeKeySchemaAsync(db, logger);
+    await EnsureE2eeBackupSchemaAsync(db, logger);
     await EnsureGroupE2eeSecuritySchemaAsync(db, logger);
     await EnsurePublicGroupsSchemaAsync(db, logger);
     await EnsureUserActivitySchemaAsync(db, logger);
@@ -914,6 +915,76 @@ static async Task EnsureE2eeKeySchemaAsync(AppDbContext db, ILogger logger)
     catch (Exception ex)
     {
         logger.LogError(ex, "Failed to ensure E2EE device key schema.");
+        throw;
+    }
+}
+
+
+static async Task EnsureE2eeBackupSchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "E2eeEncryptedBackups" (
+                    "Id" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "DeviceId" character varying(64) NOT NULL,
+                    "PublicKeyFingerprint" character varying(128) NULL,
+                    "Kdf" character varying(64) NOT NULL,
+                    "SaltBase64" character varying(256) NOT NULL,
+                    "NonceBase64" character varying(256) NOT NULL,
+                    "CiphertextBase64" text NOT NULL,
+                    "TagBase64" character varying(256) NOT NULL,
+                    "Version" integer NOT NULL DEFAULT 1,
+                    "CreatedAt" timestamp with time zone NOT NULL,
+                    "UpdatedAt" timestamp with time zone NOT NULL,
+                    CONSTRAINT "PK_E2eeEncryptedBackups" PRIMARY KEY ("Id")
+                );
+
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'FK_E2eeEncryptedBackups_Users_UserId'
+                    ) THEN
+                        ALTER TABLE "E2eeEncryptedBackups"
+                            ADD CONSTRAINT "FK_E2eeEncryptedBackups_Users_UserId"
+                            FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE;
+                    END IF;
+                END $$;
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_E2eeEncryptedBackups_UserId" ON "E2eeEncryptedBackups" ("UserId");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "E2eeEncryptedBackups" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_E2eeEncryptedBackups" PRIMARY KEY,
+                    "UserId" TEXT NOT NULL,
+                    "DeviceId" TEXT NOT NULL,
+                    "PublicKeyFingerprint" TEXT NULL,
+                    "Kdf" TEXT NOT NULL,
+                    "SaltBase64" TEXT NOT NULL,
+                    "NonceBase64" TEXT NOT NULL,
+                    "CiphertextBase64" TEXT NOT NULL,
+                    "TagBase64" TEXT NOT NULL,
+                    "Version" INTEGER NOT NULL DEFAULT 1,
+                    "CreatedAt" TEXT NOT NULL,
+                    "UpdatedAt" TEXT NOT NULL,
+                    CONSTRAINT "FK_E2eeEncryptedBackups_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_E2eeEncryptedBackups_UserId" ON "E2eeEncryptedBackups" ("UserId");
+                """);
+        }
+
+        logger.LogInformation("E2EE encrypted backup schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure E2EE encrypted backup schema.");
         throw;
     }
 }

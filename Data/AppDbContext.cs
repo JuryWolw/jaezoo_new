@@ -36,6 +36,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<TwoFactorRecoveryCode> TwoFactorRecoveryCodes => Set<TwoFactorRecoveryCode>();
     public DbSet<TwoFactorLoginChallenge> TwoFactorLoginChallenges => Set<TwoFactorLoginChallenge>();
     public DbSet<LoginAlertToken> LoginAlertTokens => Set<LoginAlertToken>();
+    public DbSet<E2eeEncryptedBackup> E2eeEncryptedBackups => Set<E2eeEncryptedBackup>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -736,6 +737,41 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .HasOne<GroupChat>()
             .WithMany()
             .HasForeignKey(p => p.GroupChatId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+
+        b.Entity<E2eeEncryptedBackup>()
+            .Property(bk => bk.DeviceId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeEncryptedBackup>()
+            .Property(bk => bk.PublicKeyFingerprint)
+            .HasMaxLength(128);
+
+        b.Entity<E2eeEncryptedBackup>()
+            .Property(bk => bk.Kdf)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeEncryptedBackup>()
+            .Property(bk => bk.SaltBase64)
+            .HasMaxLength(256);
+
+        b.Entity<E2eeEncryptedBackup>()
+            .Property(bk => bk.NonceBase64)
+            .HasMaxLength(256);
+
+        b.Entity<E2eeEncryptedBackup>()
+            .Property(bk => bk.TagBase64)
+            .HasMaxLength(256);
+
+        b.Entity<E2eeEncryptedBackup>()
+            .HasIndex(bk => bk.UserId)
+            .IsUnique();
+
+        b.Entity<E2eeEncryptedBackup>()
+            .HasOne(bk => bk.User)
+            .WithMany()
+            .HasForeignKey(bk => bk.UserId)
             .OnDelete(DeleteBehavior.Cascade);
     }
 }
