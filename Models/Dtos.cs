@@ -197,7 +197,14 @@ public record E2eeDeviceKeyDto(
     bool IsRevoked,
     DateTime CreatedAt,
     DateTime UpdatedAt,
-    DateTime? LastSeenAt
+    DateTime? LastSeenAt,
+    int DeviceKeyVersion = 2,
+    int TrustState = 1,
+    bool RequiresUserVerification = false,
+    DateTime? UserVerifiedAt = null,
+    string? LastIpAddress = null,
+    string? Platform = null,
+    string? ClientVersion = null
 );
 
 public record E2eePublicKeyDto(
@@ -221,8 +228,12 @@ public record UpsertE2eeDeviceKeyRequest(
     string DeviceId,
     string PublicKeyBase64,
     string? DeviceName = null,
-    bool ReplaceExisting = true
+    bool ReplaceExisting = true,
+    string? Platform = null,
+    string? ClientVersion = null
 );
+
+public record RenameE2eeDeviceRequest(string? DeviceName);
 
 public record ChatRealtimeMessageDto(Guid PeerId, MessageDto Message);
 public record ChatMessageUpdatedDto(Guid PeerId, MessageDto Message);
