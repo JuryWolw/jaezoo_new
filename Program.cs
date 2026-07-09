@@ -395,6 +395,7 @@ using (var scope = app.Services.CreateScope())
     await EnsureMessageEncryptionSchemaAsync(db, logger);
     await EnsureIdentityPrivacySchemaAsync(db, logger);
     await EnsureE2eeKeySchemaAsync(db, logger);
+    await EnsureE2eePreKeySchemaAsync(db, logger);
     await EnsureE2eeBackupSchemaAsync(db, logger);
     await EnsureGroupE2eeSecuritySchemaAsync(db, logger);
     await EnsurePublicGroupsSchemaAsync(db, logger);
@@ -919,6 +920,128 @@ static async Task EnsureE2eeKeySchemaAsync(AppDbContext db, ILogger logger)
     }
 }
 
+
+
+static async Task EnsureE2eePreKeySchemaAsync(AppDbContext db, ILogger logger)
+{
+    try
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "SigningPublicKeyBase64" character varying(8192) NULL;
+                ALTER TABLE "UserE2eeKeys" ADD COLUMN IF NOT EXISTS "SigningKeyFingerprint" character varying(128) NULL;
+
+                CREATE TABLE IF NOT EXISTS "E2eeSignedPreKeys" (
+                    "Id" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "DeviceId" character varying(64) NOT NULL,
+                    "KeyId" character varying(64) NOT NULL,
+                    "PublicKeyBase64" character varying(8192) NOT NULL,
+                    "SignatureBase64" character varying(8192) NOT NULL,
+                    "Algorithm" character varying(96) NOT NULL,
+                    "IsRevoked" boolean NOT NULL DEFAULT false,
+                    "RevokedAt" timestamp with time zone NULL,
+                    "CreatedAt" timestamp with time zone NOT NULL,
+                    "UpdatedAt" timestamp with time zone NOT NULL,
+                    CONSTRAINT "PK_E2eeSignedPreKeys" PRIMARY KEY ("Id")
+                );
+
+                CREATE TABLE IF NOT EXISTS "E2eeOneTimePreKeys" (
+                    "Id" uuid NOT NULL,
+                    "UserId" uuid NOT NULL,
+                    "DeviceId" character varying(64) NOT NULL,
+                    "KeyId" character varying(64) NOT NULL,
+                    "PublicKeyBase64" character varying(8192) NOT NULL,
+                    "Algorithm" character varying(64) NOT NULL,
+                    "CreatedAt" timestamp with time zone NOT NULL,
+                    "ClaimedAt" timestamp with time zone NULL,
+                    "ClaimedByUserId" uuid NULL,
+                    "ClaimedByDeviceId" character varying(64) NULL,
+                    CONSTRAINT "PK_E2eeOneTimePreKeys" PRIMARY KEY ("Id")
+                );
+
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_E2eeSignedPreKeys_Users_UserId') THEN
+                        ALTER TABLE "E2eeSignedPreKeys"
+                            ADD CONSTRAINT "FK_E2eeSignedPreKeys_Users_UserId"
+                            FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_E2eeOneTimePreKeys_Users_UserId') THEN
+                        ALTER TABLE "E2eeOneTimePreKeys"
+                            ADD CONSTRAINT "FK_E2eeOneTimePreKeys_Users_UserId"
+                            FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE;
+                    END IF;
+                END $$;
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_E2eeSignedPreKeys_UserId_DeviceId_KeyId" ON "E2eeSignedPreKeys" ("UserId", "DeviceId", "KeyId");
+                CREATE INDEX IF NOT EXISTS "IX_E2eeSignedPreKeys_UserId_DeviceId_IsRevoked" ON "E2eeSignedPreKeys" ("UserId", "DeviceId", "IsRevoked");
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_E2eeOneTimePreKeys_UserId_DeviceId_KeyId" ON "E2eeOneTimePreKeys" ("UserId", "DeviceId", "KeyId");
+                CREATE INDEX IF NOT EXISTS "IX_E2eeOneTimePreKeys_UserId_DeviceId_ClaimedAt" ON "E2eeOneTimePreKeys" ("UserId", "DeviceId", "ClaimedAt");
+                """);
+        }
+        else if (db.Database.IsSqlite())
+        {
+            var keyColumns = new Dictionary<string, string>
+            {
+                ["SigningPublicKeyBase64"] = "TEXT NULL",
+                ["SigningKeyFingerprint"] = "TEXT NULL"
+            };
+
+            foreach (var (name, definition) in keyColumns)
+            {
+                var existingSql = "SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('UserE2eeKeys') WHERE name = '" + name + "'";
+                var existing = await db.Database.SqlQueryRaw<int>(existingSql).SingleAsync();
+                if (existing == 0)
+                    await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"UserE2eeKeys\" ADD COLUMN \"" + name + "\" " + definition + ";");
+            }
+
+            await db.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "E2eeSignedPreKeys" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_E2eeSignedPreKeys" PRIMARY KEY,
+                    "UserId" TEXT NOT NULL,
+                    "DeviceId" TEXT NOT NULL,
+                    "KeyId" TEXT NOT NULL,
+                    "PublicKeyBase64" TEXT NOT NULL,
+                    "SignatureBase64" TEXT NOT NULL,
+                    "Algorithm" TEXT NOT NULL,
+                    "IsRevoked" INTEGER NOT NULL DEFAULT 0,
+                    "RevokedAt" TEXT NULL,
+                    "CreatedAt" TEXT NOT NULL,
+                    "UpdatedAt" TEXT NOT NULL,
+                    CONSTRAINT "FK_E2eeSignedPreKeys_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS "E2eeOneTimePreKeys" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_E2eeOneTimePreKeys" PRIMARY KEY,
+                    "UserId" TEXT NOT NULL,
+                    "DeviceId" TEXT NOT NULL,
+                    "KeyId" TEXT NOT NULL,
+                    "PublicKeyBase64" TEXT NOT NULL,
+                    "Algorithm" TEXT NOT NULL,
+                    "CreatedAt" TEXT NOT NULL,
+                    "ClaimedAt" TEXT NULL,
+                    "ClaimedByUserId" TEXT NULL,
+                    "ClaimedByDeviceId" TEXT NULL,
+                    CONSTRAINT "FK_E2eeOneTimePreKeys_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_E2eeSignedPreKeys_UserId_DeviceId_KeyId" ON "E2eeSignedPreKeys" ("UserId", "DeviceId", "KeyId");
+                CREATE INDEX IF NOT EXISTS "IX_E2eeSignedPreKeys_UserId_DeviceId_IsRevoked" ON "E2eeSignedPreKeys" ("UserId", "DeviceId", "IsRevoked");
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_E2eeOneTimePreKeys_UserId_DeviceId_KeyId" ON "E2eeOneTimePreKeys" ("UserId", "DeviceId", "KeyId");
+                CREATE INDEX IF NOT EXISTS "IX_E2eeOneTimePreKeys_UserId_DeviceId_ClaimedAt" ON "E2eeOneTimePreKeys" ("UserId", "DeviceId", "ClaimedAt");
+                """);
+        }
+
+        logger.LogInformation("E2EE prekey schema ensured.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to ensure E2EE prekey schema.");
+        throw;
+    }
+}
 
 static async Task EnsureE2eeBackupSchemaAsync(AppDbContext db, ILogger logger)
 {

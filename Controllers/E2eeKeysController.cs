@@ -58,7 +58,7 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
     {
         if (MeId == Guid.Empty) return Unauthorized();
         var deviceId = NormalizeDeviceId(request.DeviceId) ?? "legacy";
-        var device = await UpsertDeviceInternalAsync(MeId, deviceId, request.PublicKeyBase64, request.DeviceName, request.ReplaceExisting, null, null, ct);
+        var device = await UpsertDeviceInternalAsync(MeId, deviceId, request.PublicKeyBase64, request.DeviceName, request.ReplaceExisting, null, null, null, ct);
         await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eeKeyUpserted", "E2EEDevice", device.DeviceId, $"Legacy E2EE public key upserted. fingerprint={device.Fingerprint}; replaceExisting={request.ReplaceExisting}", ct);
         return Ok(ToLegacyDto(device));
     }
@@ -106,7 +106,7 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         var deviceId = NormalizeDeviceId(request.DeviceId);
         if (string.IsNullOrWhiteSpace(deviceId)) return BadRequest(new { message = "DeviceId is required." });
 
-        var device = await UpsertDeviceInternalAsync(MeId, deviceId, request.PublicKeyBase64, request.DeviceName, request.ReplaceExisting, request.Platform, request.ClientVersion, ct);
+        var device = await UpsertDeviceInternalAsync(MeId, deviceId, request.PublicKeyBase64, request.DeviceName, request.ReplaceExisting, request.Platform, request.ClientVersion, request.SigningPublicKeyBase64, ct);
         await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eeDeviceUpserted", "E2EEDevice", device.DeviceId, $"E2EE device upserted. fingerprint={device.Fingerprint}; replaceExisting={request.ReplaceExisting}; trustState={device.TrustState}; revoked=false", ct);
         return Ok(ToDeviceDto(device));
     }
@@ -166,6 +166,168 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         await db.SaveChangesAsync(ct);
         await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eeDeviceRevoked", "E2EEDevice", key.DeviceId, $"E2EE device revoked. fingerprint={key.Fingerprint}", ct);
         return NoContent();
+    }
+
+
+    [HttpGet("prekeys/status/me")]
+    public async Task<ActionResult<E2eePreKeyStatusDto>> GetMyPreKeyStatus([FromQuery] string? deviceId, CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        var normalized = NormalizeDeviceId(deviceId);
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            normalized = await db.UserE2eeKeys.AsNoTracking()
+                .Where(x => x.UserId == MeId && !x.IsRevoked)
+                .OrderByDescending(x => x.LastSeenAt ?? x.UpdatedAt)
+                .Select(x => x.DeviceId)
+                .FirstOrDefaultAsync(ct);
+        }
+        if (string.IsNullOrWhiteSpace(normalized)) return NotFound();
+
+        var signed = await db.E2eeSignedPreKeys.AsNoTracking()
+            .Where(x => x.UserId == MeId && x.DeviceId == normalized && !x.IsRevoked)
+            .OrderByDescending(x => x.UpdatedAt)
+            .FirstOrDefaultAsync(ct);
+        var available = await db.E2eeOneTimePreKeys.AsNoTracking()
+            .CountAsync(x => x.UserId == MeId && x.DeviceId == normalized && x.ClaimedAt == null, ct);
+        return Ok(new E2eePreKeyStatusDto(normalized, signed is not null, available, signed?.UpdatedAt));
+    }
+
+    [HttpPost("prekeys/me")]
+    public async Task<ActionResult<E2eePreKeyStatusDto>> UploadMyPreKeys([FromBody] E2eePreKeyUploadRequest request, CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        if (request is null || request.SignedPreKey is null) return BadRequest(new { message = "PreKey payload is required." });
+        var deviceId = NormalizeDeviceId(request.DeviceId);
+        if (string.IsNullOrWhiteSpace(deviceId)) return BadRequest(new { message = "DeviceId is required." });
+
+        var device = await db.UserE2eeKeys.FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == deviceId && !x.IsRevoked, ct);
+        if (device is null) return NotFound(new { message = "E2EE device is not registered." });
+        if (string.IsNullOrWhiteSpace(device.SigningPublicKeyBase64)) return BadRequest(new { message = "E2EE signing key is not registered for this device." });
+
+        var signedKeyId = CleanText(request.SignedPreKey.KeyId, 64);
+        if (string.IsNullOrWhiteSpace(signedKeyId)) return BadRequest(new { message = "Signed prekey id is required." });
+        var signedPublicRaw = ValidateEcdhPublicKey(request.SignedPreKey.PublicKeyBase64, "Invalid signed prekey public key.");
+        var signatureRaw = ValidateBase64(request.SignedPreKey.SignatureBase64, 8192, "Invalid signed prekey signature.");
+        var signingRaw = Convert.FromBase64String(device.SigningPublicKeyBase64);
+        using (var ecdsa = ECDsa.Create())
+        {
+            ecdsa.ImportSubjectPublicKeyInfo(signingRaw, out _);
+            if (!ecdsa.VerifyData(signedPublicRaw, signatureRaw, HashAlgorithmName.SHA256))
+                return BadRequest(new { message = "Signed prekey signature is invalid." });
+        }
+
+        var now = DateTime.UtcNow;
+        var existingSigned = await db.E2eeSignedPreKeys.FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == deviceId && x.KeyId == signedKeyId, ct);
+        if (existingSigned is null)
+        {
+            existingSigned = new E2eeSignedPreKey
+            {
+                Id = Guid.NewGuid(),
+                UserId = MeId,
+                DeviceId = deviceId,
+                KeyId = signedKeyId,
+                CreatedAt = now
+            };
+            db.E2eeSignedPreKeys.Add(existingSigned);
+        }
+
+        existingSigned.PublicKeyBase64 = Convert.ToBase64String(signedPublicRaw);
+        existingSigned.SignatureBase64 = Convert.ToBase64String(signatureRaw);
+        existingSigned.Algorithm = CleanText(request.SignedPreKey.Algorithm, 96) ?? "ECDH-P256-SPKI+ECDSA-P256-SHA256";
+        existingSigned.IsRevoked = false;
+        existingSigned.RevokedAt = null;
+        existingSigned.UpdatedAt = now;
+
+        var oldSigned = await db.E2eeSignedPreKeys
+            .Where(x => x.UserId == MeId && x.DeviceId == deviceId && x.KeyId != signedKeyId && !x.IsRevoked)
+            .ToListAsync(ct);
+        foreach (var old in oldSigned)
+        {
+            old.IsRevoked = true;
+            old.RevokedAt = now;
+            old.UpdatedAt = now;
+        }
+
+        var uploadedOneTime = request.OneTimePreKeys ?? Array.Empty<E2eeOneTimePreKeyUploadDto>();
+        foreach (var oneTime in uploadedOneTime.Take(100))
+        {
+            var keyId = CleanText(oneTime.KeyId, 64);
+            if (string.IsNullOrWhiteSpace(keyId)) continue;
+            var exists = await db.E2eeOneTimePreKeys.AnyAsync(x => x.UserId == MeId && x.DeviceId == deviceId && x.KeyId == keyId, ct);
+            if (exists) continue;
+            var publicRaw = ValidateEcdhPublicKey(oneTime.PublicKeyBase64, "Invalid one-time prekey public key.");
+            db.E2eeOneTimePreKeys.Add(new E2eeOneTimePreKey
+            {
+                Id = Guid.NewGuid(),
+                UserId = MeId,
+                DeviceId = deviceId,
+                KeyId = keyId,
+                PublicKeyBase64 = Convert.ToBase64String(publicRaw),
+                Algorithm = CleanText(oneTime.Algorithm, 64) ?? "ECDH-P256-SPKI",
+                CreatedAt = now
+            });
+        }
+
+        device.DeviceKeyVersion = Math.Max(3, device.DeviceKeyVersion);
+        device.UpdatedAt = now;
+        await db.SaveChangesAsync(ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eePreKeysUploaded", "E2EEDevice", deviceId, $"E2EE prekeys uploaded. signed={signedKeyId}; oneTimeUploaded={uploadedOneTime.Count}", ct);
+
+        var available = await db.E2eeOneTimePreKeys.AsNoTracking().CountAsync(x => x.UserId == MeId && x.DeviceId == deviceId && x.ClaimedAt == null, ct);
+        return Ok(new E2eePreKeyStatusDto(deviceId, true, available, existingSigned.UpdatedAt));
+    }
+
+    [HttpGet("prekeys/bundles/{userId:guid}")]
+    public async Task<ActionResult<IReadOnlyList<E2eePreKeyBundleDto>>> GetPreKeyBundles(Guid userId, CancellationToken ct)
+    {
+        if (MeId == Guid.Empty) return Unauthorized();
+        var devices = await db.UserE2eeKeys.AsNoTracking()
+            .Where(x => x.UserId == userId && !x.IsRevoked && !string.IsNullOrEmpty(x.PublicKeyBase64))
+            .OrderByDescending(x => x.LastSeenAt ?? x.UpdatedAt)
+            .ToListAsync(ct);
+        if (devices.Count == 0) return Ok(Array.Empty<E2eePreKeyBundleDto>());
+
+        var now = DateTime.UtcNow;
+        var result = new List<E2eePreKeyBundleDto>();
+        foreach (var device in devices)
+        {
+            var signed = await db.E2eeSignedPreKeys.AsNoTracking()
+                .Where(x => x.UserId == userId && x.DeviceId == device.DeviceId && !x.IsRevoked)
+                .OrderByDescending(x => x.UpdatedAt)
+                .FirstOrDefaultAsync(ct);
+            if (signed is null) continue;
+
+            E2eeOneTimePreKey? oneTime = null;
+            if (userId != MeId)
+            {
+                oneTime = await db.E2eeOneTimePreKeys
+                    .Where(x => x.UserId == userId && x.DeviceId == device.DeviceId && x.ClaimedAt == null)
+                    .OrderBy(x => x.CreatedAt)
+                    .FirstOrDefaultAsync(ct);
+                if (oneTime is not null)
+                {
+                    oneTime.ClaimedAt = now;
+                    oneTime.ClaimedByUserId = MeId;
+                    oneTime.ClaimedByDeviceId = CleanText(Request.Headers["X-JaeZoo-DeviceId"].FirstOrDefault(), 64);
+                }
+            }
+
+            result.Add(new E2eePreKeyBundleDto(
+                device.UserId,
+                device.DeviceId,
+                device.PublicKeyBase64,
+                device.SigningPublicKeyBase64,
+                signed.KeyId,
+                signed.PublicKeyBase64,
+                signed.SignatureBase64,
+                oneTime?.KeyId,
+                oneTime?.PublicKeyBase64,
+                signed.Algorithm));
+        }
+
+        if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(ct);
+        return Ok(result);
     }
 
     [HttpGet("backup/status")]
@@ -239,7 +401,7 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         return NoContent();
     }
 
-    private async Task<UserE2eeKey> UpsertDeviceInternalAsync(Guid userId, string deviceId, string publicKeyBase64, string? deviceName, bool replaceExisting, string? platform, string? clientVersion, CancellationToken ct)
+    private async Task<UserE2eeKey> UpsertDeviceInternalAsync(Guid userId, string deviceId, string publicKeyBase64, string? deviceName, bool replaceExisting, string? platform, string? clientVersion, string? signingPublicKeyBase64, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(publicKeyBase64)) throw new BadHttpRequestException("Public key is required.");
 
@@ -256,6 +418,25 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         }
 
         if (raw.Length > 4096) throw new BadHttpRequestException("Public key is too large.");
+
+        byte[]? signingRaw = null;
+        string? signingFingerprint = null;
+        if (!string.IsNullOrWhiteSpace(signingPublicKeyBase64))
+        {
+            try
+            {
+                signingRaw = Convert.FromBase64String(signingPublicKeyBase64.Trim());
+                using var ecdsa = ECDsa.Create();
+                ecdsa.ImportSubjectPublicKeyInfo(signingRaw, out _);
+                signingFingerprint = Fingerprint(signingRaw);
+            }
+            catch
+            {
+                throw new BadHttpRequestException("Invalid E2EE signing public key.");
+            }
+
+            if (signingRaw.Length > 4096) throw new BadHttpRequestException("Signing public key is too large.");
+        }
 
         var now = DateTime.UtcNow;
         var fingerprint = Fingerprint(raw);
@@ -294,8 +475,13 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         existing.PublicKeyBase64 = Convert.ToBase64String(raw);
         existing.Algorithm = "ECDH-P256-SPKI";
         existing.Fingerprint = fingerprint;
+        if (signingRaw is not null)
+        {
+            existing.SigningPublicKeyBase64 = Convert.ToBase64String(signingRaw);
+            existing.SigningKeyFingerprint = signingFingerprint;
+        }
         existing.DeviceName = safeName ?? existing.DeviceName;
-        existing.DeviceKeyVersion = Math.Max(2, existing.DeviceKeyVersion);
+        existing.DeviceKeyVersion = Math.Max(signingRaw is null ? 2 : 3, existing.DeviceKeyVersion);
         existing.IsRevoked = false;
         existing.RevokedAt = null;
         existing.LastSeenAt = now;
@@ -381,6 +567,43 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         backup.Version,
         backup.UpdatedAt);
 
+
+    private static byte[] ValidateEcdhPublicKey(string? value, string errorMessage)
+    {
+        var raw = ValidateBase64(value, 4096, errorMessage);
+        try
+        {
+            using var ecdh = ECDiffieHellman.Create();
+            ecdh.ImportSubjectPublicKeyInfo(raw, out _);
+            return raw;
+        }
+        catch
+        {
+            throw new BadHttpRequestException(errorMessage);
+        }
+    }
+
+    private static byte[] ValidateBase64(string? value, int maxBytes, string errorMessage)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new BadHttpRequestException(errorMessage);
+
+        byte[] raw;
+        try
+        {
+            raw = Convert.FromBase64String(value.Trim());
+        }
+        catch
+        {
+            throw new BadHttpRequestException(errorMessage);
+        }
+
+        if (raw.Length == 0 || raw.Length > maxBytes)
+            throw new BadHttpRequestException(errorMessage);
+
+        return raw;
+    }
+
     private static bool LooksLikeBase64(string? value, int maxLength)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > maxLength) return false;
@@ -423,7 +646,9 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         key.UserVerifiedAt,
         key.LastIpAddress,
         key.Platform,
-        key.ClientVersion);
+        key.ClientVersion,
+        key.SigningPublicKeyBase64,
+        key.SigningKeyFingerprint);
 
     private static string? NormalizeDeviceId(string? value)
     {

@@ -204,7 +204,9 @@ public record E2eeDeviceKeyDto(
     DateTime? UserVerifiedAt = null,
     string? LastIpAddress = null,
     string? Platform = null,
-    string? ClientVersion = null
+    string? ClientVersion = null,
+    string? SigningPublicKeyBase64 = null,
+    string? SigningKeyFingerprint = null
 );
 
 public record E2eePublicKeyDto(
@@ -230,10 +232,50 @@ public record UpsertE2eeDeviceKeyRequest(
     string? DeviceName = null,
     bool ReplaceExisting = true,
     string? Platform = null,
-    string? ClientVersion = null
+    string? ClientVersion = null,
+    string? SigningPublicKeyBase64 = null
 );
 
 public record RenameE2eeDeviceRequest(string? DeviceName);
+
+public record E2eeSignedPreKeyUploadDto(
+    string KeyId,
+    string PublicKeyBase64,
+    string SignatureBase64,
+    string Algorithm = "ECDH-P256-SPKI+ECDSA-P256-SHA256"
+);
+
+public record E2eeOneTimePreKeyUploadDto(
+    string KeyId,
+    string PublicKeyBase64,
+    string Algorithm = "ECDH-P256-SPKI"
+);
+
+public record E2eePreKeyUploadRequest(
+    string DeviceId,
+    E2eeSignedPreKeyUploadDto SignedPreKey,
+    IReadOnlyList<E2eeOneTimePreKeyUploadDto>? OneTimePreKeys = null
+);
+
+public record E2eePreKeyStatusDto(
+    string DeviceId,
+    bool HasSignedPreKey,
+    int AvailableOneTimePreKeys,
+    DateTime? LastSignedPreKeyAt
+);
+
+public record E2eePreKeyBundleDto(
+    Guid UserId,
+    string DeviceId,
+    string IdentityPublicKeyBase64,
+    string? SigningPublicKeyBase64,
+    string SignedPreKeyId,
+    string SignedPreKeyPublicKeyBase64,
+    string SignedPreKeySignatureBase64,
+    string? OneTimePreKeyId,
+    string? OneTimePreKeyPublicKeyBase64,
+    string Algorithm
+);
 
 public record E2eeBackupStatusDto(
     bool Enabled,

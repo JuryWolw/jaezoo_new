@@ -37,6 +37,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<TwoFactorLoginChallenge> TwoFactorLoginChallenges => Set<TwoFactorLoginChallenge>();
     public DbSet<LoginAlertToken> LoginAlertTokens => Set<LoginAlertToken>();
     public DbSet<E2eeEncryptedBackup> E2eeEncryptedBackups => Set<E2eeEncryptedBackup>();
+    public DbSet<E2eeSignedPreKey> E2eeSignedPreKeys => Set<E2eeSignedPreKey>();
+    public DbSet<E2eeOneTimePreKey> E2eeOneTimePreKeys => Set<E2eeOneTimePreKey>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -131,6 +133,14 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .HasMaxLength(128);
 
         b.Entity<UserE2eeKey>()
+            .Property(k => k.SigningPublicKeyBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<UserE2eeKey>()
+            .Property(k => k.SigningKeyFingerprint)
+            .HasMaxLength(128);
+
+        b.Entity<UserE2eeKey>()
             .Property(k => k.DeviceId)
             .HasMaxLength(64);
 
@@ -175,16 +185,268 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .OnDelete(DeleteBehavior.Cascade);
 
 
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.DeviceId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.KeyId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.PublicKeyBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.SignatureBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.Algorithm)
+            .HasMaxLength(96);
+
+        b.Entity<E2eeSignedPreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.IsRevoked });
+
+        b.Entity<E2eeSignedPreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
+            .IsUnique();
+
+        b.Entity<E2eeSignedPreKey>()
+            .HasOne(k => k.User)
+            .WithMany()
+            .HasForeignKey(k => k.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.DeviceId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.KeyId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.PublicKeyBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.Algorithm)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.ClaimedAt });
+
+        b.Entity<E2eeOneTimePreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
+            .IsUnique();
+
+        b.Entity<E2eeOneTimePreKey>()
+            .HasOne(k => k.User)
+            .WithMany()
+            .HasForeignKey(k => k.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
         b.Entity<TwoFactorRecoveryCode>()
             .Property(c => c.CodeHash)
             .HasMaxLength(128);
+
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.DeviceId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.KeyId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.PublicKeyBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.SignatureBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.Algorithm)
+            .HasMaxLength(96);
+
+        b.Entity<E2eeSignedPreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.IsRevoked });
+
+        b.Entity<E2eeSignedPreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
+            .IsUnique();
+
+        b.Entity<E2eeSignedPreKey>()
+            .HasOne(k => k.User)
+            .WithMany()
+            .HasForeignKey(k => k.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.DeviceId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.KeyId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.PublicKeyBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.Algorithm)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.ClaimedAt });
+
+        b.Entity<E2eeOneTimePreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
+            .IsUnique();
+
+        b.Entity<E2eeOneTimePreKey>()
+            .HasOne(k => k.User)
+            .WithMany()
+            .HasForeignKey(k => k.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<TwoFactorRecoveryCode>()
             .Property(c => c.UsedIpAddress)
             .HasMaxLength(64);
 
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.DeviceId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.KeyId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.PublicKeyBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.SignatureBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.Algorithm)
+            .HasMaxLength(96);
+
+        b.Entity<E2eeSignedPreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.IsRevoked });
+
+        b.Entity<E2eeSignedPreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
+            .IsUnique();
+
+        b.Entity<E2eeSignedPreKey>()
+            .HasOne(k => k.User)
+            .WithMany()
+            .HasForeignKey(k => k.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.DeviceId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.KeyId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.PublicKeyBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.Algorithm)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.ClaimedAt });
+
+        b.Entity<E2eeOneTimePreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
+            .IsUnique();
+
+        b.Entity<E2eeOneTimePreKey>()
+            .HasOne(k => k.User)
+            .WithMany()
+            .HasForeignKey(k => k.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
         b.Entity<TwoFactorRecoveryCode>()
             .HasIndex(c => new { c.UserId, c.UsedAt });
+
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.DeviceId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.KeyId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.PublicKeyBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.SignatureBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<E2eeSignedPreKey>()
+            .Property(k => k.Algorithm)
+            .HasMaxLength(96);
+
+        b.Entity<E2eeSignedPreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.IsRevoked });
+
+        b.Entity<E2eeSignedPreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
+            .IsUnique();
+
+        b.Entity<E2eeSignedPreKey>()
+            .HasOne(k => k.User)
+            .WithMany()
+            .HasForeignKey(k => k.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.DeviceId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.KeyId)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.PublicKeyBase64)
+            .HasMaxLength(8192);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .Property(k => k.Algorithm)
+            .HasMaxLength(64);
+
+        b.Entity<E2eeOneTimePreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.ClaimedAt });
+
+        b.Entity<E2eeOneTimePreKey>()
+            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
+            .IsUnique();
+
+        b.Entity<E2eeOneTimePreKey>()
+            .HasOne(k => k.User)
+            .WithMany()
+            .HasForeignKey(k => k.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<TwoFactorRecoveryCode>()
             .HasOne(c => c.User)

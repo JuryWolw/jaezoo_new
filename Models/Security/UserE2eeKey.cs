@@ -21,6 +21,12 @@ public sealed class UserE2eeKey
     [MaxLength(128)]
     public string Fingerprint { get; set; } = string.Empty;
 
+    [MaxLength(8192)]
+    public string? SigningPublicKeyBase64 { get; set; }
+
+    [MaxLength(128)]
+    public string? SigningKeyFingerprint { get; set; }
+
     [MaxLength(128)]
     public string? DeviceName { get; set; }
 
