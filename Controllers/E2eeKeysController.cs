@@ -298,7 +298,7 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
             .FirstOrDefaultAsync(ct);
         var available = await db.E2eeOneTimePreKeys.AsNoTracking()
             .CountAsync(x => x.UserId == MeId && x.DeviceId == normalized && x.ClaimedAt == null, ct);
-        return Ok(new E2eePreKeyStatusDto(normalized, signed is not null, available, signed?.UpdatedAt));
+        return Ok(new E2eePreKeyStatusDto(normalized, signed is not null, available, signed?.UpdatedAt, signed?.KeyId));
     }
 
     [HttpPost("prekeys/me")]
@@ -329,6 +329,9 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
 
         var now = DateTime.UtcNow;
         var existingSigned = await db.E2eeSignedPreKeys.FirstOrDefaultAsync(x => x.UserId == MeId && x.DeviceId == deviceId && x.KeyId == signedKeyId, ct);
+        var normalizedSignedPublic = Convert.ToBase64String(signedPublicRaw);
+        var signedPreKeyRotated = existingSigned is null ||
+                                  !string.Equals(existingSigned.PublicKeyBase64, normalizedSignedPublic, StringComparison.Ordinal);
         if (existingSigned is null)
         {
             existingSigned = new E2eeSignedPreKey
@@ -342,7 +345,7 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
             db.E2eeSignedPreKeys.Add(existingSigned);
         }
 
-        existingSigned.PublicKeyBase64 = Convert.ToBase64String(signedPublicRaw);
+        existingSigned.PublicKeyBase64 = normalizedSignedPublic;
         existingSigned.SignatureBase64 = Convert.ToBase64String(signatureRaw);
         existingSigned.Algorithm = CleanText(request.SignedPreKey.Algorithm, 96) ?? "ECDH-P256-SPKI+ECDSA-P256-SHA256";
         existingSigned.IsRevoked = false;
@@ -360,6 +363,28 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         }
 
         var uploadedOneTime = request.OneTimePreKeys ?? Array.Empty<E2eeOneTimePreKeyUploadDto>();
+        var uploadedOneTimeKeyIds = uploadedOneTime
+            .Select(x => CleanText(x.KeyId, 64))
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x!)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (signedPreKeyRotated || oldSigned.Count > 0)
+        {
+            var staleOneTime = await db.E2eeOneTimePreKeys
+                .Where(x => x.UserId == MeId &&
+                            x.DeviceId == deviceId &&
+                            x.ClaimedAt == null)
+                .ToListAsync(ct);
+
+            foreach (var stale in staleOneTime.Where(x => !uploadedOneTimeKeyIds.Contains(x.KeyId)))
+            {
+                stale.ClaimedAt = now;
+                stale.ClaimedByUserId = MeId;
+                stale.ClaimedByDeviceId = "rotated-signed-prekey";
+            }
+        }
+
         foreach (var oneTime in uploadedOneTime.Take(100))
         {
             var keyId = CleanText(oneTime.KeyId, 64);
@@ -385,7 +410,7 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
         await securityAudit.TryWriteAsync(User, HttpContext, "Security.E2eePreKeysUploaded", "E2EEDevice", deviceId, $"E2EE prekeys uploaded. signed={signedKeyId}; oneTimeUploaded={uploadedOneTime.Count}", ct);
 
         var available = await db.E2eeOneTimePreKeys.AsNoTracking().CountAsync(x => x.UserId == MeId && x.DeviceId == deviceId && x.ClaimedAt == null, ct);
-        return Ok(new E2eePreKeyStatusDto(deviceId, true, available, existingSigned.UpdatedAt));
+        return Ok(new E2eePreKeyStatusDto(deviceId, true, available, existingSigned.UpdatedAt, existingSigned.KeyId));
     }
 
     [HttpGet("prekeys/bundles/{userId:guid}")]

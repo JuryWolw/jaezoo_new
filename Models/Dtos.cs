@@ -298,7 +298,8 @@ public record E2eePreKeyStatusDto(
     string DeviceId,
     bool HasSignedPreKey,
     int AvailableOneTimePreKeys,
-    DateTime? LastSignedPreKeyAt
+    DateTime? LastSignedPreKeyAt,
+    string? SignedPreKeyId = null
 );
 
 public record E2eePreKeyBundleDto(
@@ -746,3 +747,16 @@ public sealed record TwoFactorLoginRequest(
     string ChallengeToken,
     string Code
 );
+
+public sealed record TwoFactorEmailCodeRequest(
+    string ChallengeToken
+);
+
+public sealed record TwoFactorEmailCodeResponse(
+    bool Sent,
+    bool Cooldown,
+    int RetryAfterSeconds,
+    DateTime? ExpiresAtUtc,
+    string Message
+);
+

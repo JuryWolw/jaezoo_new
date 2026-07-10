@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using JaeZoo.Server.Data;
@@ -20,7 +20,8 @@ public sealed record LoginNotificationContext(
     bool IsKnownDevice,
     bool UsedTwoFactor,
     bool UsedRecoveryCode,
-    Guid? SessionId);
+    Guid? SessionId,
+    bool UsedEmailCode = false);
 
 public sealed class LoginNotificationService(
     AppDbContext db,
@@ -190,7 +191,9 @@ public sealed class LoginNotificationService(
         var clientVersion = string.IsNullOrWhiteSpace(context.ClientVersion) ? "не указано" : context.ClientVersion;
         var deviceType = context.IsKnownDevice ? "знакомое устройство" : "новое устройство";
         var protection = context.UsedTwoFactor
-            ? context.UsedRecoveryCode ? "пароль + recovery-код 2FA" : "пароль + код 2FA"
+            ? context.UsedEmailCode
+                ? "пароль + код с почты"
+                : context.UsedRecoveryCode ? "пароль + recovery-код 2FA" : "пароль + код 2FA"
             : "пароль";
 
         var subject = context.IsKnownDevice

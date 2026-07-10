@@ -1,4 +1,4 @@
-using System.ComponentModel.DataAnnotations;
+﻿using System.ComponentModel.DataAnnotations;
 using System.Security.Claims;
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
@@ -305,6 +305,7 @@ public class AuthController(
         var normalizedOtp = TotpService.NormalizeCode(code);
         var verified = false;
         var usedRecoveryCode = false;
+        var usedEmailCode = false;
         if (normalizedOtp.Length == 6 && normalizedOtp.All(char.IsDigit))
         {
             var secret = IdentityDataProtector.UnprotectSecret(user.TwoFactorSecretEncrypted);
@@ -331,8 +332,17 @@ public class AuthController(
 
         if (!verified)
         {
-            await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FAFailed", "User", user.Id.ToString(), $"Wrong 2FA code. publicId={user.PublicId}", ct);
-            return Unauthorized("Неверный код из приложения-аутентификатора или recovery-код.");
+            if (await emailVerification.TryConsumeTwoFactorLoginCodeAsync(user.Id, code, HttpContext, challenge.Id, ct))
+            {
+                verified = true;
+                usedEmailCode = true;
+            }
+        }
+
+        if (!verified)
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FAFailed", "User", user.Id.ToString(), $"Wrong 2FA/recovery/email code. publicId={user.PublicId}", ct);
+            return Unauthorized("Неверный код из приложения-аутентификатора, recovery-код или код с почты.");
         }
 
         challenge.UsedAt = now;
@@ -380,13 +390,13 @@ public class AuthController(
 
         await loginNotifications.TrySendLoginNotificationAsync(
             user,
-            new LoginNotificationContext(now, ipAddress, deviceName, platform, clientVersion, userAgent, knownDevice, UsedTwoFactor: true, UsedRecoveryCode: usedRecoveryCode, SessionId: session?.Id),
+            new LoginNotificationContext(now, ipAddress, deviceName, platform, clientVersion, userAgent, knownDevice, UsedTwoFactor: true, UsedRecoveryCode: usedRecoveryCode, SessionId: session?.Id, UsedEmailCode: usedEmailCode),
             HttpContext,
             ct);
 
         var accessExpiresAt = now.AddMinutes(60);
         var token = tokens.Create(user, roles, session?.Id, accessExpiresAt);
-        await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FASucceeded", "User", user.Id.ToString(), $"2FA login succeeded. rememberMe={challenge.RememberMe}; recoveryCode={usedRecoveryCode}; sessionId={session?.Id.ToString() ?? "none"}; knownDevice={knownDevice}; publicId={user.PublicId}", ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FASucceeded", "User", user.Id.ToString(), $"2FA login succeeded. rememberMe={challenge.RememberMe}; recoveryCode={usedRecoveryCode}; emailCode={usedEmailCode}; sessionId={session?.Id.ToString() ?? "none"}; knownDevice={knownDevice}; publicId={user.PublicId}", ct);
         return new TokenResponse(
             token,
             ToUserDto(user),
@@ -395,6 +405,58 @@ public class AuthController(
             session?.Id,
             accessExpiresAt,
             refreshExpiresAt);
+    }
+
+
+    [HttpPost("login/2fa/email-code/send")]
+    public async Task<ActionResult<TwoFactorEmailCodeResponse>> SendTwoFactorEmailCode([FromBody] TwoFactorEmailCodeRequest r, CancellationToken ct)
+    {
+        var tokenValue = (r.ChallengeToken ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(tokenValue))
+            return Unauthorized("Код входа истёк. Войдите заново.");
+
+        var tokenHash = TotpService.HashLoginChallengeToken(tokenValue);
+        var now = DateTime.UtcNow;
+        var challenge = await db.TwoFactorLoginChallenges
+            .Include(c => c.User)
+            .FirstOrDefaultAsync(c => c.ChallengeTokenHash == tokenHash, ct);
+
+        if (challenge is null || challenge.User is null || challenge.UsedAt != null || challenge.ExpiresAt <= now)
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FAEmailCodeFailed", "2FA", SecurityAuditService.HashTarget(tokenValue), "2FA challenge invalid or expired for email code.", ct);
+            return Unauthorized("Код входа истёк. Войдите заново.");
+        }
+
+        var user = challenge.User;
+        if (!user.TwoFactorEnabled || string.IsNullOrWhiteSpace(user.TwoFactorSecretEncrypted) || user.IsDisabled)
+            return Unauthorized("Двухфакторная защита недоступна.");
+
+        if (!user.EmailConfirmed)
+            return BadRequest("Почта аккаунта не подтверждена. Используйте recovery-код 2FA.");
+
+        var result = await emailVerification.SendTwoFactorLoginCodeAsync(user, HttpContext, challenge.Id, ct);
+        await securityAudit.TryWriteAsync(User, HttpContext, result.Sent ? "Security.Login2FAEmailCodeSent" : "Security.Login2FAEmailCodeNotSent", "User", user.Id.ToString(), result.Message, ct);
+
+        if (result.ExpiresAt.HasValue && challenge.ExpiresAt < result.ExpiresAt.Value)
+        {
+            challenge.ExpiresAt = result.ExpiresAt.Value;
+            await db.SaveChangesAsync(ct);
+        }
+
+        var response = new TwoFactorEmailCodeResponse(
+            result.Sent,
+            result.Cooldown,
+            result.RetryAfterSeconds,
+            result.ExpiresAt,
+            result.Message);
+
+        if (result.Cooldown)
+            return StatusCode(StatusCodes.Status429TooManyRequests, response);
+
+        if (!result.Sent)
+            return BadRequest(response);
+
+        return Ok(response);
     }
 
 

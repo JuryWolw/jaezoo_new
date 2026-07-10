@@ -1,10 +1,11 @@
-using System.ComponentModel.DataAnnotations;
+﻿using System.ComponentModel.DataAnnotations;
 
 namespace JaeZoo.Server.Models;
 
 public enum EmailVerificationPurpose
 {
-    EmailConfirmation = 0
+    EmailConfirmation = 0,
+    TwoFactorLoginRecovery = 1
 }
 
 public class EmailVerificationCode

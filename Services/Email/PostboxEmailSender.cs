@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Mail;
 using System.Text;
 using Amazon.Runtime;
@@ -30,6 +30,45 @@ public sealed class PostboxEmailSender(IOptions<PostboxOptions> options, ILogger
             ? SendViaSmtpAsync(user, code, ct)
             : SendViaAwsSesV2SdkAsync(user, code, ct);
     }
+
+    public Task SendTwoFactorLoginCodeAsync(User user, string code, CancellationToken ct)
+    {
+        if (!_options.Enabled)
+            throw new InvalidOperationException("Postbox is disabled. Set Postbox:Enabled=true.");
+
+        if (string.IsNullOrWhiteSpace(_options.UserName) || string.IsNullOrWhiteSpace(_options.Password))
+            throw new InvalidOperationException("Postbox credentials are not configured.");
+
+        if (string.IsNullOrWhiteSpace(_options.FromEmail))
+            throw new InvalidOperationException("Postbox:FromEmail is not configured.");
+
+        var displayName = string.IsNullOrWhiteSpace(user.DisplayName) ? "пользователь JaeZoo" : user.DisplayName;
+        var subject = "JaeZoo: код входа при потере 2FA";
+        var text = $"""
+Привет, {displayName}!
+
+Код входа в JaeZoo: {code}
+
+Введите этот код в окне 2FA. Код действует 15 минут. Если это были не вы, срочно смените пароль.
+""";
+        var html = $"""
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"></head>
+<body style="font-family: Arial, sans-serif; color: #1f1f1f;">
+  <h2>Код входа JaeZoo</h2>
+  <p>Привет, {WebUtility.HtmlEncode(displayName)}!</p>
+  <p>Код для входа при потере доступа к 2FA:</p>
+  <div style="font-size: 28px; font-weight: 700; letter-spacing: 6px; padding: 14px 18px; background: #f2f2f2; border-radius: 10px; display: inline-block;">{WebUtility.HtmlEncode(code)}</div>
+  <p>Код действует 15 минут.</p>
+  <p style="color:#777; font-size: 13px;">Если это были не вы, срочно смените пароль.</p>
+</body>
+</html>
+""";
+
+        return SendAccountNotificationAsync(user, subject, text, html, ct);
+    }
+
     public Task SendAccountNotificationAsync(User user, string subject, string textBody, string? htmlBody, CancellationToken ct)
     {
         if (!_options.Enabled)
