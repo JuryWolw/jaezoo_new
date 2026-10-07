@@ -113,6 +113,16 @@ public static class SecurityStartupValidator
         Add(checks, "LiveKit", "API secret", !liveKitConfigured || IsStrongSecret(liveKitApiSecret, 24), strictMode && liveKitConfigured,
             "LiveKit:ApiSecret is required when LiveKit is configured.");
 
+        var callsLiveKitUrl = configuration["CallsLiveKit:Url"];
+        var callsLiveKitApiKey = configuration["CallsLiveKit:ApiKey"];
+        var callsLiveKitApiSecret = configuration["CallsLiveKit:ApiSecret"];
+        Add(checks, "CallsLiveKit", "URL", IsWsUrl(callsLiveKitUrl), false,
+            "CallsLiveKit:Url must be ws:// or wss://. Private calls are unavailable without it.");
+        Add(checks, "CallsLiveKit", "API key", IsStrongSecret(callsLiveKitApiKey, 6), false,
+            "CallsLiveKit:ApiKey is missing. Private calls are unavailable without it.");
+        Add(checks, "CallsLiveKit", "API secret", IsStrongSecret(callsLiveKitApiSecret, 24), false,
+            "CallsLiveKit:ApiSecret is missing or too short. Private calls are unavailable without it.");
+
         var swaggerEnabled = configuration.GetValue<bool>("Swagger");
         var allowSwaggerInProduction = configuration.GetValue<bool>("Security:AllowSwaggerInProduction");
         Add(checks, "Swagger", "Disabled in production", !production || !swaggerEnabled || allowSwaggerInProduction, strictMode,

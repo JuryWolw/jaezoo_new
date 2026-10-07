@@ -22,19 +22,22 @@ public sealed class CallsController : ControllerBase
     private readonly CallAuditService _audit;
     private readonly CallHistoryService _history;
     private readonly IHubContext<CallsHub> _callsHub;
+    private readonly CallMediaTokenService _media;
 
     public CallsController(
         AppDbContext db,
         CallSessionService sessions,
         CallAuditService audit,
         CallHistoryService history,
-        IHubContext<CallsHub> callsHub)
+        IHubContext<CallsHub> callsHub,
+        CallMediaTokenService media)
     {
         _db = db;
         _sessions = sessions;
         _audit = audit;
         _history = history;
         _callsHub = callsHub;
+        _media = media;
     }
 
     private Guid MeId
@@ -63,6 +66,45 @@ public sealed class CallsController : ControllerBase
         return Ok(data);
     }
 
+    /// <summary>
+    /// Токен для подключения к медиакомнате звонка. Выдаётся только участникам
+    /// уже принятого звонка; комната своя у каждого звонка.
+    /// </summary>
+    [HttpPost("{callId:guid}/join")]
+    public async Task<ActionResult<CallJoinResponse>> Join(Guid callId, CancellationToken ct)
+    {
+        var me = MeId;
+        if (!_sessions.TryGet(callId, out var session) || session is null)
+            return NotFound(new { code = "call_not_found", message = "Звонок не найден или уже завершён." });
+
+        if (!_sessions.IsParticipant(session, me))
+            return Forbid();
+
+        if (session.State is not (CallState.Accepted or CallState.Connecting or CallState.Connected))
+            return Conflict(new { code = "call_not_accepted", message = $"Звонок в состоянии {session.State}, подключение к медиа недоступно." });
+
+        if (!_media.IsConfigured)
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { code = "calls_media_unavailable", message = "Личные звонки временно недоступны: сервер звонков не настроен." });
+
+        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == me, ct);
+        if (user is null)
+            return Unauthorized();
+
+        var (token, expiresAtUtc) = _media.CreateJoinToken(user, callId);
+        _sessions.TouchCallParticipant(callId, me);
+        _audit.Info(session, "call.media.join-token", extra: new { userId = me, expiresAtUtc });
+
+        return Ok(new CallJoinResponse
+        {
+            CallId = callId,
+            Url = _media.Url,
+            Token = token,
+            RoomName = CallMediaTokenService.BuildRoomName(callId),
+            Identity = me.ToString(),
+            ExpiresAtUtc = expiresAtUtc
+        });
+    }
+
     [HttpPost("start")]
     [RequireVerifiedEmail]
     public async Task<ActionResult<StartCallResponse>> Start([FromBody] StartCallRequest request, CancellationToken ct)
@@ -89,6 +131,9 @@ public sealed class CallsController : ControllerBase
             .FirstOrDefaultAsync(ct);
         if (!calleeVerified)
             return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Звонок пока недоступен." });
+
+        if (!_media.IsConfigured)
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { code = "calls_media_unavailable", message = "Личные звонки временно недоступны: сервер звонков не настроен." });
 
         var caller = await _db.Users.AsNoTracking().FirstAsync(u => u.Id == me, ct);
 

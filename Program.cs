@@ -210,6 +210,8 @@ builder.Services.AddSingleton<IPresenceTracker, PresenceTracker>();
 builder.Services.Configure<CallLifecycleOptions>(builder.Configuration.GetSection("Calls:Lifecycle"));
 builder.Services.Configure<LiveKitOptions>(builder.Configuration.GetSection("LiveKit"));
 builder.Services.AddSingleton<LiveKitTokenService>();
+builder.Services.Configure<CallsLiveKitOptions>(builder.Configuration.GetSection("CallsLiveKit"));
+builder.Services.AddSingleton<CallMediaTokenService>();
 builder.Services.AddScoped<GroupVoiceService>();
 builder.Services.AddSingleton<CallSessionService>();
 builder.Services.AddSingleton<CallAuditService>();

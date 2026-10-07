@@ -224,3 +224,13 @@ public sealed class HeartbeatCallRequest
     public HeartbeatCallRequest() { }
     public HeartbeatCallRequest(Guid callId) => CallId = callId;
 }
+
+public sealed class CallJoinResponse
+{
+    public Guid CallId { get; set; }
+    public string Url { get; set; } = string.Empty;
+    public string Token { get; set; } = string.Empty;
+    public string RoomName { get; set; } = string.Empty;
+    public string Identity { get; set; } = string.Empty;
+    public DateTime ExpiresAtUtc { get; set; }
+}

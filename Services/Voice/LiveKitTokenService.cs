@@ -1,6 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services;
 using JaeZoo.Server.Options;
@@ -10,17 +7,16 @@ namespace JaeZoo.Server.Services.Voice;
 
 public sealed class LiveKitTokenService(IOptions<LiveKitOptions> options)
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly LiveKitOptions _options = options.Value;
 
-    public string Url => NormalizeUrl(_options.Url);
+    public string Url => LiveKitJwt.NormalizeUrl(_options.Url);
 
     public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(_options.Url) &&
         !string.IsNullOrWhiteSpace(_options.ApiKey) &&
         !string.IsNullOrWhiteSpace(_options.ApiSecret) &&
-        !LooksLikePlaceholder(_options.ApiKey) &&
-        !LooksLikePlaceholder(_options.ApiSecret);
+        !LiveKitJwt.LooksLikePlaceholder(_options.ApiKey) &&
+        !LiveKitJwt.LooksLikePlaceholder(_options.ApiSecret);
 
     public string CreateJoinToken(User user, Guid groupId, Guid sessionId, string roomName)
     {
@@ -42,14 +38,14 @@ public sealed class LiveKitTokenService(IOptions<LiveKitOptions> options)
             ["iat"] = now.ToUnixTimeSeconds(),
             ["nbf"] = now.AddSeconds(-10).ToUnixTimeSeconds(),
             ["exp"] = now.Add(ttl).ToUnixTimeSeconds(),
-            ["metadata"] = JsonSerializer.Serialize(new
+            ["metadata"] = LiveKitJwt.SerializeMetadata(new
             {
                 userId = user.Id,
                 userName = UserIdentityService.GetPublicName(user),
                 publicId = user.PublicId,
                 groupId,
                 sessionId
-            }, JsonOptions),
+            }),
             ["video"] = new Dictionary<string, object?>
             {
                 ["roomJoin"] = true,
@@ -61,44 +57,8 @@ public sealed class LiveKitTokenService(IOptions<LiveKitOptions> options)
             }
         };
 
-        var headerJson = JsonSerializer.Serialize(new Dictionary<string, object?>
-        {
-            ["alg"] = "HS256",
-            ["typ"] = "JWT"
-        }, JsonOptions);
-
-        var payloadJson = JsonSerializer.Serialize(payload, JsonOptions);
-        var signingInput = $"{Base64UrlEncode(Encoding.UTF8.GetBytes(headerJson))}.{Base64UrlEncode(Encoding.UTF8.GetBytes(payloadJson))}";
-
-        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(_options.ApiSecret));
-        var signature = Base64UrlEncode(hmac.ComputeHash(Encoding.ASCII.GetBytes(signingInput)));
-        return $"{signingInput}.{signature}";
+        return LiveKitJwt.Sign(_options.ApiSecret, payload);
     }
 
     public static string BuildGroupRoomName(Guid groupId) => $"group-{groupId:N}-voice";
-
-    private static bool LooksLikePlaceholder(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return false;
-        return value.Contains("SET_", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("placeholder", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("<secret", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string NormalizeUrl(string? url)
-    {
-        url = (url ?? string.Empty).Trim().TrimEnd('/');
-        if (url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            return "wss://" + url["https://".Length..];
-        if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
-            return "ws://" + url["http://".Length..];
-        return url;
-    }
-
-    private static string Base64UrlEncode(byte[] bytes) =>
-        Convert.ToBase64String(bytes)
-            .TrimEnd('=')
-            .Replace('+', '-')
-            .Replace('/', '_');
 }
