@@ -25,51 +25,6 @@ public enum CallState
     TimedOut = 11
 }
 
-public sealed class IceServerDto
-{
-    public string[] Urls { get; set; } = Array.Empty<string>();
-    public string Username { get; set; } = string.Empty;
-    public string Credential { get; set; } = string.Empty;
-    public string CredentialType { get; set; } = "password";
-
-    public IceServerDto() { }
-    public IceServerDto(string[] urls, string username, string credential, string credentialType = "password")
-    {
-        Urls = urls ?? Array.Empty<string>();
-        Username = username ?? string.Empty;
-        Credential = credential ?? string.Empty;
-        CredentialType = string.IsNullOrWhiteSpace(credentialType) ? "password" : credentialType;
-    }
-}
-
-public sealed class IceConfigResponse
-{
-    public IReadOnlyList<IceServerDto> IceServers { get; set; } = Array.Empty<IceServerDto>();
-    public int TtlSeconds { get; set; }
-    public DateTime ExpiresAtUtc { get; set; }
-
-    public IceConfigResponse() { }
-    public IceConfigResponse(IReadOnlyList<IceServerDto> iceServers, int ttlSeconds, DateTime expiresAtUtc)
-    {
-        IceServers = iceServers ?? Array.Empty<IceServerDto>();
-        TtlSeconds = ttlSeconds;
-        ExpiresAtUtc = expiresAtUtc;
-    }
-}
-
-
-public sealed class TurnDiagnosticsResponse
-{
-    public bool Configured { get; set; }
-    public bool HasSecret { get; set; }
-    public bool SecretLooksLikePlaceholder { get; set; }
-    public int TtlSeconds { get; set; }
-    public DateTime? SampleExpiresAtUtc { get; set; }
-    public string Realm { get; set; } = string.Empty;
-    public string[] Urls { get; set; } = Array.Empty<string>();
-    public string[] Problems { get; set; } = Array.Empty<string>();
-}
-
 public sealed class StartCallRequest
 {
     public Guid PeerUserId { get; set; }
@@ -220,55 +175,6 @@ public sealed class CallStateChangedDto
     }
 }
 
-public sealed class WebRtcOfferDto
-{
-    public Guid CallId { get; set; }
-    [Required] public string Sdp { get; set; } = string.Empty;
-    public string Type { get; set; } = "offer";
-
-    public WebRtcOfferDto() { }
-    public WebRtcOfferDto(Guid callId, string sdp, string type = "offer")
-    {
-        CallId = callId;
-        Sdp = sdp ?? string.Empty;
-        Type = string.IsNullOrWhiteSpace(type) ? "offer" : type;
-    }
-}
-
-public sealed class WebRtcAnswerDto
-{
-    public Guid CallId { get; set; }
-    [Required] public string Sdp { get; set; } = string.Empty;
-    public string Type { get; set; } = "answer";
-
-    public WebRtcAnswerDto() { }
-    public WebRtcAnswerDto(Guid callId, string sdp, string type = "answer")
-    {
-        CallId = callId;
-        Sdp = sdp ?? string.Empty;
-        Type = string.IsNullOrWhiteSpace(type) ? "answer" : type;
-    }
-}
-
-public sealed class IceCandidateDto
-{
-    public Guid CallId { get; set; }
-    public string Candidate { get; set; } = string.Empty;
-    public string? SdpMid { get; set; }
-    public int? SdpMLineIndex { get; set; }
-    public string? UsernameFragment { get; set; }
-
-    public IceCandidateDto() { }
-    public IceCandidateDto(Guid callId, string candidate, string? sdpMid, int? sdpMLineIndex, string? usernameFragment = null)
-    {
-        CallId = callId;
-        Candidate = candidate ?? string.Empty;
-        SdpMid = sdpMid;
-        SdpMLineIndex = sdpMLineIndex;
-        UsernameFragment = usernameFragment;
-    }
-}
-
 public sealed class CallSession
 {
     public Guid CallId { get; init; }
@@ -281,9 +187,6 @@ public sealed class CallSession
     public DateTime? AcceptedAtUtc { get; set; }
     public DateTime? ConnectedAtUtc { get; set; }
     public DateTime? EndedAtUtc { get; set; }
-    public DateTime? LastOfferAtUtc { get; set; }
-    public DateTime? LastAnswerAtUtc { get; set; }
-    public DateTime? LastIceCandidateAtUtc { get; set; }
     public DateTime? LastActivityAtUtc { get; set; }
     public DateTime? LastCallerActivityAtUtc { get; set; }
     public DateTime? LastCalleeActivityAtUtc { get; set; }

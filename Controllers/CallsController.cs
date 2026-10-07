@@ -19,7 +19,6 @@ public sealed class CallsController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly CallSessionService _sessions;
-    private readonly TurnCredentialsService _turn;
     private readonly CallAuditService _audit;
     private readonly CallHistoryService _history;
     private readonly IHubContext<CallsHub> _callsHub;
@@ -27,14 +26,12 @@ public sealed class CallsController : ControllerBase
     public CallsController(
         AppDbContext db,
         CallSessionService sessions,
-        TurnCredentialsService turn,
         CallAuditService audit,
         CallHistoryService history,
         IHubContext<CallsHub> callsHub)
     {
         _db = db;
         _sessions = sessions;
-        _turn = turn;
         _audit = audit;
         _history = history;
         _callsHub = callsHub;
@@ -54,23 +51,6 @@ public sealed class CallsController : ControllerBase
             return parsed;
         }
     }
-
-    [HttpGet("ice-config")]
-    public ActionResult<IceConfigResponse> GetIceConfig()
-    {
-        try
-        {
-            return Ok(_turn.CreateForUser(MeId));
-        }
-        catch (InvalidOperationException ex)
-        {
-            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { message = ex.Message, diagnostics = _turn.GetDiagnostics() });
-        }
-    }
-
-    [HttpGet("diagnostics")]
-    public ActionResult<TurnDiagnosticsResponse> GetDiagnostics()
-        => Ok(_turn.GetDiagnostics());
 
     [HttpGet("active")]
     public ActionResult<IEnumerable<StartCallResponse>> GetActive()
@@ -109,14 +89,6 @@ public sealed class CallsController : ControllerBase
             .FirstOrDefaultAsync(ct);
         if (!calleeVerified)
             return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Звонок пока недоступен." });
-
-        var turnDiagnostics = _turn.GetDiagnostics();
-        if (!turnDiagnostics.Configured)
-            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
-            {
-                message = "Private calls are temporarily unavailable: TURN is not configured on the server.",
-                diagnostics = turnDiagnostics
-            });
 
         var caller = await _db.Users.AsNoTracking().FirstAsync(u => u.Id == me, ct);
 

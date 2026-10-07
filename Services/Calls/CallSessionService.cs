@@ -165,7 +165,7 @@ public sealed class CallSessionService
     }
 
     public static string DescribeSession(CallSession session)
-        => $"callId={session.CallId};state={session.State};caller={session.CallerUserId};callee={session.CalleeUserId};dialogId={session.DialogId};corr={session.CorrelationId};created={session.CreatedAtUtc:O};accepted={session.AcceptedAtUtc:O};connected={session.ConnectedAtUtc:O};ended={session.EndedAtUtc:O};lastActivity={session.LastActivityAtUtc:O};lastCaller={session.LastCallerActivityAtUtc:O};lastCallee={session.LastCalleeActivityAtUtc:O};lastOffer={session.LastOfferAtUtc:O};lastAnswer={session.LastAnswerAtUtc:O};lastIce={session.LastIceCandidateAtUtc:O};endReason={session.EndReason}";
+        => $"callId={session.CallId};state={session.State};caller={session.CallerUserId};callee={session.CalleeUserId};dialogId={session.DialogId};corr={session.CorrelationId};created={session.CreatedAtUtc:O};accepted={session.AcceptedAtUtc:O};connected={session.ConnectedAtUtc:O};ended={session.EndedAtUtc:O};lastActivity={session.LastActivityAtUtc:O};lastCaller={session.LastCallerActivityAtUtc:O};lastCallee={session.LastCalleeActivityAtUtc:O};endReason={session.EndReason}";
 
 
     public DateTime? GetUserLastSeenUtc(Guid userId) =>

@@ -43,14 +43,6 @@ public static class SecurityStartupValidator
         "changeme"
     ];
 
-    private static readonly string[] TurnPlaceholders =
-    [
-        "SET_TURN_SHARED_SECRET",
-        "TURN_SECRET",
-        "change_me",
-        "changeme"
-    ];
-
     public static SecurityStartupReport Evaluate(IConfiguration configuration, IWebHostEnvironment environment)
     {
         var production = environment.IsProduction();
@@ -109,9 +101,6 @@ public static class SecurityStartupValidator
         var captchaFailOpen = configuration.GetValue<bool>("SmartCaptcha:FailOpen");
         Add(checks, "SmartCaptcha", "Fail closed", !captchaFailOpen, strictMode && captchaEnabled,
             "SmartCaptcha:FailOpen must be false in Production.");
-
-        Add(checks, "TURN", "Shared secret", IsStrongSecret(configuration["Turn:Secret"], 24, TurnPlaceholders), strictMode,
-            "Turn:Secret must be a real shared secret in Production.");
 
         var liveKitUrl = configuration["LiveKit:Url"];
         var liveKitApiKey = configuration["LiveKit:ApiKey"];

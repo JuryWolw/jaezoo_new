@@ -119,9 +119,6 @@ public sealed class CallSessionMonitorService : BackgroundService
         var lastSignalUtc = new DateTime?[]
         {
             session.LastActivityAtUtc,
-            session.LastOfferAtUtc,
-            session.LastAnswerAtUtc,
-            session.LastIceCandidateAtUtc,
             session.AcceptedAtUtc,
             session.ConnectedAtUtc,
             session.CreatedAtUtc

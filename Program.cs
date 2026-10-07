@@ -207,12 +207,10 @@ else
 }
 
 builder.Services.AddSingleton<IPresenceTracker, PresenceTracker>();
-builder.Services.Configure<TurnOptions>(builder.Configuration.GetSection("Turn"));
 builder.Services.Configure<CallLifecycleOptions>(builder.Configuration.GetSection("Calls:Lifecycle"));
 builder.Services.Configure<LiveKitOptions>(builder.Configuration.GetSection("LiveKit"));
 builder.Services.AddSingleton<LiveKitTokenService>();
 builder.Services.AddScoped<GroupVoiceService>();
-builder.Services.AddSingleton<TurnCredentialsService>();
 builder.Services.AddSingleton<CallSessionService>();
 builder.Services.AddSingleton<CallAuditService>();
 builder.Services.AddScoped<CallHistoryService>();

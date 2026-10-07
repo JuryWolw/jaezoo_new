@@ -11,20 +11,17 @@ public sealed class CallsHub : Hub
 {
     private readonly CallSessionService _sessions;
     private readonly CallAuditService _audit;
-    private readonly TurnCredentialsService _turn;
     private readonly CallHistoryService _history;
     private readonly ILogger<CallsHub> _logger;
 
     public CallsHub(
         CallSessionService sessions,
         CallAuditService audit,
-        TurnCredentialsService turn,
         CallHistoryService history,
         ILogger<CallsHub> logger)
     {
         _sessions = sessions;
         _audit = audit;
-        _turn = turn;
         _history = history;
         _logger = logger;
     }
@@ -56,18 +53,6 @@ public sealed class CallsHub : Hub
         _sessions.MarkUserDisconnected(MeId, Context.ConnectionId);
         _logger.LogInformation(exception, "CallsHub disconnected. UserId={UserId} ConnectionId={ConnectionId}", MeId, Context.ConnectionId);
         return base.OnDisconnectedAsync(exception);
-    }
-
-    public Task<IceConfigResponse> GetIceConfig()
-    {
-        try
-        {
-            return Task.FromResult(_turn.CreateForUser(MeId));
-        }
-        catch (InvalidOperationException ex)
-        {
-            throw new HubException(ex.Message);
-        }
     }
 
     public async Task AcceptCall(AcceptCallRequest request)
@@ -188,108 +173,6 @@ public sealed class CallsHub : Hub
         await Clients.Users(updated.CallerUserId.ToString(), updated.CalleeUserId.ToString())
             .SendAsync(eventName, changed);
         _sessions.TryRemove(updated.CallId, out _);
-    }
-
-    public async Task SendOffer(WebRtcOfferDto request)
-    {
-        RequireCallId(request.CallId, nameof(request.CallId));
-        if (string.IsNullOrWhiteSpace(request.Sdp))
-            throw new HubException("Invalid or missing 'sdp'.");
-
-        var me = MeId;
-        var session = RequireParticipant(request.CallId);
-        var peer = _sessions.GetPeerId(session, me);
-        var updated = _sessions.Update(session.CallId, s =>
-        {
-            if (!CallSessionService.IsActiveState(s.State)) return;
-            if (s.State is CallState.Accepted or CallState.Pending or CallState.Ringing)
-                s.State = CallState.Connecting;
-            s.LastOfferAtUtc = DateTime.UtcNow;
-            s.LastActivityAtUtc = DateTime.UtcNow;
-            if (s.CallerUserId == me) s.LastCallerActivityAtUtc = DateTime.UtcNow;
-            else s.LastCalleeActivityAtUtc = DateTime.UtcNow;
-        });
-
-        _sessions.TouchUser(me);
-        _audit.Info(updated, "call.offer", extra: new { fromUserId = me, sdpLength = request.Sdp.Length });
-        await Clients.User(peer.ToString()).SendAsync("call.offer", new
-        {
-            request.CallId,
-            request.Type,
-            request.Sdp,
-            fromUserId = me,
-            correlationId = updated.CorrelationId
-        });
-    }
-
-    public async Task SendAnswer(WebRtcAnswerDto request)
-    {
-        RequireCallId(request.CallId, nameof(request.CallId));
-        if (string.IsNullOrWhiteSpace(request.Sdp))
-            throw new HubException("Invalid or missing 'sdp'.");
-
-        var me = MeId;
-        var session = RequireParticipant(request.CallId);
-        var peer = _sessions.GetPeerId(session, me);
-        var updated = _sessions.Update(session.CallId, s =>
-        {
-            if (!CallSessionService.IsActiveState(s.State)) return;
-            if (s.State is CallState.Accepted or CallState.Pending or CallState.Ringing)
-                s.State = CallState.Connecting;
-            s.LastAnswerAtUtc = DateTime.UtcNow;
-            s.LastActivityAtUtc = DateTime.UtcNow;
-            if (s.CallerUserId == me) s.LastCallerActivityAtUtc = DateTime.UtcNow;
-            else s.LastCalleeActivityAtUtc = DateTime.UtcNow;
-        });
-
-        _sessions.TouchUser(me);
-        _audit.Info(updated, "call.answer", extra: new { fromUserId = me, sdpLength = request.Sdp.Length });
-        await Clients.User(peer.ToString()).SendAsync("call.answer", new
-        {
-            request.CallId,
-            request.Type,
-            request.Sdp,
-            fromUserId = me,
-            correlationId = updated.CorrelationId
-        });
-    }
-
-    public async Task SendIceCandidate(IceCandidateDto request)
-    {
-        RequireCallId(request.CallId, nameof(request.CallId));
-
-        var me = MeId;
-        var session = RequireParticipant(request.CallId);
-        var peer = _sessions.GetPeerId(session, me);
-        var updated = _sessions.Update(session.CallId, s =>
-        {
-            if (!CallSessionService.IsActiveState(s.State)) return;
-            if (s.State is CallState.Accepted or CallState.Pending or CallState.Ringing)
-                s.State = CallState.Connecting;
-            s.LastIceCandidateAtUtc = DateTime.UtcNow;
-            s.LastActivityAtUtc = DateTime.UtcNow;
-            if (s.CallerUserId == me) s.LastCallerActivityAtUtc = DateTime.UtcNow;
-            else s.LastCalleeActivityAtUtc = DateTime.UtcNow;
-        });
-
-        _sessions.TouchUser(me);
-        _audit.Info(updated, "call.ice-candidate", extra: new
-        {
-            fromUserId = me,
-            request.SdpMid,
-            request.SdpMLineIndex,
-            hasCandidate = !string.IsNullOrWhiteSpace(request.Candidate)
-        });
-        await Clients.User(peer.ToString()).SendAsync("call.ice-candidate", new
-        {
-            request.CallId,
-            request.Candidate,
-            request.SdpMid,
-            request.SdpMLineIndex,
-            request.UsernameFragment,
-            fromUserId = me,
-            correlationId = updated.CorrelationId
-        });
     }
 
     public async Task MarkConnected(MarkConnectedRequest request)
