@@ -181,6 +181,7 @@ builder.Services.AddScoped<LoginNotificationService>();
 builder.Services.Configure<LauncherUpdatesOptions>(
     builder.Configuration.GetSection("LauncherUpdates"));
 builder.Services.AddSingleton<ILauncherUpdateService, LauncherUpdateService>();
+builder.Services.AddHostedService<ClientUpdateNotifierService>();
 
 // ---------- Ads ----------
 builder.Services.Configure<AdsOptions>(builder.Configuration.GetSection("Ads"));
