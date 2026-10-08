@@ -73,12 +73,10 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
     public Task<string> GetSignedLauncherPackageUrlAsync(string? channel, CancellationToken cancellationToken = default)
         => GetSignedPackageUrlCoreAsync(UpdateTarget.Launcher, channel, cancellationToken);
 
-    private Task<string> GetSignedPackageUrlCoreAsync(UpdateTarget target, string? channel, CancellationToken cancellationToken)
+    private async Task<string> GetSignedPackageUrlCoreAsync(UpdateTarget target, string? channel, CancellationToken cancellationToken)
     {
-        _ = cancellationToken;
-
         var normalizedChannel = NormalizeChannel(channel);
-        var packageKey = BuildPackageKey(target, normalizedChannel);
+        var packageKey = await ResolvePackageKeyAsync(target, normalizedChannel, cancellationToken);
 
         if (!_options.UseCdnForPackages || string.IsNullOrWhiteSpace(_options.CdnBaseUrl) || string.IsNullOrWhiteSpace(_options.CdnSecureKey))
         {
@@ -91,7 +89,7 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
                 Protocol = Protocol.HTTPS
             };
 
-            return Task.FromResult(_s3.GetPreSignedURL(request));
+            return _s3.GetPreSignedURL(request);
         }
 
         var packagePath = "/" + packageKey.TrimStart('/');
@@ -109,7 +107,7 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
             .TrimEnd('=');
 
         var signedUrl = $"{baseUrl}{packagePath}?md5={Uri.EscapeDataString(token)}&expires={expires}";
-        return Task.FromResult(signedUrl);
+        return signedUrl;
     }
 
     private async Task<LauncherManifest> GetManifestCoreAsync(UpdateTarget target, string? channel, CancellationToken cancellationToken)
@@ -182,6 +180,29 @@ public sealed class LauncherUpdateService : ILauncherUpdateService
 
         var area = target == UpdateTarget.Client ? "client" : "launcher";
         return $"{channel}/{area}/manifest.json";
+    }
+
+    /// <summary>
+    /// Ключ пакета берём из текущего манифеста: так манифест остаётся единственным
+    /// переключателем релиза, а пакеты лежат в версионных папках и не перезаписываются.
+    /// </summary>
+    private async Task<string> ResolvePackageKeyAsync(UpdateTarget target, string channel, CancellationToken cancellationToken)
+    {
+        if (target == UpdateTarget.Launcher && !string.IsNullOrWhiteSpace(_options.PackageKey))
+            return BuildPackageKey(target, channel);
+
+        try
+        {
+            var manifest = await GetManifestCoreAsync(target, channel, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(manifest.PackageKey))
+                return manifest.PackageKey.Replace("\\", "/").TrimStart('/');
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to read {Target} manifest for package key, falling back to default key.", target);
+        }
+
+        return BuildPackageKey(target, channel);
     }
 
     private string BuildPackageKey(UpdateTarget target, string channel)

@@ -6,6 +6,12 @@ public sealed class LauncherManifest
     public string Version { get; set; } = string.Empty;
     public string EntryExe { get; set; } = "JaeZoo.Client.Wpf.exe";
     public string? MinLauncherVersion { get; set; }
+
+    /// <summary>
+    /// Ключ package.zip в бакете (версионный, например stable/client/packages/0.5.8/package.zip).
+    /// Пусто у старых манифестов — тогда используется {channel}/{area}/package.zip.
+    /// </summary>
+    public string? PackageKey { get; set; }
     public List<LauncherManifestFile> Files { get; set; } = new();
 }
 
