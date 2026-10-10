@@ -115,7 +115,7 @@ public class FilesController(
             return BadRequest(new { error = "Файл не найден или пустой." });
 
         if (file.Length > MaxUploadBytes)
-            return BadRequest(new { error = $"Слишком большой файл. Лимит: {MaxUploadBytes} bytes." });
+            return BadRequest(new { error = $"Файл слишком большой: максимум {MaxUploadBytes / (1024 * 1024)} МБ." });
 
         string? tempPath = null;
         try
@@ -188,7 +188,7 @@ public class FilesController(
 
             return StatusCode(502, new
             {
-                error = "Object storage upload failed",
+                error = "Не удалось сохранить файл в хранилище. Попробуйте позже.",
                 status = s3ex.StatusCode.ToString(),
                 code = s3ex.ErrorCode,
                 requestId = s3ex.RequestId,
@@ -198,7 +198,7 @@ public class FilesController(
         catch (Exception ex)
         {
             log.LogError(ex, "Upload failed: user={UserId}, file={FileName}", MeId, file.FileName);
-            return Problem("Upload failed.", statusCode: 500);
+            return StatusCode(500, new { error = "Не удалось загрузить файл. Попробуйте ещё раз." });
         }
         finally
         {
