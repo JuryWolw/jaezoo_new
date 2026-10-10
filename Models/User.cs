@@ -94,6 +94,8 @@ namespace JaeZoo.Server.Models
         public bool ShowOnline { get; set; } = true; // можно ли показывать, что юзер онлайн
         public LastSeenVisibility LastSeenVisibility { get; set; } = LastSeenVisibility.Approximate;
         public bool ShowActivity { get; set; } = true;
+        /// <summary>Статус звонка для друзей: 0 — скрыт, 1 — «в звонке», 2 — «в звонке с ник».</summary>
+        public int CallStatusVisibility { get; set; } = 1;
 
         public bool TwoFactorEnabled { get; set; } = false;
 

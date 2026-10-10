@@ -511,6 +511,9 @@ namespace JaeZoo.Server.Migrations
                 });
             modelBuilder.Entity("JaeZoo.Server.Models.User", b =>
                 {
+                    b.Property<int>("CallStatusVisibility")
+                        .HasColumnType("integer");
+
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");

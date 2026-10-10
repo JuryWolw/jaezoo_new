@@ -32,6 +32,7 @@ public class UsersPresenceController : ControllerBase
         public bool ShowOnline { get; set; } = true;
         public LastSeenVisibility LastSeenVisibility { get; set; } = LastSeenVisibility.Approximate;
         public bool ShowActivity { get; set; } = true;
+        public int CallStatusVisibility { get; set; } = 1;
     }
 
     // GET api/users/presence-visibility
@@ -44,7 +45,8 @@ public class UsersPresenceController : ControllerBase
             {
                 ShowOnline = u.ShowOnline,
                 LastSeenVisibility = u.LastSeenVisibility,
-                ShowActivity = u.ShowActivity
+                ShowActivity = u.ShowActivity,
+                CallStatusVisibility = u.CallStatusVisibility
             })
             .FirstOrDefaultAsync();
 
@@ -62,6 +64,7 @@ public class UsersPresenceController : ControllerBase
         user.ShowOnline = dto.ShowOnline;
         user.LastSeenVisibility = dto.LastSeenVisibility;
         user.ShowActivity = dto.ShowActivity;
+        user.CallStatusVisibility = Math.Clamp(dto.CallStatusVisibility, 0, 2);
         if (!user.ShowActivity)
         {
             user.CurrentActivityName = null;
@@ -109,6 +112,21 @@ public class UsersPresenceController : ControllerBase
         }
 
         return NoContent();
+    }
+
+    // GET api/users/call-statuses — кто из друзей сейчас в звонке (снимок при подключении клиента)
+    [HttpGet("call-statuses")]
+    public async Task<IActionResult> GetFriendCallStatuses([FromServices] JaeZoo.Server.Services.Calls.CallStatusNotifierService notifier)
+    {
+        var friendIds = await _db.Friendships.AsNoTracking()
+            .Where(f => f.Status == FriendshipStatus.Accepted && (f.RequesterId == MeId || f.AddresseeId == MeId))
+            .Select(f => f.RequesterId == MeId ? f.AddresseeId : f.RequesterId)
+            .Distinct()
+            .ToListAsync();
+
+        var snapshot = notifier.SnapshotFor(friendIds)
+            .Select(p => new { userId = p.Key.ToString("D"), inCall = true, peerName = p.Value });
+        return Ok(snapshot);
     }
 
     // POST api/users/activity

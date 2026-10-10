@@ -215,6 +215,8 @@ builder.Services.Configure<CallsLiveKitOptions>(builder.Configuration.GetSection
 builder.Services.AddSingleton<CallMediaTokenService>();
 builder.Services.AddScoped<GroupVoiceService>();
 builder.Services.AddSingleton<CallSessionService>();
+builder.Services.AddSingleton<JaeZoo.Server.Services.Calls.CallStatusNotifierService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<JaeZoo.Server.Services.Calls.CallStatusNotifierService>());
 builder.Services.AddSingleton<CallAuditService>();
 builder.Services.AddScoped<CallHistoryService>();
 builder.Services.AddHostedService<CallSessionMonitorService>();
