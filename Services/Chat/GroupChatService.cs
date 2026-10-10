@@ -768,7 +768,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             forwardedFrom,
             Math.Max(1, message.GroupSecurityEpoch),
             message.DeletedAt.HasValue ? 0 : message.E2eeEnvelopeVersion,
-            message.DeletedAt.HasValue ? null : message.E2eeProtocol);
+            message.DeletedAt.HasValue ? null : message.E2eeProtocol,
+            message.ReplyToMessageId);
     }
 
     public async Task<List<MessageDto>> BuildMessageDtosAsync(IReadOnlyList<GroupMessage> messages, CancellationToken ct = default)
@@ -804,10 +805,15 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         DirectMessageKind kind,
         string? systemKey,
         Guid? forwardedFromMessageId,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        Guid? replyToMessageId = null)
     {
         var chat = await GetChatForMemberAsync(groupId, senderId, ct)
             ?? throw new InvalidOperationException("Group chat not found or access denied.");
+
+        // Ответ допустим только на сообщение из этой же группы.
+        if (replyToMessageId.HasValue && !await db.GroupMessages.AnyAsync(m => m.Id == replyToMessageId.Value && m.GroupChatId == groupId, ct))
+            replyToMessageId = null;
 
         text = (text ?? string.Empty).Trim();
         if (kind == DirectMessageKind.User && !forwardedFromMessageId.HasValue)
@@ -853,7 +859,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             GroupSecurityEpoch = Math.Max(1, chat.SecurityEpoch),
             Kind = kind,
             SystemKey = string.IsNullOrWhiteSpace(systemKey) ? null : systemKey.Trim(),
-            ForwardedFromMessageId = forwardedFromMessageId
+            ForwardedFromMessageId = forwardedFromMessageId,
+            ReplyToMessageId = replyToMessageId
         };
         db.GroupMessages.Add(message);
 

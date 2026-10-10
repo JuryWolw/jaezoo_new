@@ -302,7 +302,8 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
             forwardedFrom,
             null,
             message.DeletedAt.HasValue ? 0 : message.E2eeEnvelopeVersion,
-            message.DeletedAt.HasValue ? null : message.E2eeProtocol
+            message.DeletedAt.HasValue ? null : message.E2eeProtocol,
+            message.ReplyToMessageId
         );
     }
 
@@ -365,7 +366,8 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
         DirectMessageKind kind,
         string? systemKey,
         Guid? forwardedFromMessageId,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        Guid? replyToMessageId = null)
     {
         text = (text ?? string.Empty).Trim();
         var ids = (fileIds ?? Array.Empty<Guid>())
@@ -382,6 +384,10 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
             throw new InvalidOperationException("Message must contain text or attachments.");
 
         var dlg = await GetOrCreateDialogAsync(senderId, peerId, ct);
+
+        // Ответ допустим только на сообщение из этого же диалога.
+        if (replyToMessageId.HasValue && !await db.DirectMessages.AnyAsync(m => m.Id == replyToMessageId.Value && m.DialogId == dlg.Id, ct))
+            replyToMessageId = null;
 
         var files = new List<ChatFile>();
         if (ids.Count > 0)
@@ -412,7 +418,8 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
             E2eeProtocol = e2eeInfo.Protocol,
             Kind = kind,
             SystemKey = string.IsNullOrWhiteSpace(systemKey) ? null : systemKey.Trim(),
-            ForwardedFromMessageId = forwardedFromMessageId
+            ForwardedFromMessageId = forwardedFromMessageId,
+            ReplyToMessageId = replyToMessageId
         };
 
         db.DirectMessages.Add(message);

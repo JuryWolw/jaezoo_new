@@ -359,7 +359,8 @@ public class ChatController(
                 DirectMessageKind.User,
                 null,
                 null,
-                ct);
+                ct,
+                body.ReplyToMessageId);
 
             var dto = await chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, ct);
             if (dto is null) return Problem("Failed to build message dto.", statusCode: 500);
@@ -1361,7 +1362,7 @@ public class ChatController(
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
 
-            var created = await groupChats.CreateMessageAsync(MeId, groupId, body.Text, body.FileIds, DirectMessageKind.User, null, null, ct);
+            var created = await groupChats.CreateMessageAsync(MeId, groupId, body.Text, body.FileIds, DirectMessageKind.User, null, null, ct, body.ReplyToMessageId);
             var dto = await groupChats.GetMessageDtoAsync(groupId, created.message.Id, ct);
             if (dto is null) return Problem("Failed to build message dto.", statusCode: 500);
 

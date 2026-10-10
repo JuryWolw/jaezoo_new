@@ -178,7 +178,8 @@ public class ChatHub : Hub
                 DirectMessageKind.User,
                 null,
                 null,
-                Context.ConnectionAborted);
+                Context.ConnectionAborted,
+                request.ReplyToMessageId);
 
             var dto = await _chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, Context.ConnectionAborted);
             if (dto is null)
@@ -402,7 +403,7 @@ public class ChatHub : Hub
             request ??= new SendMessageRequest(null, null);
             await EnsureGroupChatWritableAsync(me, Context.ConnectionAborted);
 
-            var created = await _groupChats.CreateMessageAsync(me, groupId, request.Text, request.FileIds, DirectMessageKind.User, null, null, Context.ConnectionAborted);
+            var created = await _groupChats.CreateMessageAsync(me, groupId, request.Text, request.FileIds, DirectMessageKind.User, null, null, Context.ConnectionAborted, request.ReplyToMessageId);
             var dto = await _groupChats.GetMessageDtoAsync(groupId, created.message.Id, Context.ConnectionAborted);
             if (dto is null)
                 throw new HubException("Не удалось сформировать сообщение.");

@@ -186,7 +186,8 @@ public record MessageDto(
     MessageForwardInfoDto? ForwardedFrom = null,
     int? GroupSecurityEpoch = null,
     int E2eeEnvelopeVersion = 0,
-    string? E2eeProtocol = null
+    string? E2eeProtocol = null,
+    Guid? ReplyToMessageId = null
 );
 
 public record UnreadDialogDto(Guid FriendId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt)
@@ -199,7 +200,7 @@ public record GroupChatMessageReadDto(Guid GroupId, Guid ReaderId, Guid LastRead
 
 public record MarkReadRequest(Guid LastReadMessageId);
 
-public record SendMessageRequest(string? Text, IReadOnlyList<Guid>? FileIds = null);
+public record SendMessageRequest(string? Text, IReadOnlyList<Guid>? FileIds = null, Guid? ReplyToMessageId = null);
 public record EditMessageRequest(string? Text);
 public record ForwardMessagesRequest(IReadOnlyList<Guid> MessageIds, bool IncludeAttachments = true);
 public record SendSystemMessageRequest(string SystemKey, string? Text);

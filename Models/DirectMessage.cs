@@ -31,6 +31,9 @@ public class DirectMessage
 
     public Guid? ForwardedFromMessageId { get; set; }
 
+    /// <summary>Ответ на сообщение: только ссылка (текст цитаты клиент берёт из своей расшифрованной ленты).</summary>
+    public Guid? ReplyToMessageId { get; set; }
+
     public DateTime? EditedAt { get; set; }
 
     public DateTime? DeletedAt { get; set; }
