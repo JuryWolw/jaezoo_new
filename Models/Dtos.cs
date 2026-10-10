@@ -760,3 +760,6 @@ public sealed record TwoFactorEmailCodeResponse(
     string Message
 );
 
+
+public record FileCloneRequest(IReadOnlyList<Guid> FileIds);
+public record FileCloneResult(Guid SourceId, Guid FileId);

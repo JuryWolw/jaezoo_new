@@ -217,6 +217,57 @@ public class FilesController(
         }
     }
 
+    /// <summary>
+    /// Копии файлов для пересылки: тот же объект в хранилище, новый владелец — я, ещё не прикреплён.
+    /// Клиент пересылает сообщение сам (текст перешифровывается для нового собеседника), а вложения
+    /// прикрепляет уже эти копии — чужие или прикреплённые файлы повторно прикрепить нельзя.
+    /// </summary>
+    [HttpPost("clone")]
+    [RequireVerifiedEmail]
+    public async Task<ActionResult<IEnumerable<FileCloneResult>>> CloneForForward([FromBody] FileCloneRequest body, CancellationToken ct)
+    {
+        var ids = body?.FileIds?.Where(x => x != Guid.Empty).Distinct().Take(20).ToList() ?? new List<Guid>();
+        if (ids.Count == 0)
+            return BadRequest(new { error = "Не выбраны файлы для пересылки." });
+
+        var me = MeId;
+        var result = new List<FileCloneResult>();
+        var now = DateTime.UtcNow;
+        foreach (var id in ids)
+        {
+            if (!await CanAccessFileAsync(me, id, ct))
+                return NotFound(new { error = "Файл не найден или недоступен." });
+
+            var f = await db.ChatFiles.AsNoTracking().FirstAsync(x => x.Id == id, ct);
+            var clone = new ChatFile
+            {
+                Id = Guid.NewGuid(),
+                UploaderId = me,
+                OriginalFileName = f.OriginalFileName,
+                SafeFileName = string.IsNullOrWhiteSpace(f.SafeFileName) ? f.OriginalFileName : f.SafeFileName,
+                ContentType = f.ContentType,
+                DetectedContentType = string.IsNullOrWhiteSpace(f.DetectedContentType) ? f.ContentType : f.DetectedContentType,
+                SizeBytes = f.SizeBytes,
+                StoredPath = f.StoredPath,
+                Bucket = f.Bucket,
+                ObjectKey = string.IsNullOrWhiteSpace(f.ObjectKey) ? f.StoredPath : f.ObjectKey,
+                Sha256 = f.Sha256 ?? string.Empty,
+                Kind = f.Kind,
+                ScanStatus = f.ScanStatus,
+                IsPotentiallyDangerous = f.IsPotentiallyDangerous,
+                RiskNote = f.RiskNote,
+                CreatedAt = now,
+                IsAttached = false
+            };
+            db.ChatFiles.Add(clone);
+            result.Add(new FileCloneResult(id, clone.Id));
+        }
+
+        await db.SaveChangesAsync(ct);
+        log.LogInformation("Files cloned for forward. UserId={UserId} Count={Count}", me, result.Count);
+        return Ok(result);
+    }
+
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> Get(Guid id, CancellationToken ct = default)
     {
