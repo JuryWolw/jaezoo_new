@@ -10,6 +10,7 @@ public class AdminBroadcast
 
     public const int AudienceAll = 0;
     public const int AudienceStaff = 1;
+    public const int AudienceUser = 2;
 
     public Guid Id { get; set; } = Guid.NewGuid();
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -28,8 +29,14 @@ public class AdminBroadcast
     /// <summary>Флаги каналов: 1 — уведомления, 2 — системный чат.</summary>
     public int Channels { get; set; }
 
-    /// <summary>0 — все пользователи, 1 — только персонал (пользователи с ролями).</summary>
+    /// <summary>0 — все пользователи, 1 — только персонал (пользователи с ролями), 2 — конкретный пользователь.</summary>
     public int Audience { get; set; }
+
+    /// <summary>Получатель личного сообщения от JaeZoo (Audience = 2).</summary>
+    public Guid? TargetUserId { get; set; }
+
+    [MaxLength(64)]
+    public string? TargetName { get; set; }
 
     /// <summary>Уведомление: true — показать при следующем входе тем, кто сейчас не в сети; false — только онлайн.</summary>
     public bool DeliverOffline { get; set; }

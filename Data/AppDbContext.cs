@@ -651,6 +651,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<AdminBroadcast>().HasIndex(x => x.CreatedAt);
+        b.Entity<AdminBroadcast>().HasIndex(x => x.TargetUserId);
 
         b.Entity<AdminAuditLog>()
             .Property(a => a.ActorPublicId)

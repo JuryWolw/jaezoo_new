@@ -22,7 +22,8 @@ public sealed record CreateBroadcastRequest(
     int Audience,
     bool DeliverOffline,
     int? ExpiresInHours,
-    List<Guid>? FileIds);
+    List<Guid>? FileIds,
+    Guid? TargetUserId = null);
 
 public sealed record BroadcastDto(
     Guid Id,
@@ -36,7 +37,9 @@ public sealed record BroadcastDto(
     bool DeliverOffline,
     DateTime ExpiresAt,
     int RecipientsCount,
-    int ImagesCount);
+    int ImagesCount,
+    Guid? TargetUserId = null,
+    string? TargetName = null);
 
 /// <summary>Событие для клиента: уведомление-рассылка в строке уведомлений.</summary>
 public sealed record BroadcastNotificationDto(Guid Id, string Title, string Text, DateTime CreatedAt);
@@ -77,7 +80,16 @@ public sealed class AdminBroadcastsController(
         if (title.Length > 120) title = title[..120];
         if (text.Length > 4000) return BadRequest("Текст рассылки — не больше 4000 символов.");
         if (!request.ToNotifications && !request.ToSystemChat) return BadRequest("Выберите, куда отправить рассылку.");
-        if (request.Audience is not (AdminBroadcast.AudienceAll or AdminBroadcast.AudienceStaff)) return BadRequest("Неизвестная аудитория.");
+        if (request.Audience is not (AdminBroadcast.AudienceAll or AdminBroadcast.AudienceStaff or AdminBroadcast.AudienceUser)) return BadRequest("Неизвестная аудитория.");
+
+        User? target = null;
+        if (request.Audience == AdminBroadcast.AudienceUser)
+        {
+            if (request.TargetUserId is not { } targetId || targetId == Guid.Empty || SystemChatService.IsSystemUser(targetId))
+                return BadRequest("Выберите пользователя.");
+            target = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == targetId, ct);
+            if (target is null) return BadRequest("Пользователь не найден.");
+        }
 
         var fileIds = (request.FileIds ?? new()).Where(x => x != Guid.Empty).Distinct().ToList();
         if (fileIds.Count > 10) return BadRequest("Не больше 10 картинок.");
@@ -103,7 +115,9 @@ public sealed class AdminBroadcastsController(
         var now = DateTime.UtcNow;
         var hours = Math.Clamp(request.ExpiresInHours ?? 72, 1, (int)MaxOfflineWindow.TotalHours);
 
-        var recipients = await ResolveAudienceAsync(db, request.Audience, ct);
+        var recipients = target is not null
+            ? new List<Guid> { target.Id }
+            : await ResolveAudienceAsync(db, request.Audience, ct);
 
         var broadcast = new AdminBroadcast
         {
@@ -117,6 +131,8 @@ public sealed class AdminBroadcastsController(
             DeliverOffline = request.ToNotifications && request.DeliverOffline,
             ExpiresAt = now.AddHours(hours),
             RecipientsCount = recipients.Count,
+            TargetUserId = target?.Id,
+            TargetName = target is null ? null : Truncate(UserIdentityService.GetPublicName(target), 64),
             FileIdsCsv = fileIds.Count == 0 ? null : string.Join(',', fileIds)
         };
         db.AdminBroadcasts.Add(broadcast);
@@ -147,7 +163,7 @@ public sealed class AdminBroadcastsController(
 
         var where = string.Join(" + ", new[] { request.ToNotifications ? "уведомления" : null, request.ToSystemChat ? "системный чат" : null }.Where(x => x != null));
         await audit.WriteAsync(User, HttpContext, "BroadcastSent", "Broadcast", broadcast.Id.ToString(),
-            $"Рассылка «{(title.Length > 0 ? title : text.Length > 60 ? text[..60] + "…" : text)}» → {where}; аудитория: {(request.Audience == AdminBroadcast.AudienceAll ? "все" : "персонал")}; получателей: {recipients.Count}; офлайн: {broadcast.DeliverOffline}; картинок: {fileIds.Count}", ct);
+            $"Рассылка «{(title.Length > 0 ? title : text.Length > 60 ? text[..60] + "…" : text)}» → {where}; аудитория: {(target is not null ? $"{target.PublicId} / {broadcast.TargetName}" : request.Audience == AdminBroadcast.AudienceAll ? "все" : "персонал")}; получателей: {recipients.Count}; офлайн: {broadcast.DeliverOffline}; картинок: {fileIds.Count}", ct);
 
         return ToDto(broadcast);
     }
@@ -206,7 +222,11 @@ public sealed class AdminBroadcastsController(
         x.DeliverOffline,
         x.ExpiresAt,
         x.RecipientsCount,
-        string.IsNullOrWhiteSpace(x.FileIdsCsv) ? 0 : x.FileIdsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries).Length);
+        string.IsNullOrWhiteSpace(x.FileIdsCsv) ? 0 : x.FileIdsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries).Length,
+        x.TargetUserId,
+        x.TargetName);
+
+    private static string Truncate(string value, int max) => value.Length <= max ? value : value[..max];
 
     private Guid? GetActorUserId()
     {
@@ -237,7 +257,9 @@ public sealed class BroadcastsController(AppDbContext db) : ControllerBase
                         && x.DeliverOffline
                         && x.ExpiresAt > now
                         && x.CreatedAt > since
-                        && (x.Audience == AdminBroadcast.AudienceAll || (isStaff && x.Audience == AdminBroadcast.AudienceStaff)))
+                        && (x.Audience == AdminBroadcast.AudienceAll
+                            || (isStaff && x.Audience == AdminBroadcast.AudienceStaff)
+                            || (x.Audience == AdminBroadcast.AudienceUser && x.TargetUserId == me)))
             .OrderBy(x => x.CreatedAt)
             .Take(20)
             .Select(x => new BroadcastNotificationDto(x.Id, x.Title, x.Text, x.CreatedAt))

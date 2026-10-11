@@ -507,6 +507,13 @@ namespace JaeZoo.Server.Migrations
                     b.Property<int>("RecipientsCount")
                         .HasColumnType("integer");
 
+                    b.Property<string>("TargetName")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid?>("TargetUserId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("Text")
                         .IsRequired()
                         .HasMaxLength(4000)
@@ -520,6 +527,8 @@ namespace JaeZoo.Server.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("CreatedAt");
+
+                    b.HasIndex("TargetUserId");
 
                     b.ToTable("AdminBroadcasts");
                 });
