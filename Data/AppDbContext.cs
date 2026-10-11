@@ -27,6 +27,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GroupVoiceParticipant> GroupVoiceParticipants => Set<GroupVoiceParticipant>();
     public DbSet<UserRole> UserRoles => Set<UserRole>();
     public DbSet<AdminAuditLog> AdminAuditLogs => Set<AdminAuditLog>();
+    public DbSet<AdminBroadcast> AdminBroadcasts => Set<AdminBroadcast>();
     public DbSet<UserSession> UserSessions => Set<UserSession>();
     public DbSet<EmailVerificationCode> EmailVerificationCodes => Set<EmailVerificationCode>();
     public DbSet<ModerationBan> ModerationBans => Set<ModerationBan>();
@@ -648,6 +649,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .WithMany()
             .HasForeignKey(r => r.UserId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<AdminBroadcast>().HasIndex(x => x.CreatedAt);
 
         b.Entity<AdminAuditLog>()
             .Property(a => a.ActorPublicId)

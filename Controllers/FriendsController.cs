@@ -100,6 +100,7 @@ public class FriendsController : ControllerBase
     {
         var me = MeId;
         if (me == userId) return BadRequest(new { error = "Cannot befriend yourself." });
+        if (JaeZoo.Server.Services.Chat.SystemChatService.IsSystemUser(userId)) return BadRequest(new { error = "Системный чат JaeZoo уже у вас в друзьях." });
 
         var target = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId, ct);
         if (target is null) return NotFound(new { error = "User not found." });
@@ -370,6 +371,7 @@ public class FriendsController : ControllerBase
     {
         var me = MeId;
         if (friendId == me) return BadRequest(new { error = "Cannot remove yourself." });
+        if (JaeZoo.Server.Services.Chat.SystemChatService.IsSystemUser(friendId)) return BadRequest(new { error = "Системный чат JaeZoo нельзя удалить из друзей." });
 
         // Должны быть друзья (Accepted) — иначе не даём "удалять друга".
         var acceptedExists = await _db.Friendships.AnyAsync(f =>

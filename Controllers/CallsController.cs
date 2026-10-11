@@ -112,6 +112,8 @@ public sealed class CallsController : ControllerBase
         var me = MeId;
         if (request.PeerUserId == Guid.Empty || request.PeerUserId == me)
             return BadRequest(new { message = "Invalid peer user id." });
+        if (JaeZoo.Server.Services.Chat.SystemChatService.IsSystemUser(request.PeerUserId))
+            return BadRequest(new { message = "Системному чату JaeZoo нельзя позвонить." });
 
         var peer = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == request.PeerUserId, ct);
         if (peer is null)

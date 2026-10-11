@@ -22,6 +22,7 @@ public class AuthController(
     TokenService tokens,
     EmailVerificationService emailVerification,
     LoginNotificationService loginNotifications,
+    JaeZoo.Server.Services.Chat.SystemChatService systemChat,
     SmartCaptchaService captcha,
     SecurityAuditService securityAudit,
     ILogger<AuthController> log) : ControllerBase
@@ -258,11 +259,9 @@ public class AuthController(
 
         await db.SaveChangesAsync(ct);
 
-        await loginNotifications.TrySendLoginNotificationAsync(
-            user,
-            new LoginNotificationContext(now, ipAddress, deviceName, platform, clientVersion, userAgent, knownDevice, UsedTwoFactor: false, UsedRecoveryCode: false, SessionId: session?.Id),
-            HttpContext,
-            ct);
+        var loginContext = new LoginNotificationContext(now, ipAddress, deviceName, platform, clientVersion, userAgent, knownDevice, UsedTwoFactor: false, UsedRecoveryCode: false, SessionId: session?.Id);
+        await loginNotifications.TrySendLoginNotificationAsync(user, loginContext, HttpContext, ct);
+        await systemChat.TryPostLoginNoticeAsync(user.Id, loginContext, ct);
 
         var accessExpiresAt = now.AddMinutes(60);
         var token = tokens.Create(user, roles, session?.Id, accessExpiresAt);
@@ -388,11 +387,9 @@ public class AuthController(
 
         await db.SaveChangesAsync(ct);
 
-        await loginNotifications.TrySendLoginNotificationAsync(
-            user,
-            new LoginNotificationContext(now, ipAddress, deviceName, platform, clientVersion, userAgent, knownDevice, UsedTwoFactor: true, UsedRecoveryCode: usedRecoveryCode, SessionId: session?.Id, UsedEmailCode: usedEmailCode),
-            HttpContext,
-            ct);
+        var loginContext = new LoginNotificationContext(now, ipAddress, deviceName, platform, clientVersion, userAgent, knownDevice, UsedTwoFactor: true, UsedRecoveryCode: usedRecoveryCode, SessionId: session?.Id, UsedEmailCode: usedEmailCode);
+        await loginNotifications.TrySendLoginNotificationAsync(user, loginContext, HttpContext, ct);
+        await systemChat.TryPostLoginNoticeAsync(user.Id, loginContext, ct);
 
         var accessExpiresAt = now.AddMinutes(60);
         var token = tokens.Create(user, roles, session?.Id, accessExpiresAt);

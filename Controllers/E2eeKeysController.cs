@@ -755,6 +755,7 @@ public sealed class E2eeKeysController(AppDbContext db, SecurityAuditService sec
             var peers = await db.Friendships.AsNoTracking()
                 .Where(f => f.Status == FriendshipStatus.Accepted && (f.RequesterId == userId || f.AddresseeId == userId))
                 .Select(f => f.RequesterId == userId ? f.AddresseeId : f.RequesterId)
+                .Where(id => id != JaeZoo.Server.Services.Chat.SystemChatService.SystemUserId)
                 .Distinct()
                 .ToListAsync(ct);
 

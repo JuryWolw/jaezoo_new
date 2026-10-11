@@ -172,6 +172,7 @@ builder.Services.AddScoped<EmailVerificationService>();
 
 builder.Services.AddScoped<TokenService>();
 builder.Services.AddScoped<DirectChatService>();
+builder.Services.AddScoped<SystemChatService>();
 builder.Services.AddScoped<GroupChatService>();
 builder.Services.AddScoped<AdminAuditService>();
 builder.Services.AddScoped<SecurityAuditService>();
@@ -417,6 +418,7 @@ using (var scope = app.Services.CreateScope())
     await MessageEncryptionBackfill.BackfillE2eeEnvelopeMetadataAsync(db, logger);
 
     await RoleBootstrapService.EnsureOwnerAsync(db, app.Configuration, logger);
+    await SystemChatService.EnsureAccountAsync(db, logger);
 
     if (db.Database.IsNpgsql())
     {

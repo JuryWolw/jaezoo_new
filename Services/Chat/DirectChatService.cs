@@ -369,6 +369,9 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
         CancellationToken ct = default,
         Guid? replyToMessageId = null)
     {
+        if (SystemChatService.IsSystemUser(peerId))
+            throw new InvalidOperationException("Системный чат JaeZoo только для чтения.");
+
         text = (text ?? string.Empty).Trim();
         var ids = (fileIds ?? Array.Empty<Guid>())
             .Where(x => x != Guid.Empty)
@@ -451,6 +454,8 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
     {
         if (source.DeletedAt.HasValue)
             throw new InvalidOperationException("Deleted message cannot be forwarded.");
+        if (SystemChatService.IsSystemUser(peerId))
+            throw new InvalidOperationException("Системный чат JaeZoo только для чтения.");
 
         var dlg = await GetOrCreateDialogAsync(senderId, peerId, ct);
         var now = DateTime.UtcNow;
@@ -535,6 +540,8 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
     {
         if (source.DeletedAt.HasValue)
             throw new InvalidOperationException("Deleted message cannot be forwarded.");
+        if (SystemChatService.IsSystemUser(peerId))
+            throw new InvalidOperationException("Системный чат JaeZoo только для чтения.");
 
         var dlg = await GetOrCreateDialogAsync(senderId, peerId, ct);
         var now = DateTime.UtcNow;
