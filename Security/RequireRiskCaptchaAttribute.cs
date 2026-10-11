@@ -20,6 +20,11 @@ public sealed class RequireRiskCaptchaAttribute : Attribute, IAsyncAuthorization
 
     public async Task OnAuthorizationAsync(AuthorizationFilterContext context)
     {
+        // Владелец и админы (например, картинки для рассылки из админки) капчей не ограничиваются.
+        var principal = context.HttpContext.User;
+        if (AuthPolicies.AdminRoles.Any(principal.IsInRole))
+            return;
+
         var service = context.HttpContext.RequestServices.GetRequiredService<RiskCaptchaService>();
         var result = await service.CheckAsync(
             context.HttpContext,
