@@ -152,6 +152,17 @@ public sealed class MlsDeliveryService(AppDbContext db)
             .ToListAsync(ct);
     }
 
+    /// <summary>Users who share at least one MLS group with any device of <paramref name="userId"/> (incl. the user).</summary>
+    public async Task<List<Guid>> UsersSharingGroupsWithUserAsync(Guid userId, CancellationToken ct)
+    {
+        var groupIds = db.MlsGroupMembers.Where(m => m.UserId == userId).Select(m => m.GroupId);
+        return await db.MlsGroupMembers.AsNoTracking()
+            .Where(m => groupIds.Contains(m.GroupId))
+            .Select(m => m.UserId)
+            .Distinct()
+            .ToListAsync(ct);
+    }
+
     public async Task<UserDevice> RequireActiveDeviceAsync(Guid userId, Guid deviceId, CancellationToken ct)
     {
         var device = await db.UserDevices.FirstOrDefaultAsync(d => d.Id == deviceId && d.UserId == userId, ct);

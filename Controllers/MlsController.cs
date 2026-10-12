@@ -57,7 +57,14 @@ public sealed class MlsController(
     [EnableRateLimiting("security-sensitive")]
     public Task<ActionResult> RegisterDevice([FromBody] RegisterDeviceRequest body, CancellationToken ct) => Run(async () =>
     {
-        var device = await mls.RegisterDeviceAsync(MeId, SessionId, body, ct);
+        var me = MeId;
+        var device = await mls.RegisterDeviceAsync(me, SessionId, body, ct);
+
+        // Members of this user's groups (and the user's other devices) add the device lazily.
+        var notify = await mls.UsersSharingGroupsWithUserAsync(me, ct);
+        await hub.Clients.Users(notify.Append(me).Distinct().Select(u => u.ToString()).ToList())
+            .SendAsync("MlsDeviceAdded", new DeviceRefDto(me, device.Id), ct);
+
         return Ok(new UserDeviceDto(device.Id, device.Name, device.Platform, device.ClientVersion, device.CreatedAt, device.LastSeenAt, true, null, null));
     });
 
