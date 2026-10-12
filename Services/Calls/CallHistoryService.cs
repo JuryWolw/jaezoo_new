@@ -67,7 +67,7 @@ public sealed class CallHistoryService
 
             var (systemKey, text, senderId) = BuildHistoryEntry(session);
             var recipientUserId = session.CallerUserId == senderId ? session.CalleeUserId : session.CallerUserId;
-            var created = await _chat.CreateMessageAsync(senderId, recipientUserId, text, null, DirectMessageKind.System, systemKey, null, ct);
+            var created = await _chat.CreateSystemMessageAsync(senderId, recipientUserId, text, systemKey, null, ct);
             var dto = await _chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, ct);
             if (dto is null)
                 return false;

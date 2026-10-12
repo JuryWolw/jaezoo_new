@@ -58,16 +58,6 @@ public static class SecurityStartupValidator
         Add(checks, "JWT", "Signing key", IsStrongSecret(jwtKey, 32, JwtPlaceholders), strictMode,
             "Jwt:Key must be set through environment/secrets, must not be a placeholder, and should be at least 32 characters.");
 
-        var messageEncryptionEnabled = configuration.GetValue<bool>("Messages:Encryption:Enabled");
-        var messageEncryptionKey = FirstNotEmpty(
-            configuration["Messages:Encryption:KeyBase64"],
-            configuration["Messages:Encryption:Key"],
-            configuration["Messages:Encryption:KeyHex"]);
-        Add(checks, "Messages", "Database encryption enabled", messageEncryptionEnabled, strictMode,
-            "Messages:Encryption:Enabled must be true in Production.");
-        Add(checks, "Messages", "Database encryption key", IsStrongSecret(messageEncryptionKey, 32), strictMode && messageEncryptionEnabled,
-            "Messages:Encryption key must be present and strong when message DB encryption is enabled.");
-
 
         var identityHashKey = FirstNotEmpty(configuration["IdentityPrivacy:HashKeyBase64"], configuration["IdentityPrivacy:HashKey"], configuration["IdentityPrivacy:HashKeyHex"]);
         var identityEncryptionKey = FirstNotEmpty(configuration["IdentityPrivacy:EncryptionKeyBase64"], configuration["IdentityPrivacy:EncryptionKey"], configuration["IdentityPrivacy:EncryptionKeyHex"]);

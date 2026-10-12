@@ -4,6 +4,7 @@ using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Files;
 using JaeZoo.Server.Services.Chat;
 using JaeZoo.Server.Services.Files;
+using JaeZoo.Server.Services.Mls;
 using JaeZoo.Server.Services.Security;
 using JaeZoo.Server.Security;
 using JaeZoo.Server.Services;
@@ -29,8 +30,6 @@ public class ChatController(
     IHubContext<ChatHub> hub,
     IWebHostEnvironment env) : ControllerBase
 {
-    private const int E2eeTrustUnknown = 0;
-    private const int E2eeTrustRevoked = 3;
 
     private Guid MeId
     {
@@ -62,22 +61,6 @@ public class ChatController(
             .Where(u => u.Id == userId)
             .Select(u => u.EmailConfirmed)
             .FirstOrDefaultAsync(ct);
-
-    private async Task<bool> IsTrustedE2eeDeviceAsync(Guid userId, string? deviceId, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(deviceId)) return false;
-        var normalized = deviceId.Trim();
-        return await db.UserE2eeKeys.AsNoTracking().AnyAsync(x =>
-            x.UserId == userId &&
-            x.DeviceId == normalized &&
-            !x.IsRevoked &&
-            !x.RequiresUserVerification &&
-            x.TrustState != E2eeTrustUnknown &&
-            x.TrustState != E2eeTrustRevoked &&
-            (x.IsTrusted || x.TrustState != E2eeTrustUnknown) &&
-            !string.IsNullOrWhiteSpace(x.PublicKeyBase64) &&
-            !string.IsNullOrWhiteSpace(x.SigningPublicKeyBase64), ct);
-    }
 
 
     private async Task<ActionResult?> RequireUsersVerifiedAsync(IEnumerable<Guid> userIds, string message, CancellationToken ct)
@@ -130,8 +113,6 @@ public class ChatController(
 
     private static bool IsKnownGroupSystemKey(string? systemKey) => systemKey is
         GroupChatService.SystemUserAddedKey or
-        GroupChatService.SystemHistoryAvailableKey or
-        GroupChatService.SystemSecurityKeysUpdatedKey or
         GroupChatService.SystemGroupCallStartedKey or
         GroupChatService.SystemGroupCallEndedKey;
 
@@ -351,28 +332,16 @@ public class ChatController(
             var peerVerified = await IsEmailConfirmedAsync(friendId, ct);
             if (!peerVerified) return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Переписка пока недоступна." });
 
-            var created = await chat.CreateMessageAsync(
-                MeId,
-                friendId,
-                body.Text,
-                body.FileIds,
-                DirectMessageKind.User,
-                null,
-                null,
-                ct,
-                body.ReplyToMessageId);
-
+            var created = await chat.CreateUserMessageAsync(MeId, friendId, body, ct);
             var dto = await chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, ct);
             if (dto is null) return Problem("Failed to build message dto.", statusCode: 500);
 
             await BroadcastCreated(friendId, dto, ct);
             return Ok(dto);
         }
-        catch (DbUpdateException ex)
+        catch (MlsDeliveryException ex)
         {
-            var detail = ex.InnerException?.Message ?? ex.Message;
-            log.LogError(ex, "SendMessage db update failed: me={MeId}, friend={FriendId}, detail={Detail}", MeId, friendId, detail);
-            return BadRequest(new { error = detail });
+            return StatusCode(ex.StatusCode, new { code = ex.Code, error = ex.Message });
         }
         catch (Exception ex)
         {
@@ -456,7 +425,7 @@ public class ChatController(
             var peerVerified = await IsEmailConfirmedAsync(friendId, ct);
             if (!peerVerified) return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Переписка пока недоступна." });
 
-            var created = await chat.CreateMessageAsync(MeId, friendId, body.Text, null, DirectMessageKind.System, body.SystemKey, null, ct);
+            var created = await chat.CreateSystemMessageAsync(MeId, friendId, body.Text, body.SystemKey, null, ct);
             var dto = await chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, ct);
             if (dto is null) return Problem("Failed to build message dto.", statusCode: 500);
 
@@ -477,41 +446,27 @@ public class ChatController(
         try
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
-            var newText = (body.Text ?? string.Empty).Trim();
 
-            var msg = await db.DirectMessages.FirstOrDefaultAsync(m => m.Id == messageId, ct);
-            if (msg is null) return NotFound(new { error = "Message not found." });
-            if (msg.SenderId != MeId) return Forbid();
-            if (msg.DeletedAt.HasValue) return BadRequest(new { error = "Deleted message cannot be edited." });
-            if (msg.Kind != DirectMessageKind.User) return BadRequest(new { error = "Only user messages can be edited." });
-
-            var hasAttachments = await db.DirectMessageAttachments.AsNoTracking().AnyAsync(a => a.MessageId == msg.Id, ct);
-            if (string.IsNullOrWhiteSpace(newText) && !hasAttachments)
-                return BadRequest(new { error = "Text is required when message has no attachments." });
-
-            var dialog = await db.DirectDialogs.AsNoTracking().FirstAsync(d => d.Id == msg.DialogId, ct);
+            var (dialog, msg) = await chat.EditUserMessageAsync(MeId, messageId, body, ct);
             var peerId = dialog.User1Id == MeId ? dialog.User2Id : dialog.User1Id;
-            DirectChatService.ValidateDirectE2eePayload(MeId, peerId, newText);
-
-            if (string.Equals(msg.Text, newText, StringComparison.Ordinal))
-            {
-                var same = await chat.GetMessageDtoAsync(msg.DialogId, msg.Id, ct);
-                return Ok(same);
-            }
-
-            var e2eeInfo = E2eeEnvelopeInspector.InspectDirect(newText);
-            msg.Text = newText;
-            msg.E2eeEnvelopeVersion = e2eeInfo.Version;
-            msg.E2eeProtocol = e2eeInfo.Protocol;
-            msg.EditedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(ct);
-
             var dto = await chat.GetMessageDtoAsync(msg.DialogId, msg.Id, ct);
             if (dto is null) return NotFound();
 
             await hub.Clients.User(MeId.ToString()).SendAsync("ChatMessageUpdated", new ChatMessageUpdatedDto(peerId, dto), ct);
             await hub.Clients.User(peerId.ToString()).SendAsync("ChatMessageUpdated", new ChatMessageUpdatedDto(MeId, dto), ct);
             return Ok(dto);
+        }
+        catch (MlsDeliveryException ex)
+        {
+            return StatusCode(ex.StatusCode, new { code = ex.Code, error = ex.Message });
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound(new { error = "Message not found." });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Forbid();
         }
         catch (Exception ex)
         {
@@ -542,8 +497,10 @@ public class ChatController(
             msg.EditedAt = null;
             msg.Text = string.Empty;
             msg.SystemKey = null;
+            msg.Ciphertext = null;
             await db.SaveChangesAsync(ct);
             await fileCleanup.DeleteFilesForMessageAsync(attachedFileIds, ct);
+            await chat.AppendDeletionEventAsync(msg, ct);
 
             var dialog = await db.DirectDialogs.AsNoTracking().FirstAsync(d => d.Id == msg.DialogId, ct);
             var peerId = dialog.User1Id == MeId ? dialog.User2Id : dialog.User1Id;
@@ -556,59 +513,6 @@ public class ChatController(
         catch (Exception ex)
         {
             log.LogError(ex, "DeleteMessage failed: me={MeId}, message={MessageId}", MeId, messageId);
-            return BadRequest(new { error = ex.Message });
-        }
-    }
-
-    [HttpPost("forward/{friendId:guid}")]
-    [RequireVerifiedEmail]
-    public async Task<ActionResult<IEnumerable<MessageDto>>> ForwardMessages(Guid friendId, [FromBody] ForwardMessagesRequest body, CancellationToken ct)
-    {
-        try
-        {
-            if (body?.MessageIds is null || body.MessageIds.Count == 0)
-                return BadRequest(new { error = "MessageIds are required." });
-            if (!await chat.AreFriends(MeId, friendId, ct)) return Forbid();
-            var peerVerified = await IsEmailConfirmedAsync(friendId, ct);
-            if (!peerVerified) return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Пересылка пока недоступна." });
-
-            var ids = body.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
-            var sources = await (
-                from m in db.DirectMessages.AsNoTracking()
-                join d in db.DirectDialogs.AsNoTracking() on m.DialogId equals d.Id
-                where ids.Contains(m.Id)
-                      && m.DeletedAt == null
-                      && (d.User1Id == MeId || d.User2Id == MeId)
-                orderby m.SentAt, m.Id
-                select m
-            ).ToListAsync(ct);
-
-            if (sources.Count == 0)
-                return Ok(Array.Empty<MessageDto>());
-
-            var createdDtos = new List<MessageDto>();
-            foreach (var source in sources)
-            {
-                var forwarded = await chat.ForwardMessageAsync(
-                    MeId,
-                    friendId,
-                    source,
-                    body.IncludeAttachments,
-                    ct);
-
-                var dto = await chat.GetMessageDtoAsync(forwarded.dialog.Id, forwarded.message.Id, ct);
-                if (dto is not null)
-                {
-                    createdDtos.Add(dto);
-                    await BroadcastCreated(friendId, dto, ct);
-                }
-            }
-
-            return Ok(createdDtos);
-        }
-        catch (Exception ex)
-        {
-            log.LogError(ex, "ForwardMessages failed: me={MeId}, friend={FriendId}", MeId, friendId);
             return BadRequest(new { error = ex.Message });
         }
     }
@@ -686,12 +590,6 @@ public class ChatController(
                     GroupChatService.SystemUserAddedKey,
                     $"Пользователь {joinedName} добавлен в группу.",
                     ct);
-                await CreateAndBroadcastGroupSystemMessageAsync(
-                    chatEntity.Id,
-                    MeId,
-                    GroupChatService.SystemSecurityKeysUpdatedKey,
-                    "Ключи безопасности группы обновлены.",
-                    ct);
             }
 
             var memberIds = await GetGroupMemberIdsAsync(chatEntity.Id, ct);
@@ -766,7 +664,7 @@ public class ChatController(
             var verifyMembers = await RequireUsersVerifiedAsync(memberIds, "В группу можно добавлять только пользователей с подтверждённой почтой.", ct);
             if (verifyMembers is not null) return verifyMembers;
 
-            var group = await groupChats.CreateChatAsync(MeId, body.Title, body.Description, body.MemberIds, body.IsPublic, body.HistoryPolicy, ct);
+            var group = await groupChats.CreateChatAsync(MeId, body.Title, body.Description, body.MemberIds, body.IsPublic, ct);
             var details = await BuildGroupDetailsAsync(group.Id, ct);
             if (details is null) return Problem("Failed to build group chat dto.", statusCode: 500);
 
@@ -811,7 +709,7 @@ public class ChatController(
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
 
-            await groupChats.UpdateChatAsync(groupId, MeId, body.Title, body.Description, body.IsPublic, body.HistoryPolicy, ct);
+            await groupChats.UpdateChatAsync(groupId, MeId, body.Title, body.Description, body.IsPublic, ct);
             var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
             if (summary is null) return NotFound(new { error = "Group chat not found." });
 
@@ -869,16 +767,6 @@ public class ChatController(
                     ct);
             }
 
-            if (addedIds.Count > 0)
-            {
-                await CreateAndBroadcastGroupSystemMessageAsync(
-                    groupId,
-                    MeId,
-                    GroupChatService.SystemSecurityKeysUpdatedKey,
-                    "Ключи безопасности группы обновлены.",
-                    ct);
-            }
-
             return Ok(members);
         }
         catch (Exception ex)
@@ -888,190 +776,6 @@ public class ChatController(
         }
     }
 
-    [HttpPost("groups/{groupId:guid}/history-key-packages")]
-    [RequireVerifiedEmail]
-    public async Task<ActionResult<GroupHistoryKeyPackageImportResult>> UploadGroupHistoryKeyPackages(Guid groupId, [FromBody] GroupHistoryKeyPackagesUploadRequest body, CancellationToken ct)
-    {
-        try
-        {
-            if (body?.Packages is null || body.Packages.Count == 0)
-                return Ok(new GroupHistoryKeyPackageImportResult(0, 0));
-
-            var chatEntity = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct);
-            if (chatEntity is null) return NotFound(new { error = "Group chat not found." });
-
-            var actor = await db.GroupChatMembers.AsNoTracking()
-                .FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == MeId, ct);
-            if (actor is null) return Forbid();
-            if (chatEntity.OwnerId != MeId && actor.Role != GroupChatRole.Admin)
-                return StatusCode(StatusCodes.Status403Forbidden, new { error = "Only the owner or admin can share group history." });
-            if (chatEntity.HistoryPolicy != 1)
-                return BadRequest(new { error = "Old history is disabled for new members in this group." });
-
-            var memberIds = await db.GroupChatMembers.AsNoTracking()
-                .Where(m => m.GroupChatId == groupId)
-                .Select(m => m.UserId)
-                .ToListAsync(ct);
-            var memberSet = memberIds.ToHashSet();
-
-            var accepted = 0;
-            var skipped = 0;
-            var now = DateTime.UtcNow;
-
-            foreach (var package in body.Packages.Take(1000))
-            {
-                var targetDeviceId = CleanHistoryPackageText(package.TargetDeviceId, 128);
-                var senderDeviceId = CleanHistoryPackageText(package.SenderDeviceId, 128);
-                var senderKeyId = CleanHistoryPackageText(package.SenderKeyId, 128);
-                var providerDeviceId = CleanHistoryPackageText(package.ProviderDeviceId, 128);
-                var algorithm = CleanHistoryPackageText(package.Algorithm, 96) ?? "JZ-GROUP-HISTORY-KEY-P256-AESGCM-v1";
-                var providerPublic = CleanHistoryPackageText(package.ProviderPublicKeyBase64, 8192);
-                var targetPublic = CleanHistoryPackageText(package.TargetPublicKeyBase64, 8192);
-                var nonce = CleanHistoryPackageText(package.NonceBase64, 256);
-                var cipher = CleanHistoryPackageText(package.CiphertextBase64, 8192);
-                var tag = CleanHistoryPackageText(package.TagBase64, 256);
-
-                if (package.TargetUserId == Guid.Empty || package.SenderUserId == Guid.Empty ||
-                    string.IsNullOrWhiteSpace(targetDeviceId) || string.IsNullOrWhiteSpace(senderDeviceId) ||
-                    string.IsNullOrWhiteSpace(senderKeyId) || string.IsNullOrWhiteSpace(providerDeviceId) ||
-                    string.IsNullOrWhiteSpace(providerPublic) || string.IsNullOrWhiteSpace(targetPublic) ||
-                    string.IsNullOrWhiteSpace(nonce) || string.IsNullOrWhiteSpace(cipher) || string.IsNullOrWhiteSpace(tag))
-                {
-                    skipped++;
-                    continue;
-                }
-
-                if (!memberSet.Contains(package.TargetUserId))
-                {
-                    skipped++;
-                    continue;
-                }
-                if (!await IsTrustedE2eeDeviceAsync(MeId, providerDeviceId, ct) || !await IsTrustedE2eeDeviceAsync(package.TargetUserId, targetDeviceId, ct))
-                {
-                    skipped++;
-                    continue;
-                }
-
-                var epoch = Math.Clamp(package.SecurityEpoch, 1, Math.Max(1, chatEntity.SecurityEpoch));
-                var exists = await db.GroupHistoryKeyPackages.AnyAsync(x =>
-                    x.GroupChatId == groupId &&
-                    x.SecurityEpoch == epoch &&
-                    x.TargetUserId == package.TargetUserId &&
-                    x.TargetDeviceId == targetDeviceId &&
-                    x.SenderUserId == package.SenderUserId &&
-                    x.SenderDeviceId == senderDeviceId &&
-                    x.SenderKeyId == senderKeyId, ct);
-                if (exists)
-                {
-                    skipped++;
-                    continue;
-                }
-
-                db.GroupHistoryKeyPackages.Add(new GroupHistoryKeyPackage
-                {
-                    GroupChatId = groupId,
-                    SenderUserId = package.SenderUserId,
-                    SenderDeviceId = senderDeviceId,
-                    SenderKeyId = senderKeyId,
-                    SecurityEpoch = epoch,
-                    ProviderUserId = MeId,
-                    ProviderDeviceId = providerDeviceId,
-                    TargetUserId = package.TargetUserId,
-                    TargetDeviceId = targetDeviceId,
-                    ProviderPublicKeyBase64 = providerPublic,
-                    TargetPublicKeyBase64 = targetPublic,
-                    NonceBase64 = nonce,
-                    CiphertextBase64 = cipher,
-                    TagBase64 = tag,
-                    Algorithm = algorithm,
-                    CreatedAt = now
-                });
-                accepted++;
-            }
-
-            if (accepted > 0)
-            {
-                await db.SaveChangesAsync(ct);
-                await CreateAndBroadcastGroupSystemMessageAsync(
-                    groupId,
-                    MeId,
-                    GroupChatService.SystemHistoryAvailableKey,
-                    "История группы доступна новому участнику.",
-                    ct);
-            }
-
-            return Ok(new GroupHistoryKeyPackageImportResult(accepted, skipped));
-        }
-        catch (Exception ex)
-        {
-            log.LogError(ex, "UploadGroupHistoryKeyPackages failed: me={MeId}, group={GroupId}", MeId, groupId);
-            return BadRequest(new { error = ex.Message });
-        }
-    }
-
-    [HttpGet("groups/{groupId:guid}/history-key-packages")]
-    public async Task<ActionResult<IReadOnlyList<GroupHistoryKeyPackageDto>>> GetGroupHistoryKeyPackages(Guid groupId, [FromQuery] string? deviceId, CancellationToken ct)
-    {
-        try
-        {
-            var normalizedDeviceId = CleanHistoryPackageText(deviceId, 128);
-            if (string.IsNullOrWhiteSpace(normalizedDeviceId))
-                return BadRequest(new { error = "DeviceId is required." });
-
-            var isMember = await db.GroupChatMembers.AsNoTracking()
-                .AnyAsync(m => m.GroupChatId == groupId && m.UserId == MeId, ct);
-            if (!isMember) return Forbid();
-            if (!await IsTrustedE2eeDeviceAsync(MeId, normalizedDeviceId, ct)) return Forbid();
-
-            var rows = await db.GroupHistoryKeyPackages
-                .Where(x => x.GroupChatId == groupId && x.TargetUserId == MeId && x.TargetDeviceId == normalizedDeviceId)
-                .OrderBy(x => x.SecurityEpoch)
-                .ThenBy(x => x.CreatedAt)
-                .Take(1000)
-                .ToListAsync(ct);
-
-            if (rows.Count > 0)
-            {
-                var now = DateTime.UtcNow;
-                foreach (var row in rows.Where(x => x.DeliveredAt == null))
-                    row.DeliveredAt = now;
-                await db.SaveChangesAsync(ct);
-            }
-
-            return Ok(rows.Select(x => new GroupHistoryKeyPackageDto(
-                x.Id,
-                x.GroupChatId,
-                x.SenderUserId,
-                x.SenderDeviceId,
-                x.SenderKeyId,
-                Math.Max(1, x.SecurityEpoch),
-                x.ProviderUserId,
-                x.ProviderDeviceId,
-                x.TargetUserId,
-                x.TargetDeviceId,
-                x.ProviderPublicKeyBase64,
-                x.TargetPublicKeyBase64,
-                x.NonceBase64,
-                x.CiphertextBase64,
-                x.TagBase64,
-                x.Algorithm,
-                x.CreatedAt)).ToList());
-        }
-        catch (Exception ex)
-        {
-            log.LogError(ex, "GetGroupHistoryKeyPackages failed: me={MeId}, group={GroupId}", MeId, groupId);
-            return BadRequest(new { error = ex.Message });
-        }
-    }
-
-    private static string? CleanHistoryPackageText(string? value, int maxLength)
-    {
-        var normalized = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-        if (normalized is not null && normalized.Length > maxLength)
-            normalized = normalized[..maxLength];
-        return normalized;
-    }
-
     [HttpDelete("groups/{groupId:guid}/members/{userId:guid}")]
     public async Task<ActionResult<IReadOnlyList<GroupChatMemberDto>>> RemoveGroupMember(Guid groupId, Guid userId, CancellationToken ct)
     {
@@ -1079,18 +783,12 @@ public class ChatController(
         {
             await groupChats.RemoveMemberAsync(groupId, MeId, userId, ct);
             var members = await groupChats.GetMemberDtosAsync(groupId, ct);
-            await BroadcastGroupMembersChanged(groupId, ct);
+            await BroadcastGroupMembersChanged(groupId, ct, new[] { userId });
 
             var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
             if (summary is not null)
                 await BroadcastGroupUpdated(summary, ct);
 
-            await CreateAndBroadcastGroupSystemMessageAsync(
-                groupId,
-                MeId,
-                GroupChatService.SystemSecurityKeysUpdatedKey,
-                "Ключи безопасности группы обновлены.",
-                ct);
 
             return Ok(members);
         }
@@ -1132,22 +830,8 @@ public class ChatController(
     {
         try
         {
-            var ownerId = await db.GroupChats.AsNoTracking()
-                .Where(g => g.Id == groupId)
-                .Select(g => g.OwnerId)
-                .FirstOrDefaultAsync(ct);
-
             await groupChats.LeaveAsync(groupId, MeId, ct);
-
-            if (ownerId != Guid.Empty)
-            {
-                await CreateAndBroadcastGroupSystemMessageAsync(
-                    groupId,
-                    ownerId,
-                    GroupChatService.SystemSecurityKeysUpdatedKey,
-                    "Ключи безопасности группы обновлены.",
-                    ct);
-            }
+            await BroadcastGroupMembersChanged(groupId, ct);
 
             var memberIds = await GetGroupMemberIdsAsync(groupId, ct);
             foreach (var memberId in memberIds)
@@ -1296,7 +980,6 @@ public class ChatController(
                 return NotFound(new { error = "Group chat not found." });
 
             var q = db.GroupMessages.AsNoTracking().Where(m => m.GroupChatId == groupId);
-            if (access.Group.HistoryPolicy != 1)
             {
                 var joinedAt = DirectChatService.EnsureUtc(access.Member.JoinedAt);
                 q = q.Where(m => m.SentAt >= joinedAt);
@@ -1362,18 +1045,16 @@ public class ChatController(
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
 
-            var created = await groupChats.CreateMessageAsync(MeId, groupId, body.Text, body.FileIds, DirectMessageKind.User, null, null, ct, body.ReplyToMessageId);
+            var created = await groupChats.CreateUserMessageAsync(MeId, groupId, body, ct);
             var dto = await groupChats.GetMessageDtoAsync(groupId, created.message.Id, ct);
             if (dto is null) return Problem("Failed to build message dto.", statusCode: 500);
 
             await BroadcastGroupCreated(groupId, dto, ct);
             return Ok(dto);
         }
-        catch (DbUpdateException ex)
+        catch (MlsDeliveryException ex)
         {
-            var detail = ex.InnerException?.Message ?? ex.Message;
-            log.LogError(ex, "SendGroupMessage db update failed: me={MeId}, group={GroupId}, detail={Detail}", MeId, groupId, detail);
-            return BadRequest(new { error = detail });
+            return StatusCode(ex.StatusCode, new { code = ex.Code, error = ex.Message });
         }
         catch (Exception ex)
         {
@@ -1447,8 +1128,6 @@ public class ChatController(
                 text = body.SystemKey switch
                 {
                     GroupChatService.SystemUserAddedKey => "Пользователь добавлен в группу.",
-                    GroupChatService.SystemHistoryAvailableKey => "История группы доступна новому участнику.",
-                    GroupChatService.SystemSecurityKeysUpdatedKey => "Ключи безопасности группы обновлены.",
                     GroupChatService.SystemGroupCallStartedKey => "Пользователь открыл групповой канал.",
                     GroupChatService.SystemGroupCallEndedKey => "Групповой звонок закончился.",
                     _ => "Системное сообщение."
@@ -1472,43 +1151,25 @@ public class ChatController(
         try
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
-            var newText = (body.Text ?? string.Empty).Trim();
 
-            var msg = await db.GroupMessages.FirstOrDefaultAsync(m => m.Id == messageId, ct);
-            if (msg is null) return NotFound(new { error = "Message not found." });
-            if (msg.SenderId != MeId) return Forbid();
-            if (msg.DeletedAt.HasValue) return BadRequest(new { error = "Deleted message cannot be edited." });
-            if (msg.Kind != DirectMessageKind.User) return BadRequest(new { error = "Only user messages can be edited." });
-            if (!await groupChats.IsMemberAsync(msg.GroupChatId, MeId, ct)) return Forbid();
-
-            var hasAttachments = await db.GroupMessageAttachments.AsNoTracking().AnyAsync(a => a.MessageId == msg.Id, ct);
-            if (string.IsNullOrWhiteSpace(newText) && !hasAttachments)
-                return BadRequest(new { error = "Text is required when message has no attachments." });
-
-            var groupEpoch = await db.GroupChats.AsNoTracking()
-                .Where(g => g.Id == msg.GroupChatId)
-                .Select(g => g.SecurityEpoch)
-                .FirstOrDefaultAsync(ct);
-            GroupChatService.ValidateGroupE2eePayload(msg.GroupChatId, Math.Max(1, groupEpoch), newText);
-
-            if (string.Equals(msg.Text, newText, StringComparison.Ordinal))
-            {
-                var same = await groupChats.GetMessageDtoAsync(msg.GroupChatId, msg.Id, ct);
-                return Ok(same);
-            }
-
-            var e2eeInfo = E2eeEnvelopeInspector.InspectGroup(newText);
-            msg.Text = newText;
-            msg.E2eeEnvelopeVersion = e2eeInfo.Version;
-            msg.E2eeProtocol = e2eeInfo.Protocol;
-            msg.EditedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(ct);
-
+            var msg = await groupChats.EditUserMessageAsync(MeId, messageId, body, ct);
             var dto = await groupChats.GetMessageDtoAsync(msg.GroupChatId, msg.Id, ct);
             if (dto is null) return NotFound();
 
             await BroadcastGroupUpdatedMessage(msg.GroupChatId, dto, ct);
             return Ok(dto);
+        }
+        catch (MlsDeliveryException ex)
+        {
+            return StatusCode(ex.StatusCode, new { code = ex.Code, error = ex.Message });
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound(new { error = "Message not found." });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Forbid();
         }
         catch (Exception ex)
         {
@@ -1540,7 +1201,9 @@ public class ChatController(
             msg.EditedAt = null;
             msg.Text = string.Empty;
             msg.SystemKey = null;
+            msg.Ciphertext = null;
             await db.SaveChangesAsync(ct);
+            await groupChats.AppendDeletionEventAsync(msg, ct);
             await fileCleanup.DeleteFilesForMessageAsync(attachedFileIds, ct);
 
             await BroadcastGroupDeleted(msg.GroupChatId, msg.Id, msg.DeletedAt.Value, MeId, ct);
@@ -1553,445 +1216,6 @@ public class ChatController(
         }
     }
 
-    [HttpPost("groups/{groupId:guid}/forward")]
-    [RequireVerifiedEmail]
-    public async Task<ActionResult<IEnumerable<MessageDto>>> ForwardGroupMessages(Guid groupId, [FromBody] ForwardMessagesRequest body, CancellationToken ct)
-    {
-        try
-        {
-            if (body?.MessageIds is null || body.MessageIds.Count == 0)
-                return BadRequest(new { error = "MessageIds are required." });
-            if (!await groupChats.IsMemberAsync(groupId, MeId, ct)) return NotFound(new { error = "Group chat not found." });
-
-            var ids = body.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
-            var sources = await VisibleGroupMessagesForMe(groupId)
-                .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
-                .OrderBy(m => m.SentAt)
-                .ThenBy(m => m.Id)
-                .ToListAsync(ct);
-
-            if (sources.Count == 0)
-                return Ok(Array.Empty<MessageDto>());
-
-            var createdDtos = new List<MessageDto>();
-            foreach (var source in sources)
-            {
-                var forwarded = await groupChats.ForwardMessageAsync(MeId, groupId, source, body.IncludeAttachments, ct);
-                var dto = await groupChats.GetMessageDtoAsync(groupId, forwarded.message.Id, ct);
-                if (dto is not null)
-                {
-                    createdDtos.Add(dto);
-                    await BroadcastGroupCreated(groupId, dto, ct);
-                }
-            }
-
-            return Ok(createdDtos);
-        }
-        catch (Exception ex)
-        {
-            log.LogError(ex, "ForwardGroupMessages failed: me={MeId}, group={GroupId}", MeId, groupId);
-            return BadRequest(new { error = ex.Message });
-        }
-    }
-
-    [HttpPost("forward/direct/{friendId:guid}")]
-    [RequireVerifiedEmail]
-    public async Task<ActionResult<IEnumerable<MessageDto>>> ForwardMessagesToDirect(Guid friendId, [FromBody] CrossChatForwardRequest body, CancellationToken ct)
-    {
-        try
-        {
-            if (body?.MessageIds is null || body.MessageIds.Count == 0)
-                return BadRequest(new { error = "MessageIds are required." });
-            if (!await chat.AreFriends(MeId, friendId, ct)) return Forbid();
-            var peerVerified = await IsEmailConfirmedAsync(friendId, ct);
-            if (!peerVerified) return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Пересылка пока недоступна." });
-
-            var ids = body.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
-            var source = (body.Source ?? string.Empty).Trim().ToLowerInvariant();
-            var createdDtos = new List<MessageDto>();
-
-            if (source == "group")
-            {
-                var sourcesQuery = VisibleGroupMessagesForMe(body.SourceChatId)
-                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null);
-
-                var sources = await sourcesQuery.OrderBy(m => m.SentAt).ThenBy(m => m.Id).ToListAsync(ct);
-                foreach (var sourceMessage in sources)
-                {
-                    var forwarded = await chat.ForwardMessageAsync(MeId, friendId, sourceMessage, body.IncludeAttachments, ct);
-                    var dto = await chat.GetMessageDtoAsync(forwarded.dialog.Id, forwarded.message.Id, ct);
-                    if (dto is not null)
-                    {
-                        createdDtos.Add(dto);
-                        await BroadcastCreated(friendId, dto, ct);
-                    }
-                }
-            }
-            else if (source == "direct")
-            {
-                var sources = await (
-                    from m in db.DirectMessages.AsNoTracking()
-                    join d in db.DirectDialogs.AsNoTracking() on m.DialogId equals d.Id
-                    where ids.Contains(m.Id) && m.DeletedAt == null && (d.User1Id == MeId || d.User2Id == MeId)
-                    orderby m.SentAt, m.Id
-                    select m
-                ).ToListAsync(ct);
-
-                foreach (var sourceMessage in sources)
-                {
-                    var forwarded = await chat.ForwardMessageAsync(MeId, friendId, sourceMessage, body.IncludeAttachments, ct);
-                    var dto = await chat.GetMessageDtoAsync(forwarded.dialog.Id, forwarded.message.Id, ct);
-                    if (dto is not null)
-                    {
-                        createdDtos.Add(dto);
-                        await BroadcastCreated(friendId, dto, ct);
-                    }
-                }
-            }
-            else
-            {
-                return BadRequest(new { error = "Source must be 'direct' or 'group'." });
-            }
-
-            return Ok(createdDtos);
-        }
-        catch (Exception ex)
-        {
-            log.LogError(ex, "ForwardMessagesToDirect failed: me={MeId}, friend={FriendId}", MeId, friendId);
-            return BadRequest(new { error = ex.Message });
-        }
-    }
-
-    [HttpPost("forward/group/{groupId:guid}")]
-    [RequireVerifiedEmail]
-    public async Task<ActionResult<IEnumerable<MessageDto>>> ForwardMessagesToGroup(Guid groupId, [FromBody] CrossChatForwardRequest body, CancellationToken ct)
-    {
-        try
-        {
-            if (body?.MessageIds is null || body.MessageIds.Count == 0)
-                return BadRequest(new { error = "MessageIds are required." });
-            if (!await groupChats.IsMemberAsync(groupId, MeId, ct)) return NotFound(new { error = "Group chat not found." });
-
-            var ids = body.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
-            var source = (body.Source ?? string.Empty).Trim().ToLowerInvariant();
-            var createdDtos = new List<MessageDto>();
-
-            if (source == "group")
-            {
-                var sourcesQuery = VisibleGroupMessagesForMe(body.SourceChatId)
-                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null);
-
-                var sources = await sourcesQuery.OrderBy(m => m.SentAt).ThenBy(m => m.Id).ToListAsync(ct);
-                foreach (var sourceMessage in sources)
-                {
-                    var forwarded = await groupChats.ForwardMessageAsync(MeId, groupId, sourceMessage, body.IncludeAttachments, ct);
-                    var dto = await groupChats.GetMessageDtoAsync(groupId, forwarded.message.Id, ct);
-                    if (dto is not null)
-                    {
-                        createdDtos.Add(dto);
-                        await BroadcastGroupCreated(groupId, dto, ct);
-                    }
-                }
-            }
-            else if (source == "direct")
-            {
-                var sources = await (
-                    from m in db.DirectMessages.AsNoTracking()
-                    join d in db.DirectDialogs.AsNoTracking() on m.DialogId equals d.Id
-                    where ids.Contains(m.Id) && m.DeletedAt == null && (d.User1Id == MeId || d.User2Id == MeId)
-                    orderby m.SentAt, m.Id
-                    select m
-                ).ToListAsync(ct);
-
-                foreach (var sourceMessage in sources)
-                {
-                    var forwarded = await groupChats.ForwardMessageAsync(MeId, groupId, sourceMessage, body.IncludeAttachments, ct);
-                    var dto = await groupChats.GetMessageDtoAsync(groupId, forwarded.message.Id, ct);
-                    if (dto is not null)
-                    {
-                        createdDtos.Add(dto);
-                        await BroadcastGroupCreated(groupId, dto, ct);
-                    }
-                }
-            }
-            else
-            {
-                return BadRequest(new { error = "Source must be 'direct' or 'group'." });
-            }
-
-            return Ok(createdDtos);
-        }
-        catch (Exception ex)
-        {
-            log.LogError(ex, "ForwardMessagesToGroup failed: me={MeId}, group={GroupId}", MeId, groupId);
-            return BadRequest(new { error = ex.Message });
-        }
-    }
-
-
-    private static readonly Regex UrlRegex = new(
-        @"(?i)\bhttps?://[^\s<>""']+",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
-        TimeSpan.FromMilliseconds(120));
-
-    private static bool IsAudioContent(string? contentType) =>
-        !string.IsNullOrWhiteSpace(contentType) && contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsImageContent(string? contentType) =>
-        !string.IsNullOrWhiteSpace(contentType) && contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsVideoContent(string? contentType) =>
-        !string.IsNullOrWhiteSpace(contentType) && contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
-
-    private static string NormalizeAttachmentKind(string? type)
-    {
-        var t = (type ?? string.Empty).Trim().ToLowerInvariant();
-        return t switch
-        {
-            "image" or "images" or "photo" or "photos" or "фото" => "photo",
-            "video" or "videos" or "видео" => "video",
-            "audio" or "music" or "музыка" => "music",
-            "file" or "files" or "файлы" => "files",
-            "link" or "links" or "ссылки" => "links",
-            _ => "photo"
-        };
-    }
-
-    private static string CleanLink(string value)
-    {
-        var v = (value ?? string.Empty).Trim();
-        while (v.Length > 0 && ".,;:!?)]}".Contains(v[^1]))
-            v = v[..^1];
-        return v;
-    }
-
-    private static List<string> ExtractLinks(string? text)
-    {
-        if (string.IsNullOrWhiteSpace(text) || !text.Contains("http", StringComparison.OrdinalIgnoreCase))
-            return [];
-
-        try
-        {
-            return UrlRegex.Matches(text)
-                .Select(m => CleanLink(m.Value))
-                .Where(x => Uri.TryCreate(x, UriKind.Absolute, out var uri) &&
-                            (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Take(12)
-                .ToList();
-        }
-        catch
-        {
-            return [];
-        }
-    }
-
-    private static string BuildAttachmentFileKind(ChatFile f)
-    {
-        if (f.Kind == StoredFileKind.Photo || IsImageContent(f.ContentType)) return "photo";
-        if (f.Kind == StoredFileKind.Video || IsVideoContent(f.ContentType)) return "video";
-        if (f.Kind == StoredFileKind.Music || IsAudioContent(f.ContentType)) return "music";
-        return "files";
-    }
-
-    private static bool FileMatchesAttachmentType(ChatFile f, string normalizedType)
-    {
-        var contentType = f.ContentType ?? string.Empty;
-        return normalizedType switch
-        {
-            "photo" => f.Kind == StoredFileKind.Photo || IsImageContent(contentType),
-            "video" => f.Kind == StoredFileKind.Video || IsVideoContent(contentType),
-            "music" => f.Kind == StoredFileKind.Music || IsAudioContent(contentType),
-            "files" => f.Kind != StoredFileKind.Avatar &&
-                       f.Kind != StoredFileKind.Photo &&
-                       f.Kind != StoredFileKind.Video &&
-                       f.Kind != StoredFileKind.Music &&
-                       !IsImageContent(contentType) &&
-                       !IsVideoContent(contentType) &&
-                       !IsAudioContent(contentType),
-            _ => false
-        };
-    }
-
-    private ChatAttachmentBrowserItemDto ToAttachmentBrowserDto(ChatFile file, Guid messageId, DateTime sentAt, Guid senderId, string? senderName)
-    {
-        var kind = BuildAttachmentFileKind(file);
-        var contentType = string.IsNullOrWhiteSpace(file.ContentType) ? "application/octet-stream" : file.ContentType;
-        var scanStatus = file.ScanStatus.ToString();
-        var isSafe = file.ScanStatus == FileScanStatus.Clean;
-        return new ChatAttachmentBrowserItemDto(
-            file.Id,
-            messageId,
-            sentAt,
-            senderId,
-            string.IsNullOrWhiteSpace(senderName) ? "Пользователь" : senderName!,
-            kind,
-            string.IsNullOrWhiteSpace(file.OriginalFileName) ? "file" : file.OriginalFileName,
-            $"/api/files/{file.Id}/raw",
-            contentType,
-            file.SizeBytes,
-            kind == "photo",
-            kind == "video",
-            kind == "music",
-            scanStatus,
-            file.ScanStatus != FileScanStatus.NotScanned,
-            isSafe,
-            isSafe ? null : (file.RiskNote ?? "Файл ещё не прошёл антивирусную проверку."),
-            null);
-    }
-
-    [HttpGet("attachments/direct/{friendId:guid}")]
-    public async Task<ActionResult<IEnumerable<ChatAttachmentBrowserItemDto>>> DirectAttachments(Guid friendId, string? type = "photo", int take = 250, CancellationToken ct = default)
-    {
-        try
-        {
-            var normalizedType = NormalizeAttachmentKind(type);
-            if (!await chat.AreFriends(MeId, friendId, ct)) return Forbid();
-            var dlg = await chat.GetOrCreateDialogAsync(MeId, friendId, ct);
-            var safeTake = Math.Clamp(take, 1, 500);
-
-            if (normalizedType == "links")
-            {
-                var messages = await (
-                    from m in db.DirectMessages.AsNoTracking()
-                    join u in db.Users.AsNoTracking() on m.SenderId equals u.Id
-                    where m.DialogId == dlg.Id && m.DeletedAt == null && m.Text != null && m.Text != string.Empty
-                    orderby m.SentAt descending, m.Id descending
-                    select new { Message = m, SenderName = u.DisplayName ?? u.UserName }
-                ).Take(1000).ToListAsync(ct);
-
-                var links = new List<ChatAttachmentBrowserItemDto>();
-                foreach (var row in messages)
-                {
-                    foreach (var link in ExtractLinks(row.Message.Text))
-                    {
-                        links.Add(new ChatAttachmentBrowserItemDto(
-                            Guid.NewGuid(),
-                            row.Message.Id,
-                            row.Message.SentAt,
-                            row.Message.SenderId,
-                            string.IsNullOrWhiteSpace(row.SenderName) ? "Пользователь" : row.SenderName,
-                            "links",
-                            link,
-                            link,
-                            "text/uri-list",
-                            0,
-                            false,
-                            false,
-                            false,
-                            "Clean",
-                            true,
-                            true,
-                            null,
-                            row.Message.Text));
-                        if (links.Count >= safeTake) return Ok(links);
-                    }
-                }
-
-                return Ok(links);
-            }
-
-            var rows = await (
-                from a in db.DirectMessageAttachments.AsNoTracking()
-                join m in db.DirectMessages.AsNoTracking() on a.MessageId equals m.Id
-                join f in db.ChatFiles.AsNoTracking() on a.FileId equals f.Id
-                join u in db.Users.AsNoTracking() on m.SenderId equals u.Id
-                where m.DialogId == dlg.Id && m.DeletedAt == null && f.DeletedAt == null && f.BlockedAt == null
-                orderby m.SentAt descending, m.Id descending, a.CreatedAt descending
-                select new { File = f, Message = m, SenderName = u.DisplayName ?? u.UserName }
-            ).Take(1000).ToListAsync(ct);
-
-            var result = rows
-                .Where(x => FileMatchesAttachmentType(x.File, normalizedType))
-                .Select(x => ToAttachmentBrowserDto(x.File, x.Message.Id, x.Message.SentAt, x.Message.SenderId, x.SenderName))
-                .Take(safeTake)
-                .ToList();
-
-            return Ok(result);
-        }
-        catch (Exception ex)
-        {
-            log.LogError(ex, "DirectAttachments failed: me={MeId}, friend={FriendId}", MeId, friendId);
-            return Ok(Array.Empty<ChatAttachmentBrowserItemDto>());
-        }
-    }
-
-    [HttpGet("attachments/groups/{groupId:guid}")]
-    public async Task<ActionResult<IEnumerable<ChatAttachmentBrowserItemDto>>> GroupAttachments(Guid groupId, string? type = "photo", int take = 250, CancellationToken ct = default)
-    {
-        try
-        {
-            var normalizedType = NormalizeAttachmentKind(type);
-            if (!await groupChats.IsMemberAsync(groupId, MeId, ct)) return NotFound(new { error = "Group chat not found." });
-            var safeTake = Math.Clamp(take, 1, 500);
-
-            if (normalizedType == "links")
-            {
-                var visibleMessages = VisibleGroupMessagesForMe(groupId);
-                var messages = await (
-                    from m in visibleMessages
-                    join u in db.Users.AsNoTracking() on m.SenderId equals u.Id
-                    where m.DeletedAt == null && m.Text != null && m.Text != string.Empty
-                    orderby m.SentAt descending, m.Id descending
-                    select new { Message = m, SenderName = u.DisplayName ?? u.UserName }
-                ).Take(1000).ToListAsync(ct);
-
-                var links = new List<ChatAttachmentBrowserItemDto>();
-                foreach (var row in messages)
-                {
-                    foreach (var link in ExtractLinks(row.Message.Text))
-                    {
-                        links.Add(new ChatAttachmentBrowserItemDto(
-                            Guid.NewGuid(),
-                            row.Message.Id,
-                            row.Message.SentAt,
-                            row.Message.SenderId,
-                            string.IsNullOrWhiteSpace(row.SenderName) ? "Пользователь" : row.SenderName,
-                            "links",
-                            link,
-                            link,
-                            "text/uri-list",
-                            0,
-                            false,
-                            false,
-                            false,
-                            "Clean",
-                            true,
-                            true,
-                            null,
-                            row.Message.Text));
-                        if (links.Count >= safeTake) return Ok(links);
-                    }
-                }
-
-                return Ok(links);
-            }
-
-            var visibleAttachmentMessages = VisibleGroupMessagesForMe(groupId);
-            var rows = await (
-                from a in db.GroupMessageAttachments.AsNoTracking()
-                join m in visibleAttachmentMessages on a.MessageId equals m.Id
-                join f in db.ChatFiles.AsNoTracking() on a.FileId equals f.Id
-                join u in db.Users.AsNoTracking() on m.SenderId equals u.Id
-                where m.DeletedAt == null && f.DeletedAt == null && f.BlockedAt == null
-                orderby m.SentAt descending, m.Id descending, a.CreatedAt descending
-                select new { File = f, Message = m, SenderName = u.DisplayName ?? u.UserName }
-            ).Take(1000).ToListAsync(ct);
-
-            var result = rows
-                .Where(x => FileMatchesAttachmentType(x.File, normalizedType))
-                .Select(x => ToAttachmentBrowserDto(x.File, x.Message.Id, x.Message.SentAt, x.Message.SenderId, x.SenderName))
-                .Take(safeTake)
-                .ToList();
-
-            return Ok(result);
-        }
-        catch (Exception ex)
-        {
-            log.LogError(ex, "GroupAttachments failed: me={MeId}, group={GroupId}", MeId, groupId);
-            return Ok(Array.Empty<ChatAttachmentBrowserItemDto>());
-        }
-    }
 
     private async Task<GroupChatDetailsDto?> BuildGroupDetailsAsync(Guid groupId, CancellationToken ct)
     {
@@ -2014,7 +1238,7 @@ public class ChatController(
                 on message.GroupChatId equals member.GroupChatId
             join groupChat in db.GroupChats.AsNoTracking()
                 on message.GroupChatId equals groupChat.Id
-            where groupChat.HistoryPolicy == 1 || message.SentAt >= member.JoinedAt
+            where message.SentAt >= member.JoinedAt
             select message;
 
         if (groupId.HasValue && groupId.Value != Guid.Empty)
@@ -2067,19 +1291,15 @@ public class ChatController(
         }
     }
 
-    private async Task BroadcastGroupMembersChanged(Guid groupId, CancellationToken ct)
+    /// <summary>
+    /// Tells current members (and, on removal, the removed user) about the roster change. Member clients then
+    /// reconcile the MLS group with the chat's member list (Add/Remove commits).
+    /// </summary>
+    private async Task BroadcastGroupMembersChanged(Guid groupId, CancellationToken ct, IEnumerable<Guid>? alsoNotify = null)
     {
         var members = await groupChats.GetMemberDtosAsync(groupId, ct);
-        var epoch = await db.GroupChats.AsNoTracking()
-            .Where(g => g.Id == groupId)
-            .Select(g => new { g.SecurityEpoch, g.SecurityEpochChangedAt })
-            .FirstOrDefaultAsync(ct);
-        var securityEpoch = Math.Max(1, epoch?.SecurityEpoch ?? 1);
-        var securityEpochChangedAt = epoch?.SecurityEpochChangedAt;
-        foreach (var memberId in members.Select(m => m.UserId))
-        {
-            await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatMembersChanged", new GroupChatMembersChangedDto(groupId, members, securityEpoch, securityEpochChangedAt), ct);
-        }
+        var targets = members.Select(m => m.UserId).Concat(alsoNotify ?? Array.Empty<Guid>()).Distinct().Select(x => x.ToString()).ToList();
+        await hub.Clients.Users(targets).SendAsync("GroupChatMembersChanged", new GroupChatMembersChangedDto(groupId, members), ct);
     }
 
 }

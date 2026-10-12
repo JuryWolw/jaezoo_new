@@ -67,8 +67,6 @@ public class ChatHub : Hub
 
     private static bool IsKnownGroupSystemKey(string? systemKey) => systemKey is
         GroupChatService.SystemUserAddedKey or
-        GroupChatService.SystemHistoryAvailableKey or
-        GroupChatService.SystemSecurityKeysUpdatedKey or
         GroupChatService.SystemGroupCallStartedKey or
         GroupChatService.SystemGroupCallEndedKey;
 
@@ -161,69 +159,6 @@ public class ChatHub : Hub
         return visible;
     }
 
-    public async Task SendMessage(Guid targetUserId, SendMessageRequest request)
-    {
-        try
-        {
-            var me = MeId;
-            request ??= new SendMessageRequest(null, null);
-
-            await EnsureDirectChatWritableAsync(me, targetUserId, Context.ConnectionAborted);
-
-            var created = await _chat.CreateMessageAsync(
-                me,
-                targetUserId,
-                request.Text,
-                request.FileIds,
-                DirectMessageKind.User,
-                null,
-                null,
-                Context.ConnectionAborted,
-                request.ReplyToMessageId);
-
-            var dto = await _chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, Context.ConnectionAborted);
-            if (dto is null)
-                throw new HubException("Не удалось сформировать сообщение.");
-
-            await EmitCreatedToParticipants(me, targetUserId, dto, created.dialog, Context.ConnectionAborted);
-        }
-        catch (InvalidOperationException ex)
-        {
-            throw new HubException(ex.Message);
-        }
-        catch (HubException)
-        {
-            throw;
-        }
-        catch (DbUpdateException ex)
-        {
-            var detail = ex.InnerException?.Message ?? ex.Message;
-            _log.LogError(ex, "SendMessage db update failed. target={Target}. detail={Detail}", targetUserId, detail);
-            throw new HubException($"SendMessage failed: DbUpdateException: {detail}");
-        }
-        catch (Exception ex)
-        {
-            _log.LogError(ex, "SendMessage failed. target={Target}", targetUserId);
-            throw new HubException($"SendMessage failed: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    public async Task SendDirectMessage(Guid targetUserId, string text)
-    {
-        text = (text ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(text)) return;
-        await SendMessage(targetUserId, new SendMessageRequest(text));
-    }
-
-    public async Task SendDirectMessageWithFiles(Guid targetUserId, string? text, List<Guid>? fileIds)
-    {
-        await SendMessage(targetUserId, new SendMessageRequest(text, fileIds));
-    }
-
-
-    // ===== Typing indicators =====
-    // These hub methods are transient realtime signals only: they do not create messages
-    // and do not touch unread counters/history.
     public async Task SetTyping(Guid targetUserId, bool isTyping)
     {
         var me = MeId;
@@ -301,40 +236,6 @@ public class ChatHub : Hub
     public Task GroupTyping(Guid groupId, bool isTyping) => SetGroupTyping(groupId, isTyping);
     public Task SendGroupTypingStatus(Guid groupId, bool isTyping) => SetGroupTyping(groupId, isTyping);
 
-    public async Task ForwardMessages(Guid targetUserId, ForwardMessagesRequest request)
-    {
-        try
-        {
-            var me = MeId;
-            if (request?.MessageIds is null || request.MessageIds.Count == 0)
-                throw new HubException("MessageIds are required.");
-            await EnsureDirectChatWritableAsync(me, targetUserId, Context.ConnectionAborted);
-
-            var ids = request.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
-            var sources = await (
-                from m in _db.DirectMessages.AsNoTracking()
-                join d in _db.DirectDialogs.AsNoTracking() on m.DialogId equals d.Id
-                where ids.Contains(m.Id)
-                      && m.DeletedAt == null
-                      && (d.User1Id == me || d.User2Id == me)
-                orderby m.SentAt, m.Id
-                select m
-            ).ToListAsync(Context.ConnectionAborted);
-
-            foreach (var source in sources)
-            {
-                var created = await _chat.ForwardMessageAsync(me, targetUserId, source, request.IncludeAttachments, Context.ConnectionAborted);
-                var dto = await _chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, Context.ConnectionAborted);
-                if (dto is not null)
-                    await EmitCreatedToParticipants(me, targetUserId, dto, created.dialog, Context.ConnectionAborted);
-            }
-        }
-        catch (InvalidOperationException ex)
-        {
-            throw new HubException(ex.Message);
-        }
-    }
-
     public async Task SendSystemMessage(Guid targetUserId, string systemKey, string? text)
     {
         try
@@ -346,7 +247,7 @@ public class ChatHub : Hub
                 throw new HubException("Unknown system message key.");
             await EnsureDirectChatWritableAsync(me, targetUserId, Context.ConnectionAborted);
 
-            var created = await _chat.CreateMessageAsync(me, targetUserId, text, null, DirectMessageKind.System, systemKey, null, Context.ConnectionAborted);
+            var created = await _chat.CreateSystemMessageAsync(me, targetUserId, text, systemKey, null, Context.ConnectionAborted);
             var dto = await _chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, Context.ConnectionAborted);
             if (dto is null)
                 throw new HubException("Не удалось сформировать системное сообщение.");
@@ -376,61 +277,6 @@ public class ChatHub : Hub
         }
     }
 
-
-
-    private IQueryable<GroupMessage> VisibleGroupMessagesForUser(Guid userId, Guid? groupId = null)
-    {
-        var query =
-            from message in _db.GroupMessages.AsNoTracking()
-            join member in _db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == userId)
-                on message.GroupChatId equals member.GroupChatId
-            join groupChat in _db.GroupChats.AsNoTracking()
-                on message.GroupChatId equals groupChat.Id
-            where groupChat.HistoryPolicy == 1 || message.SentAt >= member.JoinedAt
-            select message;
-
-        if (groupId.HasValue && groupId.Value != Guid.Empty)
-            query = query.Where(message => message.GroupChatId == groupId.Value);
-
-        return query;
-    }
-
-    public async Task SendGroupMessage(Guid groupId, SendMessageRequest request)
-    {
-        try
-        {
-            var me = MeId;
-            request ??= new SendMessageRequest(null, null);
-            await EnsureGroupChatWritableAsync(me, Context.ConnectionAborted);
-
-            var created = await _groupChats.CreateMessageAsync(me, groupId, request.Text, request.FileIds, DirectMessageKind.User, null, null, Context.ConnectionAborted, request.ReplyToMessageId);
-            var dto = await _groupChats.GetMessageDtoAsync(groupId, created.message.Id, Context.ConnectionAborted);
-            if (dto is null)
-                throw new HubException("Не удалось сформировать сообщение.");
-
-            await EmitCreatedToGroup(groupId, dto, me, Context.ConnectionAborted);
-        }
-        catch (InvalidOperationException ex)
-        {
-            throw new HubException(ex.Message);
-        }
-        catch (HubException)
-        {
-            throw;
-        }
-        catch (DbUpdateException ex)
-        {
-            var detail = ex.InnerException?.Message ?? ex.Message;
-            _log.LogError(ex, "SendGroupMessage db update failed. group={GroupId}. detail={Detail}", groupId, detail);
-            throw new HubException($"SendGroupMessage failed: DbUpdateException: {detail}");
-        }
-        catch (Exception ex)
-        {
-            _log.LogError(ex, "SendGroupMessage failed. group={GroupId}", groupId);
-            throw new HubException($"SendGroupMessage failed: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
     public async Task SendGroupSystemMessage(Guid groupId, string systemKey, string? text)
     {
         try
@@ -451,8 +297,6 @@ public class ChatHub : Hub
                 cleanText = systemKey switch
                 {
                     GroupChatService.SystemUserAddedKey => "Пользователь добавлен в группу.",
-                    GroupChatService.SystemHistoryAvailableKey => "История группы доступна новому участнику.",
-                    GroupChatService.SystemSecurityKeysUpdatedKey => "Ключи безопасности группы обновлены.",
                     GroupChatService.SystemGroupCallStartedKey => "Пользователь открыл групповой канал.",
                     GroupChatService.SystemGroupCallEndedKey => "Групповой звонок закончился.",
                     _ => "Системное сообщение."
@@ -465,136 +309,6 @@ public class ChatHub : Hub
                 throw new HubException("Не удалось сформировать системное сообщение.");
 
             await EmitCreatedToGroup(groupId, dto, me, Context.ConnectionAborted);
-        }
-        catch (InvalidOperationException ex)
-        {
-            throw new HubException(ex.Message);
-        }
-    }
-
-    public async Task ForwardGroupMessages(Guid groupId, ForwardMessagesRequest request)
-    {
-        try
-        {
-            var me = MeId;
-            if (request?.MessageIds is null || request.MessageIds.Count == 0)
-                throw new HubException("MessageIds are required.");
-            await EnsureGroupChatWritableAsync(me, Context.ConnectionAborted);
-            if (!await _groupChats.IsMemberAsync(groupId, me, Context.ConnectionAborted))
-                throw new HubException("Групповой чат не найден.");
-
-            var ids = request.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
-            var sources = await VisibleGroupMessagesForUser(me, groupId)
-                .Where(m => ids.Contains(m.Id) && m.DeletedAt == null)
-                .OrderBy(m => m.SentAt)
-                .ThenBy(m => m.Id)
-                .ToListAsync(Context.ConnectionAborted);
-
-            foreach (var source in sources)
-            {
-                var created = await _groupChats.ForwardMessageAsync(me, groupId, source, request.IncludeAttachments, Context.ConnectionAborted);
-                var dto = await _groupChats.GetMessageDtoAsync(groupId, created.message.Id, Context.ConnectionAborted);
-                if (dto is not null)
-                    await EmitCreatedToGroup(groupId, dto, me, Context.ConnectionAborted);
-            }
-        }
-        catch (InvalidOperationException ex)
-        {
-            throw new HubException(ex.Message);
-        }
-    }
-
-    public async Task ForwardMessagesToDirect(Guid targetUserId, CrossChatForwardRequest request)
-    {
-        try
-        {
-            var me = MeId;
-            if (request?.MessageIds is null || request.MessageIds.Count == 0)
-                throw new HubException("MessageIds are required.");
-            await EnsureDirectChatWritableAsync(me, targetUserId, Context.ConnectionAborted);
-
-            var ids = request.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
-            var source = (request.Source ?? string.Empty).Trim().ToLowerInvariant();
-
-            if (source == "group")
-            {
-                var sourcesQuery = VisibleGroupMessagesForUser(me, request.SourceChatId)
-                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null);
-
-                var sources = await sourcesQuery.OrderBy(m => m.SentAt).ThenBy(m => m.Id).ToListAsync(Context.ConnectionAborted);
-                foreach (var sourceMessage in sources)
-                {
-                    var created = await _chat.ForwardMessageAsync(me, targetUserId, sourceMessage, request.IncludeAttachments, Context.ConnectionAborted);
-                    var dto = await _chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, Context.ConnectionAborted);
-                    if (dto is not null)
-                        await EmitCreatedToParticipants(me, targetUserId, dto, created.dialog, Context.ConnectionAborted);
-                }
-            }
-            else if (source == "direct")
-            {
-                await ForwardMessages(targetUserId, new ForwardMessagesRequest(ids, request.IncludeAttachments));
-            }
-            else
-            {
-                throw new HubException("Source must be 'direct' or 'group'.");
-            }
-        }
-        catch (InvalidOperationException ex)
-        {
-            throw new HubException(ex.Message);
-        }
-    }
-
-    public async Task ForwardMessagesToGroup(Guid groupId, CrossChatForwardRequest request)
-    {
-        try
-        {
-            var me = MeId;
-            if (request?.MessageIds is null || request.MessageIds.Count == 0)
-                throw new HubException("MessageIds are required.");
-            await EnsureGroupChatWritableAsync(me, Context.ConnectionAborted);
-            if (!await _groupChats.IsMemberAsync(groupId, me, Context.ConnectionAborted))
-                throw new HubException("Групповой чат не найден.");
-
-            var ids = request.MessageIds.Where(x => x != Guid.Empty).Distinct().Take(20).ToList();
-            var source = (request.Source ?? string.Empty).Trim().ToLowerInvariant();
-
-            if (source == "group")
-            {
-                var sourcesQuery = VisibleGroupMessagesForUser(me, request.SourceChatId)
-                    .Where(m => ids.Contains(m.Id) && m.DeletedAt == null);
-
-                var sources = await sourcesQuery.OrderBy(m => m.SentAt).ThenBy(m => m.Id).ToListAsync(Context.ConnectionAborted);
-                foreach (var sourceMessage in sources)
-                {
-                    var created = await _groupChats.ForwardMessageAsync(me, groupId, sourceMessage, request.IncludeAttachments, Context.ConnectionAborted);
-                    var dto = await _groupChats.GetMessageDtoAsync(groupId, created.message.Id, Context.ConnectionAborted);
-                    if (dto is not null)
-                        await EmitCreatedToGroup(groupId, dto, me, Context.ConnectionAborted);
-                }
-            }
-            else if (source == "direct")
-            {
-                var sources = await (
-                    from m in _db.DirectMessages.AsNoTracking()
-                    join d in _db.DirectDialogs.AsNoTracking() on m.DialogId equals d.Id
-                    where ids.Contains(m.Id) && m.DeletedAt == null && (d.User1Id == me || d.User2Id == me)
-                    orderby m.SentAt, m.Id
-                    select m
-                ).ToListAsync(Context.ConnectionAborted);
-
-                foreach (var sourceMessage in sources)
-                {
-                    var created = await _groupChats.ForwardMessageAsync(me, groupId, sourceMessage, request.IncludeAttachments, Context.ConnectionAborted);
-                    var dto = await _groupChats.GetMessageDtoAsync(groupId, created.message.Id, Context.ConnectionAborted);
-                    if (dto is not null)
-                        await EmitCreatedToGroup(groupId, dto, me, Context.ConnectionAborted);
-                }
-            }
-            else
-            {
-                throw new HubException("Source must be 'direct' or 'group'.");
-            }
         }
         catch (InvalidOperationException ex)
         {

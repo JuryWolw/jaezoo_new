@@ -1,14 +1,13 @@
 ﻿using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services.Storage;
-using JaeZoo.Server.Services.Security;
+using JaeZoo.Server.Models.Mls;
+using JaeZoo.Server.Services.Mls;
 using Microsoft.EntityFrameworkCore;
-using System.Text;
-using System.Text.Json;
 
 namespace JaeZoo.Server.Services.Chat;
 
-public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
+public sealed class DirectChatService(AppDbContext db, IObjectStorage storage, MlsDeliveryService mls)
 {
     public AppDbContext Db => db;
     public IObjectStorage Storage => storage;
@@ -85,51 +84,14 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
     public static bool IsVideo(string? ct) =>
         !string.IsNullOrWhiteSpace(ct) && ct.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsDirectE2eePayload(string? text) =>
-        !string.IsNullOrWhiteSpace(text) &&
-        (text.StartsWith(E2eeEnvelopeInspector.DirectPrefixV1, StringComparison.Ordinal) ||
-         text.StartsWith(E2eeEnvelopeInspector.DirectPrefixV2, StringComparison.Ordinal) ||
-         text.StartsWith(E2eeEnvelopeInspector.DirectPrefixV3, StringComparison.Ordinal));
-
-    public static void ValidateDirectE2eePayload(Guid senderId, Guid peerId, string? text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return;
-        if (!IsDirectE2eePayload(text))
-            throw new InvalidOperationException("Direct user messages must be encrypted with E2EE.");
-
-        var prefix = text.StartsWith(E2eeEnvelopeInspector.DirectPrefixV3, StringComparison.Ordinal)
-            ? E2eeEnvelopeInspector.DirectPrefixV3
-            : text.StartsWith(E2eeEnvelopeInspector.DirectPrefixV2, StringComparison.Ordinal)
-                ? E2eeEnvelopeInspector.DirectPrefixV2
-                : E2eeEnvelopeInspector.DirectPrefixV1;
-
-        try
-        {
-            var json = Encoding.UTF8.GetString(Convert.FromBase64String(text[prefix.Length..]));
-            var envelope = JsonSerializer.Deserialize<DirectE2eeServerEnvelope>(json);
-            if (envelope is null)
-                throw new InvalidOperationException("Invalid direct E2EE envelope.");
-            if (envelope.senderId != senderId || envelope.recipientId != peerId)
-                throw new InvalidOperationException("Direct E2EE envelope belongs to another dialog.");
-        }
-        catch (InvalidOperationException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException("Invalid direct E2EE envelope.", ex);
-        }
-    }
-
-    private sealed record DirectE2eeServerEnvelope(int v, Guid senderId, Guid recipientId);
 
     public AttachmentDto ToAttachmentDto(ChatFile f)
     {
         var status = f.ScanStatus.ToString();
         var isClean = f.ScanStatus == JaeZoo.Server.Models.Files.FileScanStatus.Clean;
         var isBlocked = f.ScanStatus == JaeZoo.Server.Models.Files.FileScanStatus.Blocked || f.BlockedAt.HasValue || f.DeletedAt.HasValue;
-        var warning = isClean
+        var isClientEncrypted = f.ScanStatus == JaeZoo.Server.Models.Files.FileScanStatus.ClientEncrypted;
+        var warning = isClean || isClientEncrypted
             ? null
             : isBlocked
                 ? "Файл заблокирован проверкой безопасности."
@@ -179,132 +141,25 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
         return map;
     }
 
-    public async Task<Dictionary<Guid, MessageForwardInfoDto>> LoadForwardInfosAsync(List<DirectMessage> messages, CancellationToken ct)
+
+    public MessageDto ToMessageDto(DirectMessage message, IReadOnlyList<AttachmentDto>? attachments = null, Guid? mlsGroupId = null)
     {
-        var sourceIds = messages
-            .Where(m => m.ForwardedFromMessageId.HasValue)
-            .Select(m => m.ForwardedFromMessageId!.Value)
-            .Distinct()
-            .ToList();
-
-        if (sourceIds.Count == 0)
-            return new();
-
-        var result = new Dictionary<Guid, MessageForwardInfoDto>();
-
-        var directSources = await db.DirectMessages
-            .AsNoTracking()
-            .Where(m => sourceIds.Contains(m.Id))
-            .Select(m => new
-            {
-                m.Id,
-                m.SenderId,
-                m.Text,
-                m.SentAt,
-                m.Kind,
-                m.SystemKey,
-                m.DeletedAt,
-                m.E2eeEnvelopeVersion,
-                m.E2eeProtocol
-            })
-            .ToListAsync(ct);
-
-        var directAttachmentMessageIds = await db.DirectMessageAttachments
-            .AsNoTracking()
-            .Where(a => sourceIds.Contains(a.MessageId))
-            .Select(a => a.MessageId)
-            .Distinct()
-            .ToListAsync(ct);
-        var directHasAttachments = directAttachmentMessageIds.ToHashSet();
-
-        foreach (var x in directSources)
-        {
-            result[x.Id] = new MessageForwardInfoDto(
-                x.Id,
-                x.SenderId,
-                x.DeletedAt.HasValue ? string.Empty : x.Text,
-                x.SentAt,
-                directHasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
-                x.Kind,
-                x.DeletedAt.HasValue ? null : x.SystemKey,
-                x.DeletedAt,
-                x.DeletedAt.HasValue ? 0 : x.E2eeEnvelopeVersion,
-                x.DeletedAt.HasValue ? null : x.E2eeProtocol);
-        }
-
-        var unresolvedIds = sourceIds.Where(id => !result.ContainsKey(id)).ToList();
-        if (unresolvedIds.Count > 0)
-        {
-            var groupSources = await db.GroupMessages
-                .AsNoTracking()
-                .Where(m => unresolvedIds.Contains(m.Id))
-                .Select(m => new
-                {
-                    m.Id,
-                    m.SenderId,
-                    m.Text,
-                    m.SentAt,
-                    m.Kind,
-                    m.SystemKey,
-                    m.DeletedAt,
-                    m.E2eeEnvelopeVersion,
-                    m.E2eeProtocol
-                })
-                .ToListAsync(ct);
-
-            var groupAttachmentMessageIds = await db.GroupMessageAttachments
-                .AsNoTracking()
-                .Where(a => unresolvedIds.Contains(a.MessageId))
-                .Select(a => a.MessageId)
-                .Distinct()
-                .ToListAsync(ct);
-            var groupHasAttachments = groupAttachmentMessageIds.ToHashSet();
-
-            foreach (var x in groupSources)
-            {
-                result[x.Id] = new MessageForwardInfoDto(
-                    x.Id,
-                    x.SenderId,
-                    x.DeletedAt.HasValue ? string.Empty : x.Text,
-                    x.SentAt,
-                    groupHasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
-                    x.Kind,
-                    x.DeletedAt.HasValue ? null : x.SystemKey,
-                    x.DeletedAt,
-                    x.DeletedAt.HasValue ? 0 : x.E2eeEnvelopeVersion,
-                    x.DeletedAt.HasValue ? null : x.E2eeProtocol);
-            }
-        }
-
-        return result;
-    }
-
-    public MessageDto ToMessageDto(
-        DirectMessage message,
-        IReadOnlyList<AttachmentDto>? attachments = null,
-        MessageForwardInfoDto? forwardedFrom = null)
-    {
-        var dtoAttachments = message.DeletedAt.HasValue ? Array.Empty<AttachmentDto>() : attachments;
-        var dtoText = message.DeletedAt.HasValue ? string.Empty : message.Text;
-
+        var deleted = message.DeletedAt.HasValue;
         return new MessageDto(
             message.Id,
             message.SenderId,
-            dtoText,
+            deleted ? string.Empty : message.Text,
             message.SentAt,
-            dtoAttachments,
+            deleted ? Array.Empty<AttachmentDto>() : attachments,
             message.Kind,
             message.SystemKey,
-            message.ForwardedFromMessageId,
             message.EditedAt,
             message.DeletedAt,
             message.DeletedById,
-            forwardedFrom,
-            null,
-            message.DeletedAt.HasValue ? 0 : message.E2eeEnvelopeVersion,
-            message.DeletedAt.HasValue ? null : message.E2eeProtocol,
-            message.ReplyToMessageId
-        );
+            deleted ? null : message.Ciphertext,
+            message.MlsEpoch,
+            message.SenderDeviceId,
+            mlsGroupId);
     }
 
     public async Task<List<MessageDto>> BuildMessageDtosAsync(IReadOnlyList<DirectMessage> messages, CancellationToken ct = default)
@@ -314,13 +169,16 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
 
         var ids = messages.Select(m => m.Id).ToList();
         var attachments = await LoadAttachmentsForMessagesAsync(ids, ct);
-        var forwards = await LoadForwardInfosAsync(messages.ToList(), ct);
+        var dialogIds = messages.Select(m => m.DialogId).Distinct().ToList();
+        var groups = await db.MlsGroups.AsNoTracking()
+            .Where(g => g.DialogId != null && dialogIds.Contains(g.DialogId.Value))
+            .ToDictionaryAsync(g => g.DialogId!.Value, g => g.Id, ct);
 
         return messages
             .Select(m => ToMessageDto(
                 m,
                 attachments.TryGetValue(m.Id, out var att) ? att : null,
-                m.ForwardedFromMessageId.HasValue && forwards.TryGetValue(m.ForwardedFromMessageId.Value, out var fwd) ? fwd : null))
+                groups.TryGetValue(m.DialogId, out var gid) ? gid : null))
             .ToList();
     }
 
@@ -358,264 +216,138 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage)
         return (count, first?.Id, first?.SentAt);
     }
 
-    public async Task<(DirectDialog dialog, DirectMessage message, List<ChatFile> files)> CreateMessageAsync(
+
+    private async Task<List<ChatFile>> LoadAttachableFilesAsync(Guid senderId, IReadOnlyCollection<Guid>? fileIds, bool requireClientEncrypted, CancellationToken ct)
+    {
+        var ids = (fileIds ?? Array.Empty<Guid>()).Where(x => x != Guid.Empty).Distinct().Take(10).ToList();
+        if (ids.Count == 0) return new List<ChatFile>();
+
+        var files = await db.ChatFiles.Where(f => ids.Contains(f.Id)).ToListAsync(ct);
+        if (files.Count != ids.Count)
+            throw new InvalidOperationException("One or more files were not found.");
+
+        foreach (var f in files)
+        {
+            if (f.UploaderId != senderId)
+                throw new InvalidOperationException("Cannot attach someone else's file.");
+            if (f.IsAttached)
+                throw new InvalidOperationException("One or more files are already attached.");
+            if (requireClientEncrypted && f.ScanStatus != JaeZoo.Server.Models.Files.FileScanStatus.ClientEncrypted)
+                throw new InvalidOperationException("Вложения личных сообщений должны быть зашифрованы на устройстве.");
+        }
+        return files;
+    }
+
+    private void AttachFiles(Guid messageId, IEnumerable<ChatFile> files, DateTime now)
+    {
+        foreach (var f in files)
+        {
+            db.DirectMessageAttachments.Add(new DirectMessageAttachment { MessageId = messageId, FileId = f.Id, CreatedAt = now });
+            f.IsAttached = true;
+            f.AttachedAt = now;
+        }
+    }
+
+    /// <summary>User message: only an MLS ciphertext of the dialog's group is accepted (the server cannot read it).</summary>
+    public async Task<(DirectDialog dialog, DirectMessage message, MlsGroupEvent ev)> CreateUserMessageAsync(
         Guid senderId,
         Guid peerId,
-        string? text,
-        IReadOnlyCollection<Guid>? fileIds,
-        DirectMessageKind kind,
-        string? systemKey,
-        Guid? forwardedFromMessageId,
-        CancellationToken ct = default,
-        Guid? replyToMessageId = null)
+        SendMessageRequest request,
+        CancellationToken ct = default)
     {
         if (SystemChatService.IsSystemUser(peerId))
             throw new InvalidOperationException("Системный чат JaeZoo только для чтения.");
 
-        text = (text ?? string.Empty).Trim();
-        var ids = (fileIds ?? Array.Empty<Guid>())
-            .Where(x => x != Guid.Empty)
-            .Distinct()
-            .Take(10)
-            .ToList();
-
-        if (kind == DirectMessageKind.User && !forwardedFromMessageId.HasValue)
-            ValidateDirectE2eePayload(senderId, peerId, text);
-
-        var hasSystemMarker = kind == DirectMessageKind.System && !string.IsNullOrWhiteSpace(systemKey);
-        if (string.IsNullOrWhiteSpace(text) && ids.Count == 0 && !hasSystemMarker)
-            throw new InvalidOperationException("Message must contain text or attachments.");
-
         var dlg = await GetOrCreateDialogAsync(senderId, peerId, ct);
-
-        // Ответ допустим только на сообщение из этого же диалога.
-        if (replyToMessageId.HasValue && !await db.DirectMessages.AnyAsync(m => m.Id == replyToMessageId.Value && m.DialogId == dlg.Id, ct))
-            replyToMessageId = null;
-
-        var files = new List<ChatFile>();
-        if (ids.Count > 0)
-        {
-            files = await db.ChatFiles.Where(f => ids.Contains(f.Id)).ToListAsync(ct);
-            if (files.Count != ids.Count)
-                throw new InvalidOperationException("One or more files were not found.");
-
-            foreach (var f in files)
-            {
-                if (f.UploaderId != senderId)
-                    throw new InvalidOperationException("Cannot attach someone else's file.");
-                if (f.IsAttached)
-                    throw new InvalidOperationException("One or more files are already attached.");
-            }
-        }
+        var group = await mls.RequireMessageContextAsync(senderId, dlg.Id, null, request.DeviceId, request.Epoch, request.Ciphertext, ct);
+        var files = await LoadAttachableFilesAsync(senderId, request.FileIds, requireClientEncrypted: true, ct);
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var now = DateTime.UtcNow;
-        var e2eeInfo = E2eeEnvelopeInspector.InspectDirect(text);
+        var message = new DirectMessage
+        {
+            DialogId = dlg.Id,
+            SenderId = senderId,
+            Ciphertext = request.Ciphertext,
+            MlsEpoch = request.Epoch,
+            SenderDeviceId = request.DeviceId,
+            SentAt = now,
+            Kind = DirectMessageKind.User,
+        };
+        db.DirectMessages.Add(message);
+        AttachFiles(message.Id, files, now);
+        var ev = mls.AppendMessageEvent(group.Id, MlsEventKind.Message, message.Id, request.Epoch, senderId, request.DeviceId);
+
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return (dlg, message, ev);
+    }
+
+    /// <summary>Service notice in plain text (system chat JaeZoo, call log entries). Never used for user content.</summary>
+    public async Task<(DirectDialog dialog, DirectMessage message)> CreateSystemMessageAsync(
+        Guid senderId,
+        Guid peerId,
+        string? text,
+        string systemKey,
+        IReadOnlyCollection<Guid>? fileIds = null,
+        CancellationToken ct = default)
+    {
+        text = (text ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(systemKey))
+            throw new InvalidOperationException("SystemKey is required.");
+
+        var dlg = await GetOrCreateDialogAsync(senderId, peerId, ct);
+        var files = await LoadAttachableFilesAsync(senderId, fileIds, requireClientEncrypted: false, ct);
+
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var now = DateTime.UtcNow;
         var message = new DirectMessage
         {
             DialogId = dlg.Id,
             SenderId = senderId,
             Text = text,
             SentAt = now,
-            E2eeEnvelopeVersion = e2eeInfo.Version,
-            E2eeProtocol = e2eeInfo.Protocol,
-            Kind = kind,
-            SystemKey = string.IsNullOrWhiteSpace(systemKey) ? null : systemKey.Trim(),
-            ForwardedFromMessageId = forwardedFromMessageId,
-            ReplyToMessageId = replyToMessageId
-        };
-
-        db.DirectMessages.Add(message);
-
-        foreach (var f in files)
-        {
-            db.DirectMessageAttachments.Add(new DirectMessageAttachment
-            {
-                MessageId = message.Id,
-                FileId = f.Id,
-                CreatedAt = now
-            });
-
-            f.IsAttached = true;
-            f.AttachedAt = now;
-        }
-
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
-        return (dlg, message, files);
-    }
-
-    public async Task<(DirectDialog dialog, DirectMessage message)> ForwardMessageAsync(
-        Guid senderId,
-        Guid peerId,
-        DirectMessage source,
-        bool includeAttachments,
-        CancellationToken ct = default)
-    {
-        if (source.DeletedAt.HasValue)
-            throw new InvalidOperationException("Deleted message cannot be forwarded.");
-        if (SystemChatService.IsSystemUser(peerId))
-            throw new InvalidOperationException("Системный чат JaeZoo только для чтения.");
-
-        var dlg = await GetOrCreateDialogAsync(senderId, peerId, ct);
-        var now = DateTime.UtcNow;
-
-        List<ChatFile> sourceFiles = [];
-        if (includeAttachments)
-        {
-            sourceFiles = await (
-                from a in db.DirectMessageAttachments
-                join f in db.ChatFiles on a.FileId equals f.Id
-                where a.MessageId == source.Id
-                orderby a.CreatedAt, a.Id
-                select f
-            ).ToListAsync(ct);
-        }
-
-        var hasSystemMarker = source.Kind == DirectMessageKind.System && !string.IsNullOrWhiteSpace(source.SystemKey);
-        if (string.IsNullOrWhiteSpace(source.Text) && sourceFiles.Count == 0 && !hasSystemMarker)
-            throw new InvalidOperationException("Message must contain text or attachments.");
-
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
-
-        var clones = sourceFiles.Select(f => new ChatFile
-        {
-            UploaderId = senderId,
-            OriginalFileName = f.OriginalFileName,
-            SafeFileName = string.IsNullOrWhiteSpace(f.SafeFileName) ? f.OriginalFileName : f.SafeFileName,
-            ContentType = f.ContentType,
-            DetectedContentType = string.IsNullOrWhiteSpace(f.DetectedContentType) ? f.ContentType : f.DetectedContentType,
-            SizeBytes = f.SizeBytes,
-            StoredPath = f.StoredPath,
-            Bucket = string.IsNullOrWhiteSpace(f.Bucket) ? "jaezoo-files" : f.Bucket,
-            ObjectKey = string.IsNullOrWhiteSpace(f.ObjectKey) ? f.StoredPath : f.ObjectKey,
-            Sha256 = f.Sha256 ?? string.Empty,
-            Kind = f.Kind,
-            ScanStatus = f.ScanStatus,
-            IsPotentiallyDangerous = f.IsPotentiallyDangerous,
-            RiskNote = f.RiskNote,
-            CreatedAt = now,
-            IsAttached = true,
-            AttachedAt = now
-        }).ToList();
-
-        if (clones.Count > 0)
-            db.ChatFiles.AddRange(clones);
-
-        var message = new DirectMessage
-        {
-            DialogId = dlg.Id,
-            SenderId = senderId,
-            Text = (source.Text ?? string.Empty).Trim(),
-            SentAt = now,
-            E2eeEnvelopeVersion = source.E2eeEnvelopeVersion,
-            E2eeProtocol = source.E2eeProtocol,
-            Kind = source.Kind,
-            SystemKey = string.IsNullOrWhiteSpace(source.SystemKey) ? null : source.SystemKey.Trim(),
-            ForwardedFromMessageId = source.Id
+            Kind = DirectMessageKind.System,
+            SystemKey = systemKey.Trim(),
         };
         db.DirectMessages.Add(message);
-
-        foreach (var file in clones)
-        {
-            db.DirectMessageAttachments.Add(new DirectMessageAttachment
-            {
-                MessageId = message.Id,
-                FileId = file.Id,
-                CreatedAt = now
-            });
-        }
+        AttachFiles(message.Id, files, now);
 
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return (dlg, message);
     }
 
-    public async Task<(DirectDialog dialog, DirectMessage message)> ForwardMessageAsync(
-        Guid senderId,
-        Guid peerId,
-        GroupMessage source,
-        bool includeAttachments,
-        CancellationToken ct = default)
+    /// <summary>Edit = new MLS ciphertext for the same message id (re-delivered through the event log).</summary>
+    public async Task<(DirectDialog dialog, DirectMessage message)> EditUserMessageAsync(Guid senderId, Guid messageId, EditMessageRequest request, CancellationToken ct = default)
     {
-        if (source.DeletedAt.HasValue)
-            throw new InvalidOperationException("Deleted message cannot be forwarded.");
-        if (SystemChatService.IsSystemUser(peerId))
-            throw new InvalidOperationException("Системный чат JaeZoo только для чтения.");
+        var message = await db.DirectMessages.FirstOrDefaultAsync(m => m.Id == messageId, ct)
+                      ?? throw new KeyNotFoundException("Message not found.");
+        if (message.SenderId != senderId) throw new UnauthorizedAccessException("Only the author can edit the message.");
+        if (message.Kind != DirectMessageKind.User) throw new InvalidOperationException("System messages cannot be edited.");
+        if (message.DeletedAt.HasValue) throw new InvalidOperationException("Deleted message cannot be edited.");
 
-        var dlg = await GetOrCreateDialogAsync(senderId, peerId, ct);
-        var now = DateTime.UtcNow;
+        var dlg = await db.DirectDialogs.FirstAsync(d => d.Id == message.DialogId, ct);
+        var group = await mls.RequireMessageContextAsync(senderId, dlg.Id, null, request.DeviceId, request.Epoch, request.Ciphertext, ct);
 
-        List<ChatFile> sourceFiles = [];
-        if (includeAttachments)
-        {
-            sourceFiles = await (
-                from a in db.GroupMessageAttachments
-                join f in db.ChatFiles on a.FileId equals f.Id
-                where a.MessageId == source.Id
-                orderby a.CreatedAt, a.Id
-                select f
-            ).ToListAsync(ct);
-        }
-
-        var hasSystemMarker = source.Kind == DirectMessageKind.System && !string.IsNullOrWhiteSpace(source.SystemKey);
-        if (string.IsNullOrWhiteSpace(source.Text) && sourceFiles.Count == 0 && !hasSystemMarker)
-            throw new InvalidOperationException("Message must contain text or attachments.");
-
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
-
-        var clones = sourceFiles.Select(f => new ChatFile
-        {
-            UploaderId = senderId,
-            OriginalFileName = f.OriginalFileName,
-            SafeFileName = string.IsNullOrWhiteSpace(f.SafeFileName) ? f.OriginalFileName : f.SafeFileName,
-            ContentType = f.ContentType,
-            DetectedContentType = string.IsNullOrWhiteSpace(f.DetectedContentType) ? f.ContentType : f.DetectedContentType,
-            SizeBytes = f.SizeBytes,
-            StoredPath = f.StoredPath,
-            Bucket = string.IsNullOrWhiteSpace(f.Bucket) ? "jaezoo-files" : f.Bucket,
-            ObjectKey = string.IsNullOrWhiteSpace(f.ObjectKey) ? f.StoredPath : f.ObjectKey,
-            Sha256 = f.Sha256 ?? string.Empty,
-            Kind = f.Kind,
-            ScanStatus = f.ScanStatus,
-            IsPotentiallyDangerous = f.IsPotentiallyDangerous,
-            RiskNote = f.RiskNote,
-            CreatedAt = now,
-            IsAttached = true,
-            AttachedAt = now
-        }).ToList();
-
-        if (clones.Count > 0)
-            db.ChatFiles.AddRange(clones);
-
-        var message = new DirectMessage
-        {
-            DialogId = dlg.Id,
-            SenderId = senderId,
-            Text = (source.Text ?? string.Empty).Trim(),
-            SentAt = now,
-            E2eeEnvelopeVersion = source.E2eeEnvelopeVersion,
-            E2eeProtocol = source.E2eeProtocol,
-            Kind = source.Kind,
-            SystemKey = string.IsNullOrWhiteSpace(source.SystemKey) ? null : source.SystemKey.Trim(),
-            ForwardedFromMessageId = source.Id
-        };
-        db.DirectMessages.Add(message);
-
-        foreach (var file in clones)
-        {
-            db.DirectMessageAttachments.Add(new DirectMessageAttachment
-            {
-                MessageId = message.Id,
-                FileId = file.Id,
-                CreatedAt = now
-            });
-        }
-
+        message.Ciphertext = request.Ciphertext;
+        message.MlsEpoch = request.Epoch;
+        message.SenderDeviceId = request.DeviceId;
+        message.EditedAt = DateTime.UtcNow;
+        mls.AppendMessageEvent(group.Id, MlsEventKind.MessageEdited, message.Id, request.Epoch, senderId, request.DeviceId);
         await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
         return (dlg, message);
     }
+
+    /// <summary>Records a deletion in the MLS event log so devices that sync later drop the message too.</summary>
+    public async Task AppendDeletionEventAsync(DirectMessage message, CancellationToken ct = default)
+    {
+        var group = await mls.FindGroupAsync(message.DialogId, null, ct);
+        if (group is null || message.Kind != DirectMessageKind.User) return;
+        mls.AppendMessageEvent(group.Id, MlsEventKind.MessageDeleted, message.Id, group.Epoch, message.DeletedById ?? message.SenderId, null);
+        await db.SaveChangesAsync(ct);
+    }
+
 
     public async Task<DirectMessage?> ValidateReadCursorAsync(Guid me, Guid friendId, Guid messageId, CancellationToken ct = default)
     {

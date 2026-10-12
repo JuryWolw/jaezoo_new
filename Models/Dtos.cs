@@ -137,40 +137,10 @@ public record AttachmentDto(
 );
 
 
-public record ChatAttachmentBrowserItemDto(
-    Guid Id,
-    Guid MessageId,
-    DateTime MessageSentAt,
-    Guid SenderId,
-    string SenderName,
-    string Kind,
-    string Title,
-    string? Url,
-    string ContentType,
-    long SizeBytes,
-    bool IsImage,
-    bool IsVideo,
-    bool IsAudio,
-    string ScanStatus = "NotScanned",
-    bool IsScanned = false,
-    bool IsSafeToDownload = false,
-    string? ScanWarning = null,
-    string? TextPreview = null
-);
-
-public record MessageForwardInfoDto(
-    Guid MessageId,
-    Guid SenderId,
-    string Text,
-    DateTime SentAt,
-    bool HasAttachments,
-    DirectMessageKind Kind,
-    string? SystemKey,
-    DateTime? DeletedAt,
-    int E2eeEnvelopeVersion = 0,
-    string? E2eeProtocol = null
-);
-
+/// <summary>
+/// User messages carry only <see cref="Ciphertext"/> (MLS PrivateMessage); text, reply, forward and
+/// attachment keys are inside it. <see cref="Text"/> is used only by Kind = System notices.
+/// </summary>
 public record MessageDto(
     Guid Id,
     Guid SenderId,
@@ -179,15 +149,13 @@ public record MessageDto(
     IReadOnlyList<AttachmentDto>? Attachments = null,
     DirectMessageKind Kind = DirectMessageKind.User,
     string? SystemKey = null,
-    Guid? ForwardedFromMessageId = null,
     DateTime? EditedAt = null,
     DateTime? DeletedAt = null,
     Guid? DeletedById = null,
-    MessageForwardInfoDto? ForwardedFrom = null,
-    int? GroupSecurityEpoch = null,
-    int E2eeEnvelopeVersion = 0,
-    string? E2eeProtocol = null,
-    Guid? ReplyToMessageId = null
+    byte[]? Ciphertext = null,
+    long MlsEpoch = 0,
+    Guid? SenderDeviceId = null,
+    Guid? MlsGroupId = null
 );
 
 public record UnreadDialogDto(Guid FriendId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt)
@@ -200,151 +168,10 @@ public record GroupChatMessageReadDto(Guid GroupId, Guid ReaderId, Guid LastRead
 
 public record MarkReadRequest(Guid LastReadMessageId);
 
-public record SendMessageRequest(string? Text, IReadOnlyList<Guid>? FileIds = null, Guid? ReplyToMessageId = null);
-public record EditMessageRequest(string? Text);
-public record ForwardMessagesRequest(IReadOnlyList<Guid> MessageIds, bool IncludeAttachments = true);
+/// <summary>New user message: MLS ciphertext built on <paramref name="Epoch"/> by device <paramref name="DeviceId"/>.</summary>
+public record SendMessageRequest(byte[] Ciphertext, long Epoch, Guid DeviceId, IReadOnlyList<Guid>? FileIds = null);
+public record EditMessageRequest(byte[] Ciphertext, long Epoch, Guid DeviceId);
 public record SendSystemMessageRequest(string SystemKey, string? Text);
-
-public record E2eeDeviceKeyDto(
-    Guid Id,
-    Guid UserId,
-    string DeviceId,
-    string PublicKeyBase64,
-    string Algorithm,
-    string Fingerprint,
-    string? DeviceName,
-    bool IsTrusted,
-    bool IsRevoked,
-    DateTime CreatedAt,
-    DateTime UpdatedAt,
-    DateTime? LastSeenAt,
-    int DeviceKeyVersion = 2,
-    int TrustState = 1,
-    bool RequiresUserVerification = false,
-    DateTime? UserVerifiedAt = null,
-    string? LastIpAddress = null,
-    string? Platform = null,
-    string? ClientVersion = null,
-    string? SigningPublicKeyBase64 = null,
-    string? SigningKeyFingerprint = null
-);
-
-public record E2eePublicKeyDto(
-    Guid UserId,
-    string PublicKeyBase64,
-    string Algorithm,
-    string Fingerprint,
-    DateTime UpdatedAt,
-    string? DeviceId = null,
-    string? DeviceName = null
-);
-
-public record UpsertE2eePublicKeyRequest(
-    string PublicKeyBase64,
-    string? DeviceName = null,
-    bool ReplaceExisting = false,
-    string? DeviceId = null
-);
-
-public record UpsertE2eeDeviceKeyRequest(
-    string DeviceId,
-    string PublicKeyBase64,
-    string? DeviceName = null,
-    bool ReplaceExisting = true,
-    string? Platform = null,
-    string? ClientVersion = null,
-    string? SigningPublicKeyBase64 = null
-);
-
-public record RenameE2eeDeviceRequest(string? DeviceName);
-
-public record E2eeDeviceApprovalRequestDto(
-    Guid Id,
-    Guid UserId,
-    string DeviceId,
-    string Fingerprint,
-    string? DeviceName,
-    string? Platform,
-    string? ClientVersion,
-    string? LastIpAddress,
-    DateTime RequestedAt,
-    DateTime ExpiresAt,
-    string Status
-);
-
-public record E2eeDeviceApprovalDecisionRequest(string ApproverDeviceId, string? Reason = null, string? SignatureBase64 = null);
-
-
-
-public record E2eeSignedPreKeyUploadDto(
-    string KeyId,
-    string PublicKeyBase64,
-    string SignatureBase64,
-    string Algorithm = "ECDH-P256-SPKI+ECDSA-P256-SHA256"
-);
-
-public record E2eeOneTimePreKeyUploadDto(
-    string KeyId,
-    string PublicKeyBase64,
-    string Algorithm = "ECDH-P256-SPKI"
-);
-
-public record E2eePreKeyUploadRequest(
-    string DeviceId,
-    E2eeSignedPreKeyUploadDto SignedPreKey,
-    IReadOnlyList<E2eeOneTimePreKeyUploadDto>? OneTimePreKeys = null
-);
-
-public record E2eePreKeyStatusDto(
-    string DeviceId,
-    bool HasSignedPreKey,
-    int AvailableOneTimePreKeys,
-    DateTime? LastSignedPreKeyAt,
-    string? SignedPreKeyId = null
-);
-
-public record E2eePreKeyBundleDto(
-    Guid UserId,
-    string DeviceId,
-    string IdentityPublicKeyBase64,
-    string? SigningPublicKeyBase64,
-    string SignedPreKeyId,
-    string SignedPreKeyPublicKeyBase64,
-    string SignedPreKeySignatureBase64,
-    string? OneTimePreKeyId,
-    string? OneTimePreKeyPublicKeyBase64,
-    string Algorithm
-);
-
-public record E2eeBackupStatusDto(
-    bool Enabled,
-    DateTime? UpdatedAt,
-    string? DeviceId,
-    int Version
-);
-
-public record E2eeBackupSaveRequest(
-    string DeviceId,
-    string? PublicKeyFingerprint,
-    string Kdf,
-    string SaltBase64,
-    string NonceBase64,
-    string CiphertextBase64,
-    string TagBase64,
-    int Version = 1
-);
-
-public record E2eeBackupDto(
-    string DeviceId,
-    string? PublicKeyFingerprint,
-    string Kdf,
-    string SaltBase64,
-    string NonceBase64,
-    string CiphertextBase64,
-    string TagBase64,
-    int Version,
-    DateTime UpdatedAt
-);
 
 
 public record ChatRealtimeMessageDto(Guid PeerId, MessageDto Message);
@@ -378,49 +205,10 @@ public record FileUploadResponse(
 );
 
 
-public record CreateGroupChatRequest(string Title, string? Description = null, IReadOnlyList<Guid>? MemberIds = null, bool IsPublic = false, int HistoryPolicy = 1);
-public record UpdateGroupChatRequest(string Title, string? Description = null, bool? IsPublic = null, int? HistoryPolicy = null);
+public record CreateGroupChatRequest(string Title, string? Description = null, IReadOnlyList<Guid>? MemberIds = null, bool IsPublic = false);
+public record UpdateGroupChatRequest(string Title, string? Description = null, bool? IsPublic = null);
 public record UpdateGroupMembersRequest(IReadOnlyList<Guid> UserIds);
 
-public record GroupHistoryKeyPackageUploadDto(
-    Guid SenderUserId,
-    string SenderDeviceId,
-    string SenderKeyId,
-    int SecurityEpoch,
-    Guid TargetUserId,
-    string TargetDeviceId,
-    string ProviderDeviceId,
-    string ProviderPublicKeyBase64,
-    string TargetPublicKeyBase64,
-    string NonceBase64,
-    string CiphertextBase64,
-    string TagBase64,
-    string Algorithm = "JZ-GROUP-HISTORY-KEY-P256-AESGCM-v1"
-);
-
-public record GroupHistoryKeyPackagesUploadRequest(IReadOnlyList<GroupHistoryKeyPackageUploadDto> Packages);
-
-public record GroupHistoryKeyPackageDto(
-    Guid Id,
-    Guid GroupId,
-    Guid SenderUserId,
-    string SenderDeviceId,
-    string SenderKeyId,
-    int SecurityEpoch,
-    Guid ProviderUserId,
-    string ProviderDeviceId,
-    Guid TargetUserId,
-    string TargetDeviceId,
-    string ProviderPublicKeyBase64,
-    string TargetPublicKeyBase64,
-    string NonceBase64,
-    string CiphertextBase64,
-    string TagBase64,
-    string Algorithm,
-    DateTime CreatedAt
-);
-
-public record GroupHistoryKeyPackageImportResult(int Imported, int Skipped);
 public record UpdateGroupMemberRoleRequest(string Role);
 
 public record GroupChatMemberDto(
@@ -460,12 +248,8 @@ public record GroupChatSummaryDto(
     int UnreadCount = 0,
     Guid? FirstUnreadId = null,
     DateTime? FirstUnreadAt = null,
-    int SecurityEpoch = 1,
-    DateTime? SecurityEpochChangedAt = null,
     bool IsPublic = false,
-    bool IsMember = true,
-    int HistoryPolicy = 1,
-    DateTime? HistoryPolicyChangedAt = null
+    bool IsMember = true
 );
 
 public record GroupChatDetailsDto(GroupChatSummaryDto Chat, IReadOnlyList<GroupChatMemberDto> Members);
@@ -493,11 +277,10 @@ public record GroupChatMessageUpdatedDto(Guid GroupId, MessageDto Message);
 public record GroupChatMessageDeletedDto(Guid GroupId, Guid MessageId, DateTime DeletedAt, Guid DeletedById);
 public record GroupChatUnreadChangedDto(Guid GroupId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt);
 public record GroupChatUpdatedDto(GroupChatSummaryDto Chat);
-public record GroupChatMembersChangedDto(Guid GroupId, IReadOnlyList<GroupChatMemberDto> Members, int SecurityEpoch = 1, DateTime? SecurityEpochChangedAt = null);
+public record GroupChatMembersChangedDto(Guid GroupId, IReadOnlyList<GroupChatMemberDto> Members);
 
 
 public record SetGroupAvatarUrlRequest(string AvatarUrl);
-public record CrossChatForwardRequest(string Source, Guid? SourceChatId, IReadOnlyList<Guid> MessageIds, bool IncludeAttachments = true);
 
 public record GroupVoiceJoinRequest(string? ClientInfo = null);
 

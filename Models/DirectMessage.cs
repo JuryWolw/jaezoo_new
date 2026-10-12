@@ -9,18 +9,16 @@ public class DirectMessage
     [Required] public Guid DialogId { get; set; }
     [Required] public Guid SenderId { get; set; }
 
+    /// <summary>Plain text only for <see cref="DirectMessageKind.System"/> (service notices). Empty for user messages.</summary>
     public string Text { get; set; } = string.Empty;
 
-    /// <summary>
-    /// Server-side marker of the client E2EE envelope version.
-    /// 0 means plaintext or legacy server-side protected text, 1 means direct v1,
-    /// 2 means current multi-device direct envelope.
-    /// The server never decrypts the payload. This marker is only for safe migration.
-    /// </summary>
-    public int E2eeEnvelopeVersion { get; set; } = 0;
+    /// <summary>User messages: opaque MLS PrivateMessage. Reply/forward/attachment keys live inside it.</summary>
+    public byte[]? Ciphertext { get; set; }
 
-    [MaxLength(64)]
-    public string? E2eeProtocol { get; set; }
+    /// <summary>MLS epoch the ciphertext was encrypted in (delivery metadata).</summary>
+    public long MlsEpoch { get; set; }
+
+    public Guid? SenderDeviceId { get; set; }
 
     public DateTime SentAt { get; set; } = DateTime.UtcNow;
 
@@ -28,11 +26,6 @@ public class DirectMessage
 
     [MaxLength(64)]
     public string? SystemKey { get; set; }
-
-    public Guid? ForwardedFromMessageId { get; set; }
-
-    /// <summary>Ответ на сообщение: только ссылка (текст цитаты клиент берёт из своей расшифрованной ленты).</summary>
-    public Guid? ReplyToMessageId { get; set; }
 
     public DateTime? EditedAt { get; set; }
 

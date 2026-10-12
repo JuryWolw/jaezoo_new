@@ -1,8 +1,8 @@
 ﻿using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Files;
 using JaeZoo.Server.Models.Moderation;
+using JaeZoo.Server.Models.Mls;
 using JaeZoo.Server.Models.Security;
-using JaeZoo.Server.Services.Security;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Data;
@@ -22,7 +22,6 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GroupMessage> GroupMessages => Set<GroupMessage>();
     public DbSet<GroupMessageAttachment> GroupMessageAttachments => Set<GroupMessageAttachment>();
     public DbSet<GroupAvatar> GroupAvatars => Set<GroupAvatar>();
-    public DbSet<GroupHistoryKeyPackage> GroupHistoryKeyPackages => Set<GroupHistoryKeyPackage>();
     public DbSet<GroupVoiceSession> GroupVoiceSessions => Set<GroupVoiceSession>();
     public DbSet<GroupVoiceParticipant> GroupVoiceParticipants => Set<GroupVoiceParticipant>();
     public DbSet<UserRole> UserRoles => Set<UserRole>();
@@ -34,14 +33,15 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<ModerationReport> ModerationReports => Set<ModerationReport>();
     public DbSet<ModerationWarning> ModerationWarnings => Set<ModerationWarning>();
     public DbSet<FileScanAllowList> FileScanAllowList => Set<FileScanAllowList>();
-    public DbSet<UserE2eeKey> UserE2eeKeys => Set<UserE2eeKey>();
     public DbSet<TwoFactorRecoveryCode> TwoFactorRecoveryCodes => Set<TwoFactorRecoveryCode>();
+    public DbSet<UserDevice> UserDevices => Set<UserDevice>();
+    public DbSet<MlsKeyPackage> MlsKeyPackages => Set<MlsKeyPackage>();
+    public DbSet<MlsGroupState> MlsGroups => Set<MlsGroupState>();
+    public DbSet<MlsGroupMember> MlsGroupMembers => Set<MlsGroupMember>();
+    public DbSet<MlsGroupEvent> MlsGroupEvents => Set<MlsGroupEvent>();
+    public DbSet<MlsWelcome> MlsWelcomes => Set<MlsWelcome>();
     public DbSet<TwoFactorLoginChallenge> TwoFactorLoginChallenges => Set<TwoFactorLoginChallenge>();
     public DbSet<LoginAlertToken> LoginAlertTokens => Set<LoginAlertToken>();
-    public DbSet<E2eeEncryptedBackup> E2eeEncryptedBackups => Set<E2eeEncryptedBackup>();
-    public DbSet<E2eeSignedPreKey> E2eeSignedPreKeys => Set<E2eeSignedPreKey>();
-    public DbSet<E2eeOneTimePreKey> E2eeOneTimePreKeys => Set<E2eeOneTimePreKey>();
-    public DbSet<E2eeDeviceApprovalRequest> E2eeDeviceApprovalRequests => Set<E2eeDeviceApprovalRequest>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -84,469 +84,46 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<GroupChat>()
             .HasIndex(g => g.IsPublic);
 
-        b.Entity<GroupChat>()
-            .Property(g => g.SecurityEpoch)
-            .HasDefaultValue(1);
 
-        b.Entity<GroupChat>()
-            .Property(g => g.SecurityEpochChangedAt)
-            .HasDefaultValueSql("CURRENT_TIMESTAMP");
-
-        b.Entity<GroupChat>()
-            .Property(g => g.HistoryPolicy)
-            .HasDefaultValue(1);
-
-        b.Entity<GroupMessage>()
-            .Property(m => m.GroupSecurityEpoch)
-            .HasDefaultValue(1);
-
-        b.Entity<GroupHistoryKeyPackage>()
-            .Property(p => p.SenderDeviceId)
-            .HasMaxLength(128);
-
-        b.Entity<GroupHistoryKeyPackage>()
-            .Property(p => p.SenderKeyId)
-            .HasMaxLength(128);
-
-        b.Entity<GroupHistoryKeyPackage>()
-            .Property(p => p.ProviderDeviceId)
-            .HasMaxLength(128);
-
-        b.Entity<GroupHistoryKeyPackage>()
-            .Property(p => p.TargetDeviceId)
-            .HasMaxLength(128);
-
-        b.Entity<GroupHistoryKeyPackage>()
-            .Property(p => p.ProviderPublicKeyBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<GroupHistoryKeyPackage>()
-            .Property(p => p.TargetPublicKeyBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<GroupHistoryKeyPackage>()
-            .Property(p => p.NonceBase64)
-            .HasMaxLength(256);
-
-        b.Entity<GroupHistoryKeyPackage>()
-            .Property(p => p.CiphertextBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<GroupHistoryKeyPackage>()
-            .Property(p => p.TagBase64)
-            .HasMaxLength(256);
-
-        b.Entity<GroupHistoryKeyPackage>()
-            .Property(p => p.Algorithm)
-            .HasMaxLength(96);
-
-        b.Entity<GroupHistoryKeyPackage>()
-            .HasIndex(p => new { p.GroupChatId, p.TargetUserId, p.TargetDeviceId })
-            .HasDatabaseName("IX_GroupHistoryKeyPackages_Target");
-
-        b.Entity<GroupHistoryKeyPackage>()
-            .HasIndex(p => new { p.GroupChatId, p.SecurityEpoch, p.TargetUserId, p.TargetDeviceId, p.SenderUserId, p.SenderDeviceId, p.SenderKeyId })
-            .HasDatabaseName("IX_GroupHistoryKeyPackages_UniquePackage")
-            .IsUnique();
-
-        b.Entity<DirectMessage>()
-            .Property(m => m.E2eeEnvelopeVersion)
-            .HasDefaultValue(0);
-
-        b.Entity<DirectMessage>()
-            .Property(m => m.E2eeProtocol)
-            .HasMaxLength(64);
-
-        b.Entity<GroupMessage>()
-            .Property(m => m.E2eeEnvelopeVersion)
-            .HasDefaultValue(0);
-
-        b.Entity<GroupMessage>()
-            .Property(m => m.E2eeProtocol)
-            .HasMaxLength(64);
-
-        b.Entity<GroupMessage>()
-            .HasIndex(m => new { m.GroupChatId, m.GroupSecurityEpoch, m.SentAt });
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.PublicKeyBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.Algorithm)
-            .HasMaxLength(64);
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.Fingerprint)
-            .HasMaxLength(128);
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.DeviceName)
-            .HasMaxLength(128);
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.SigningPublicKeyBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.SigningKeyFingerprint)
-            .HasMaxLength(128);
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.DeviceId)
-            .HasMaxLength(64);
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.LastIpAddress)
-            .HasMaxLength(64);
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.Platform)
-            .HasMaxLength(64);
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.ClientVersion)
-            .HasMaxLength(32);
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.DeviceKeyVersion)
-            .HasDefaultValue(2);
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.TrustState)
-            .HasDefaultValue(1);
-
-        b.Entity<UserE2eeKey>()
-            .Property(k => k.RequiresUserVerification)
-            .HasDefaultValue(false);
-
-        b.Entity<UserE2eeKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId })
-            .IsUnique();
-
-        b.Entity<UserE2eeKey>()
-            .HasIndex(k => k.UserId);
-
-        b.Entity<UserE2eeKey>()
-            .HasIndex(k => k.Fingerprint);
-
-        b.Entity<UserE2eeKey>()
-            .HasOne(k => k.User)
-            .WithMany()
-            .HasForeignKey(k => k.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
-
-        b.Entity<E2eeDeviceApprovalRequest>()
-            .Property(r => r.DeviceId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeDeviceApprovalRequest>()
-            .Property(r => r.Fingerprint)
-            .HasMaxLength(128);
-
-        b.Entity<E2eeDeviceApprovalRequest>()
-            .Property(r => r.DeviceName)
-            .HasMaxLength(128);
-
-        b.Entity<E2eeDeviceApprovalRequest>()
-            .Property(r => r.Platform)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeDeviceApprovalRequest>()
-            .Property(r => r.ClientVersion)
-            .HasMaxLength(32);
-
-        b.Entity<E2eeDeviceApprovalRequest>()
-            .Property(r => r.LastIpAddress)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeDeviceApprovalRequest>()
-            .Property(r => r.Status)
-            .HasMaxLength(32);
-
-        b.Entity<E2eeDeviceApprovalRequest>()
-            .Property(r => r.ApprovedByDeviceId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeDeviceApprovalRequest>()
-            .Property(r => r.Reason)
-            .HasMaxLength(256);
-
-        b.Entity<E2eeDeviceApprovalRequest>()
-            .HasIndex(r => new { r.UserId, r.Status, r.ExpiresAt });
-
-        b.Entity<E2eeDeviceApprovalRequest>()
-            .HasIndex(r => new { r.UserId, r.DeviceId, r.Fingerprint, r.Status });
-
-        b.Entity<E2eeDeviceApprovalRequest>()
-            .HasOne(r => r.User)
-            .WithMany()
-            .HasForeignKey(r => r.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
-
-
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.DeviceId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.KeyId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.PublicKeyBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.SignatureBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.Algorithm)
-            .HasMaxLength(96);
-
-        b.Entity<E2eeSignedPreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.IsRevoked });
-
-        b.Entity<E2eeSignedPreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
-            .IsUnique();
-
-        b.Entity<E2eeSignedPreKey>()
-            .HasOne(k => k.User)
-            .WithMany()
-            .HasForeignKey(k => k.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.DeviceId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.KeyId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.PublicKeyBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.Algorithm)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.ClaimedAt });
-
-        b.Entity<E2eeOneTimePreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
-            .IsUnique();
-
-        b.Entity<E2eeOneTimePreKey>()
-            .HasOne(k => k.User)
-            .WithMany()
-            .HasForeignKey(k => k.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
+        // ---------- MLS delivery service ----------
+        b.Entity<UserDevice>().HasKey(d => d.Id);
+        b.Entity<UserDevice>().Property(d => d.Id).ValueGeneratedNever();
+        b.Entity<UserDevice>().HasIndex(d => new { d.UserId, d.RevokedAt });
+        b.Entity<UserDevice>().HasIndex(d => d.SessionId);
+        b.Entity<UserDevice>().HasOne<User>().WithMany().HasForeignKey(d => d.UserId).OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<MlsKeyPackage>().HasIndex(k => new { k.DeviceId, k.IsLastResort, k.CreatedAt });
+        b.Entity<MlsKeyPackage>().HasOne<UserDevice>().WithMany().HasForeignKey(k => k.DeviceId).OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<MlsGroupState>().HasKey(g => g.Id);
+        b.Entity<MlsGroupState>().Property(g => g.Id).ValueGeneratedNever();
+        b.Entity<MlsGroupState>().Property(g => g.Kind).HasConversion<int>();
+        b.Entity<MlsGroupState>().HasIndex(g => g.DialogId).IsUnique();
+        b.Entity<MlsGroupState>().HasIndex(g => g.GroupChatId).IsUnique();
+
+        b.Entity<MlsGroupMember>().HasKey(m => new { m.GroupId, m.DeviceId });
+        b.Entity<MlsGroupMember>().HasIndex(m => m.DeviceId);
+        b.Entity<MlsGroupMember>().HasOne<MlsGroupState>().WithMany().HasForeignKey(m => m.GroupId).OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<MlsGroupEvent>().HasKey(e => e.Id);
+        b.Entity<MlsGroupEvent>().Property(e => e.Id).ValueGeneratedOnAdd();
+        b.Entity<MlsGroupEvent>().Property(e => e.Kind).HasConversion<int>();
+        b.Entity<MlsGroupEvent>().HasIndex(e => new { e.GroupId, e.Id });
+        b.Entity<MlsGroupEvent>().HasOne<MlsGroupState>().WithMany().HasForeignKey(e => e.GroupId).OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<MlsWelcome>().HasIndex(w => new { w.TargetDeviceId, w.CreatedAt });
+        b.Entity<MlsWelcome>().HasOne<MlsGroupState>().WithMany().HasForeignKey(w => w.GroupId).OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<TwoFactorRecoveryCode>()
             .Property(c => c.CodeHash)
             .HasMaxLength(128);
 
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.DeviceId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.KeyId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.PublicKeyBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.SignatureBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.Algorithm)
-            .HasMaxLength(96);
-
-        b.Entity<E2eeSignedPreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.IsRevoked });
-
-        b.Entity<E2eeSignedPreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
-            .IsUnique();
-
-        b.Entity<E2eeSignedPreKey>()
-            .HasOne(k => k.User)
-            .WithMany()
-            .HasForeignKey(k => k.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.DeviceId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.KeyId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.PublicKeyBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.Algorithm)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.ClaimedAt });
-
-        b.Entity<E2eeOneTimePreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
-            .IsUnique();
-
-        b.Entity<E2eeOneTimePreKey>()
-            .HasOne(k => k.User)
-            .WithMany()
-            .HasForeignKey(k => k.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
-
         b.Entity<TwoFactorRecoveryCode>()
             .Property(c => c.UsedIpAddress)
             .HasMaxLength(64);
 
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.DeviceId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.KeyId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.PublicKeyBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.SignatureBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.Algorithm)
-            .HasMaxLength(96);
-
-        b.Entity<E2eeSignedPreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.IsRevoked });
-
-        b.Entity<E2eeSignedPreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
-            .IsUnique();
-
-        b.Entity<E2eeSignedPreKey>()
-            .HasOne(k => k.User)
-            .WithMany()
-            .HasForeignKey(k => k.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.DeviceId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.KeyId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.PublicKeyBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.Algorithm)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.ClaimedAt });
-
-        b.Entity<E2eeOneTimePreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
-            .IsUnique();
-
-        b.Entity<E2eeOneTimePreKey>()
-            .HasOne(k => k.User)
-            .WithMany()
-            .HasForeignKey(k => k.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
-
         b.Entity<TwoFactorRecoveryCode>()
             .HasIndex(c => new { c.UserId, c.UsedAt });
-
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.DeviceId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.KeyId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.PublicKeyBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.SignatureBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<E2eeSignedPreKey>()
-            .Property(k => k.Algorithm)
-            .HasMaxLength(96);
-
-        b.Entity<E2eeSignedPreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.IsRevoked });
-
-        b.Entity<E2eeSignedPreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
-            .IsUnique();
-
-        b.Entity<E2eeSignedPreKey>()
-            .HasOne(k => k.User)
-            .WithMany()
-            .HasForeignKey(k => k.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.DeviceId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.KeyId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.PublicKeyBase64)
-            .HasMaxLength(8192);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .Property(k => k.Algorithm)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeOneTimePreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.ClaimedAt });
-
-        b.Entity<E2eeOneTimePreKey>()
-            .HasIndex(k => new { k.UserId, k.DeviceId, k.KeyId })
-            .IsUnique();
-
-        b.Entity<E2eeOneTimePreKey>()
-            .HasOne(k => k.User)
-            .WithMany()
-            .HasForeignKey(k => k.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<TwoFactorRecoveryCode>()
             .HasOne(c => c.User)
@@ -859,10 +436,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<DirectMessage>()
             .Property(m => m.Text)
-            .HasColumnType("text")
-            .HasConversion(
-                v => MessageTextProtector.ProtectForDatabase(v),
-                v => MessageTextProtector.UnprotectFromDatabase(v));
+            .HasColumnType("text");
 
         b.Entity<DirectMessage>()
             .Property(m => m.SystemKey)
@@ -874,9 +448,6 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<DirectMessage>()
             .HasIndex(m => new { m.DialogId, m.DeletedAt, m.SentAt, m.Id });
-
-        b.Entity<DirectMessage>()
-            .HasIndex(m => m.ForwardedFromMessageId);
 
         b.Entity<Avatar>()
             .HasIndex(a => a.UserId);
@@ -1015,10 +586,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<GroupMessage>()
             .Property(m => m.Text)
-            .HasColumnType("text")
-            .HasConversion(
-                v => MessageTextProtector.ProtectForDatabase(v),
-                v => MessageTextProtector.UnprotectFromDatabase(v));
+            .HasColumnType("text");
 
         b.Entity<GroupMessage>()
             .Property(m => m.SystemKey)
@@ -1030,9 +598,6 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<GroupMessage>()
             .HasIndex(m => new { m.GroupChatId, m.DeletedAt, m.SentAt, m.Id });
-
-        b.Entity<GroupMessage>()
-            .HasIndex(m => m.ForwardedFromMessageId);
 
         b.Entity<GroupMessage>()
             .HasOne<GroupChat>()
@@ -1104,40 +669,6 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .HasForeignKey(p => p.GroupChatId)
             .OnDelete(DeleteBehavior.Cascade);
 
-
-        b.Entity<E2eeEncryptedBackup>()
-            .Property(bk => bk.DeviceId)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeEncryptedBackup>()
-            .Property(bk => bk.PublicKeyFingerprint)
-            .HasMaxLength(128);
-
-        b.Entity<E2eeEncryptedBackup>()
-            .Property(bk => bk.Kdf)
-            .HasMaxLength(64);
-
-        b.Entity<E2eeEncryptedBackup>()
-            .Property(bk => bk.SaltBase64)
-            .HasMaxLength(256);
-
-        b.Entity<E2eeEncryptedBackup>()
-            .Property(bk => bk.NonceBase64)
-            .HasMaxLength(256);
-
-        b.Entity<E2eeEncryptedBackup>()
-            .Property(bk => bk.TagBase64)
-            .HasMaxLength(256);
-
-        b.Entity<E2eeEncryptedBackup>()
-            .HasIndex(bk => bk.UserId)
-            .IsUnique();
-
-        b.Entity<E2eeEncryptedBackup>()
-            .HasOne(bk => bk.User)
-            .WithMany()
-            .HasForeignKey(bk => bk.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
     }
 }
 

@@ -1,63 +1,20 @@
-﻿using JaeZoo.Server.Data;
+using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
+using JaeZoo.Server.Models.Mls;
 using JaeZoo.Server.Services;
-using JaeZoo.Server.Services.Security;
+using JaeZoo.Server.Services.Mls;
 using Microsoft.EntityFrameworkCore;
-using System.Text;
-using System.Text.Json;
 
 namespace JaeZoo.Server.Services.Chat;
 
-public sealed class GroupChatService(AppDbContext db, DirectChatService directChat)
+public sealed class GroupChatService(AppDbContext db, DirectChatService directChat, MlsDeliveryService mls)
 {
     public const int MaxGroupMembers = 50;
 
     public const string SystemUserAddedKey = "group_user_added";
-    public const string SystemHistoryAvailableKey = "group_history_available";
-    public const string SystemSecurityKeysUpdatedKey = "group_security_keys_updated";
     public const string SystemGroupCallStartedKey = "group_call_started";
     public const string SystemGroupCallEndedKey = "group_call_ended";
 
-    public static void AdvanceSecurityEpoch(GroupChat chat, DateTime now)
-    {
-        chat.SecurityEpoch = Math.Max(1, chat.SecurityEpoch) + 1;
-        chat.SecurityEpochChangedAt = now;
-        chat.UpdatedAt = now;
-    }
-
-    private static bool IsGroupE2eePayload(string? text) =>
-        !string.IsNullOrWhiteSpace(text) && text.StartsWith(E2eeEnvelopeInspector.GroupPrefixV1, StringComparison.Ordinal);
-
-    public static void ValidateGroupE2eePayload(Guid groupId, int currentEpoch, string? text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-            return;
-        if (!IsGroupE2eePayload(text))
-            throw new InvalidOperationException("Group user messages must be encrypted with E2EE.");
-
-        try
-        {
-            var base64 = text![E2eeEnvelopeInspector.GroupPrefixV1.Length..];
-            var json = Encoding.UTF8.GetString(Convert.FromBase64String(base64));
-            var payload = JsonSerializer.Deserialize<GroupE2eeServerEnvelope>(json);
-            if (payload is null)
-                throw new InvalidOperationException("Invalid group E2EE envelope.");
-            if (payload.groupId != groupId)
-                throw new InvalidOperationException("Group E2EE envelope belongs to another group.");
-            if (payload.securityEpoch != currentEpoch)
-                throw new InvalidOperationException("Group E2EE keys are stale. Refresh the group and send the message again.");
-        }
-        catch (InvalidOperationException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException("Invalid group E2EE envelope.", ex);
-        }
-    }
-
-    private sealed record GroupE2eeServerEnvelope(int v, Guid groupId, int securityEpoch);
 
     public static string GetAvatarUrl(GroupChat chat) =>
         string.IsNullOrWhiteSpace(chat.AvatarUrl) ? $"/avatars/groups/{chat.Id}" : chat.AvatarUrl;
@@ -68,21 +25,6 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         if (normalized is not null && normalized.Length > 1000)
             throw new InvalidOperationException("Description is too long.");
         return normalized;
-    }
-
-    private static int NormalizeHistoryPolicy(int? historyPolicy)
-    {
-        // 0 = новые участники видят только новые сообщения.
-        // 1 = новые участники смогут получить старую историю, если админ передаст её в E9.2.
-        // 2 = история явно закрыта для новых участников. Пока в UI не выводится.
-        var value = historyPolicy ?? 1;
-        return value switch
-        {
-            0 => 0,
-            1 => 1,
-            2 => 2,
-            _ => 1
-        };
     }
 
     private static GroupChatRole GetEffectiveRole(GroupChat chat, GroupChatMember member) =>
@@ -120,6 +62,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct);
     }
 
+    /// <summary>Service notice in plain text (member added, group call started/ended). Never user content.</summary>
     public async Task<(GroupChat chat, GroupMessage message)> CreateSystemMessageAsync(
         Guid senderId,
         Guid groupId,
@@ -127,20 +70,28 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         string text,
         CancellationToken ct = default)
     {
-        var created = await CreateMessageAsync(
-            senderId,
-            groupId,
-            text,
-            null,
-            DirectMessageKind.System,
-            systemKey,
-            null,
-            ct);
+        var chat = await GetChatForMemberAsync(groupId, senderId, ct)
+            ?? throw new InvalidOperationException("Group chat not found or access denied.");
+        if (string.IsNullOrWhiteSpace(systemKey))
+            throw new InvalidOperationException("SystemKey is required.");
 
-        return (created.chat, created.message);
+        var now = DateTime.UtcNow;
+        var message = new GroupMessage
+        {
+            GroupChatId = groupId,
+            SenderId = senderId,
+            Text = (text ?? string.Empty).Trim(),
+            SentAt = now,
+            Kind = DirectMessageKind.System,
+            SystemKey = systemKey.Trim(),
+        };
+        db.GroupMessages.Add(message);
+        chat.UpdatedAt = now;
+        await db.SaveChangesAsync(ct);
+        return (chat, message);
     }
 
-    public async Task<GroupChat> CreateChatAsync(Guid ownerId, string? title, string? description, IReadOnlyCollection<Guid>? memberIds, bool isPublic = false, int historyPolicy = 1, CancellationToken ct = default)
+    public async Task<GroupChat> CreateChatAsync(Guid ownerId, string? title, string? description, IReadOnlyCollection<Guid>? memberIds, bool isPublic = false, CancellationToken ct = default)
     {
         var normalizedTitle = (title ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(normalizedTitle))
@@ -188,10 +139,6 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             OwnerId = ownerId,
             MemberLimit = MaxGroupMembers,
             IsPublic = isPublic,
-            HistoryPolicy = NormalizeHistoryPolicy(historyPolicy),
-            HistoryPolicyChangedAt = now,
-            SecurityEpoch = 1,
-            SecurityEpochChangedAt = now,
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -219,7 +166,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return chat;
     }
 
-    public async Task<GroupChat> UpdateChatAsync(Guid groupId, Guid me, string? title, string? description, bool? isPublic = null, int? historyPolicy = null, CancellationToken ct = default)
+    public async Task<GroupChat> UpdateChatAsync(Guid groupId, Guid me, string? title, string? description, bool? isPublic = null, CancellationToken ct = default)
     {
         var chat = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct)
             ?? throw new InvalidOperationException("Group chat not found.");
@@ -240,15 +187,6 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         chat.Description = NormalizeDescription(description);
         if (isPublic.HasValue)
             chat.IsPublic = isPublic.Value;
-        if (historyPolicy.HasValue)
-        {
-            var normalizedPolicy = NormalizeHistoryPolicy(historyPolicy.Value);
-            if (chat.HistoryPolicy != normalizedPolicy)
-            {
-                chat.HistoryPolicy = normalizedPolicy;
-                chat.HistoryPolicyChangedAt = DateTime.UtcNow;
-            }
-        }
         chat.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         return chat;
@@ -330,7 +268,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             });
         }
 
-        AdvanceSecurityEpoch(chat, now);
+        chat.UpdatedAt = now;
         await db.SaveChangesAsync(ct);
 
         return await db.GroupChatMembers
@@ -356,7 +294,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             throw new InvalidOperationException("You do not have access to remove this member.");
 
         db.GroupChatMembers.Remove(member);
-        AdvanceSecurityEpoch(chat, DateTime.UtcNow);
+        chat.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
 
         return await db.GroupChatMembers
@@ -408,7 +346,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             throw new InvalidOperationException("You are not a member of this group.");
 
         db.GroupChatMembers.Remove(member);
-        AdvanceSecurityEpoch(chat, DateTime.UtcNow);
+        chat.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
     }
 
@@ -431,7 +369,6 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             .AsNoTracking()
             .Where(m => m.GroupChatId == groupId && m.SenderId != userId && m.DeletedAt == null);
 
-        if (access.Group.HistoryPolicy != 1)
         {
             var joinedAt = DirectChatService.EnsureUtc(access.Member.JoinedAt);
             q = q.Where(m => m.SentAt >= joinedAt);
@@ -497,7 +434,6 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             .AsNoTracking()
             .Where(m => m.GroupChatId == groupId);
 
-        if (chat.HistoryPolicy != 1)
         {
             var joinedAt = DirectChatService.EnsureUtc(member.JoinedAt);
             lastMessageQuery = lastMessageQuery.Where(m => m.SentAt >= joinedAt);
@@ -535,12 +471,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             unread.count,
             unread.firstId,
             unread.firstAt,
-            Math.Max(1, chat.SecurityEpoch),
-            chat.SecurityEpochChangedAt,
             chat.IsPublic,
-            true,
-            chat.HistoryPolicy,
-            chat.HistoryPolicyChangedAt);
+            true);
     }
 
     public async Task<List<GroupChatSummaryDto>> ListForUserAsync(Guid me, CancellationToken ct = default)
@@ -639,7 +571,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             UserId = me,
             JoinedAt = now
         });
-        AdvanceSecurityEpoch(chat, now);
+        chat.UpdatedAt = now;
         await db.SaveChangesAsync(ct);
         return chat;
     }
@@ -675,101 +607,24 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return map;
     }
 
-    public async Task<Dictionary<Guid, MessageForwardInfoDto>> LoadForwardInfosAsync(List<GroupMessage> messages, CancellationToken ct)
+    public MessageDto ToMessageDto(GroupMessage message, IReadOnlyList<AttachmentDto>? attachments = null, Guid? mlsGroupId = null)
     {
-        var sourceIds = messages.Where(m => m.ForwardedFromMessageId.HasValue).Select(m => m.ForwardedFromMessageId!.Value).Distinct().ToList();
-        if (sourceIds.Count == 0)
-            return new();
-
-        var result = new Dictionary<Guid, MessageForwardInfoDto>();
-
-        var groupSources = await db.GroupMessages
-            .AsNoTracking()
-            .Where(m => sourceIds.Contains(m.Id))
-            .Select(m => new { m.Id, m.SenderId, m.Text, m.SentAt, m.Kind, m.SystemKey, m.DeletedAt, m.E2eeEnvelopeVersion, m.E2eeProtocol })
-            .ToListAsync(ct);
-
-        var groupAttachmentMessageIds = await db.GroupMessageAttachments
-            .AsNoTracking()
-            .Where(a => sourceIds.Contains(a.MessageId))
-            .Select(a => a.MessageId)
-            .Distinct()
-            .ToListAsync(ct);
-        var groupHasAttachments = groupAttachmentMessageIds.ToHashSet();
-
-        foreach (var x in groupSources)
-        {
-            result[x.Id] = new MessageForwardInfoDto(
-                x.Id,
-                x.SenderId,
-                x.DeletedAt.HasValue ? string.Empty : x.Text,
-                x.SentAt,
-                groupHasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
-                x.Kind,
-                x.DeletedAt.HasValue ? null : x.SystemKey,
-                x.DeletedAt,
-                x.DeletedAt.HasValue ? 0 : x.E2eeEnvelopeVersion,
-                x.DeletedAt.HasValue ? null : x.E2eeProtocol);
-        }
-
-        var unresolvedIds = sourceIds.Where(id => !result.ContainsKey(id)).ToList();
-        if (unresolvedIds.Count > 0)
-        {
-            var directSources = await db.DirectMessages
-                .AsNoTracking()
-                .Where(m => unresolvedIds.Contains(m.Id))
-                .Select(m => new { m.Id, m.SenderId, m.Text, m.SentAt, m.Kind, m.SystemKey, m.DeletedAt, m.E2eeEnvelopeVersion, m.E2eeProtocol })
-                .ToListAsync(ct);
-
-            var directAttachmentMessageIds = await db.DirectMessageAttachments
-                .AsNoTracking()
-                .Where(a => unresolvedIds.Contains(a.MessageId))
-                .Select(a => a.MessageId)
-                .Distinct()
-                .ToListAsync(ct);
-            var directHasAttachments = directAttachmentMessageIds.ToHashSet();
-
-            foreach (var x in directSources)
-            {
-                result[x.Id] = new MessageForwardInfoDto(
-                    x.Id,
-                    x.SenderId,
-                    x.DeletedAt.HasValue ? string.Empty : x.Text,
-                    x.SentAt,
-                    directHasAttachments.Contains(x.Id) && !x.DeletedAt.HasValue,
-                    x.Kind,
-                    x.DeletedAt.HasValue ? null : x.SystemKey,
-                    x.DeletedAt,
-                    x.DeletedAt.HasValue ? 0 : x.E2eeEnvelopeVersion,
-                    x.DeletedAt.HasValue ? null : x.E2eeProtocol);
-            }
-        }
-
-        return result;
-    }
-
-    public MessageDto ToMessageDto(GroupMessage message, IReadOnlyList<AttachmentDto>? attachments = null, MessageForwardInfoDto? forwardedFrom = null)
-    {
-        var dtoAttachments = message.DeletedAt.HasValue ? Array.Empty<AttachmentDto>() : attachments;
-        var dtoText = message.DeletedAt.HasValue ? string.Empty : message.Text;
-
+        var deleted = message.DeletedAt.HasValue;
         return new MessageDto(
             message.Id,
             message.SenderId,
-            dtoText,
+            deleted ? string.Empty : message.Text,
             message.SentAt,
-            dtoAttachments,
+            deleted ? Array.Empty<AttachmentDto>() : attachments,
             message.Kind,
             message.SystemKey,
-            message.ForwardedFromMessageId,
             message.EditedAt,
             message.DeletedAt,
             message.DeletedById,
-            forwardedFrom,
-            Math.Max(1, message.GroupSecurityEpoch),
-            message.DeletedAt.HasValue ? 0 : message.E2eeEnvelopeVersion,
-            message.DeletedAt.HasValue ? null : message.E2eeProtocol,
-            message.ReplyToMessageId);
+            deleted ? null : message.Ciphertext,
+            message.MlsEpoch,
+            message.SenderDeviceId,
+            mlsGroupId);
     }
 
     public async Task<List<MessageDto>> BuildMessageDtosAsync(IReadOnlyList<GroupMessage> messages, CancellationToken ct = default)
@@ -779,12 +634,15 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
         var ids = messages.Select(m => m.Id).ToList();
         var attachments = await LoadAttachmentsForMessagesAsync(ids, ct);
-        var forwards = await LoadForwardInfosAsync(messages.ToList(), ct);
+        var chatIds = messages.Select(m => m.GroupChatId).Distinct().ToList();
+        var groups = await db.MlsGroups.AsNoTracking()
+            .Where(g => g.GroupChatId != null && chatIds.Contains(g.GroupChatId.Value))
+            .ToDictionaryAsync(g => g.GroupChatId!.Value, g => g.Id, ct);
 
         return messages.Select(m => ToMessageDto(
             m,
             attachments.TryGetValue(m.Id, out var att) ? att : null,
-            m.ForwardedFromMessageId.HasValue && forwards.TryGetValue(m.ForwardedFromMessageId.Value, out var fwd) ? fwd : null)).ToList();
+            groups.TryGetValue(m.GroupChatId, out var gid) ? gid : null)).ToList();
     }
 
     public async Task<MessageDto?> GetMessageDtoAsync(Guid groupId, Guid messageId, CancellationToken ct = default)
@@ -797,264 +655,86 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return dtos[0];
     }
 
-    public async Task<(GroupChat chat, GroupMessage message, List<ChatFile> files)> CreateMessageAsync(
+    /// <summary>User message: only an MLS ciphertext of the chat's MLS group is accepted.</summary>
+    public async Task<(GroupChat chat, GroupMessage message, MlsGroupEvent ev)> CreateUserMessageAsync(
         Guid senderId,
         Guid groupId,
-        string? text,
-        IReadOnlyCollection<Guid>? fileIds,
-        DirectMessageKind kind,
-        string? systemKey,
-        Guid? forwardedFromMessageId,
-        CancellationToken ct = default,
-        Guid? replyToMessageId = null)
+        SendMessageRequest request,
+        CancellationToken ct = default)
     {
         var chat = await GetChatForMemberAsync(groupId, senderId, ct)
             ?? throw new InvalidOperationException("Group chat not found or access denied.");
+        var group = await mls.RequireMessageContextAsync(senderId, null, groupId, request.DeviceId, request.Epoch, request.Ciphertext, ct);
 
-        // Ответ допустим только на сообщение из этой же группы.
-        if (replyToMessageId.HasValue && !await db.GroupMessages.AnyAsync(m => m.Id == replyToMessageId.Value && m.GroupChatId == groupId, ct))
-            replyToMessageId = null;
-
-        text = (text ?? string.Empty).Trim();
-        if (kind == DirectMessageKind.User && !forwardedFromMessageId.HasValue)
-            ValidateGroupE2eePayload(groupId, Math.Max(1, chat.SecurityEpoch), text);
-
-        var ids = (fileIds ?? Array.Empty<Guid>())
-            .Where(x => x != Guid.Empty)
-            .Distinct()
-            .Take(10)
-            .ToList();
-
-        var hasSystemMarker = kind == DirectMessageKind.System && !string.IsNullOrWhiteSpace(systemKey);
-        if (string.IsNullOrWhiteSpace(text) && ids.Count == 0 && !hasSystemMarker)
-            throw new InvalidOperationException("Message must contain text or attachments.");
-
-        var files = new List<ChatFile>();
-        if (ids.Count > 0)
+        var ids = (request.FileIds ?? Array.Empty<Guid>()).Where(x => x != Guid.Empty).Distinct().Take(10).ToList();
+        var files = ids.Count == 0 ? new List<ChatFile>() : await db.ChatFiles.Where(f => ids.Contains(f.Id)).ToListAsync(ct);
+        if (files.Count != ids.Count)
+            throw new InvalidOperationException("One or more files were not found.");
+        foreach (var f in files)
         {
-            files = await db.ChatFiles.Where(f => ids.Contains(f.Id)).ToListAsync(ct);
-            if (files.Count != ids.Count)
-                throw new InvalidOperationException("One or more files were not found.");
-
-            foreach (var f in files)
-            {
-                if (f.UploaderId != senderId)
-                    throw new InvalidOperationException("Cannot attach someone else's file.");
-                if (f.IsAttached)
-                    throw new InvalidOperationException("One or more files are already attached.");
-            }
+            if (f.UploaderId != senderId)
+                throw new InvalidOperationException("Cannot attach someone else's file.");
+            if (f.IsAttached)
+                throw new InvalidOperationException("One or more files are already attached.");
+            if (f.ScanStatus != JaeZoo.Server.Models.Files.FileScanStatus.ClientEncrypted)
+                throw new InvalidOperationException("Вложения сообщений группы должны быть зашифрованы на устройстве.");
         }
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var now = DateTime.UtcNow;
-        var e2eeInfo = E2eeEnvelopeInspector.InspectGroup(text);
         var message = new GroupMessage
         {
             GroupChatId = groupId,
             SenderId = senderId,
-            Text = text,
+            Ciphertext = request.Ciphertext,
+            MlsEpoch = request.Epoch,
+            SenderDeviceId = request.DeviceId,
             SentAt = now,
-            E2eeEnvelopeVersion = e2eeInfo.Version,
-            E2eeProtocol = e2eeInfo.Protocol,
-            GroupSecurityEpoch = Math.Max(1, chat.SecurityEpoch),
-            Kind = kind,
-            SystemKey = string.IsNullOrWhiteSpace(systemKey) ? null : systemKey.Trim(),
-            ForwardedFromMessageId = forwardedFromMessageId,
-            ReplyToMessageId = replyToMessageId
+            Kind = DirectMessageKind.User,
         };
         db.GroupMessages.Add(message);
 
         foreach (var f in files)
         {
-            db.GroupMessageAttachments.Add(new GroupMessageAttachment
-            {
-                MessageId = message.Id,
-                FileId = f.Id,
-                CreatedAt = now
-            });
-
+            db.GroupMessageAttachments.Add(new GroupMessageAttachment { MessageId = message.Id, FileId = f.Id, CreatedAt = now });
             f.IsAttached = true;
             f.AttachedAt = now;
         }
 
+        var ev = mls.AppendMessageEvent(group.Id, MlsEventKind.Message, message.Id, request.Epoch, senderId, request.DeviceId);
         chat.UpdatedAt = now;
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
-        return (chat, message, files);
+        return (chat, message, ev);
     }
 
-    public async Task<(GroupChat chat, GroupMessage message)> ForwardMessageAsync(
-        Guid senderId,
-        Guid groupId,
-        GroupMessage source,
-        bool includeAttachments,
-        CancellationToken ct = default)
+    /// <summary>Edit = new MLS ciphertext for the same message id (re-delivered through the event log).</summary>
+    public async Task<GroupMessage> EditUserMessageAsync(Guid senderId, Guid messageId, EditMessageRequest request, CancellationToken ct = default)
     {
-        if (source.DeletedAt.HasValue)
-            throw new InvalidOperationException("Deleted message cannot be forwarded.");
+        var message = await db.GroupMessages.FirstOrDefaultAsync(m => m.Id == messageId, ct)
+                      ?? throw new KeyNotFoundException("Message not found.");
+        if (message.SenderId != senderId) throw new UnauthorizedAccessException("Only the author can edit the message.");
+        if (message.Kind != DirectMessageKind.User) throw new InvalidOperationException("System messages cannot be edited.");
+        if (message.DeletedAt.HasValue) throw new InvalidOperationException("Deleted message cannot be edited.");
+        if (!await IsMemberAsync(message.GroupChatId, senderId, ct)) throw new UnauthorizedAccessException("Access denied.");
 
-        var chat = await GetChatForMemberAsync(groupId, senderId, ct)
-            ?? throw new InvalidOperationException("Group chat not found or access denied.");
-        var now = DateTime.UtcNow;
-
-        List<ChatFile> sourceFiles = [];
-        if (includeAttachments)
-        {
-            sourceFiles = await (
-                from a in db.GroupMessageAttachments
-                join f in db.ChatFiles on a.FileId equals f.Id
-                where a.MessageId == source.Id
-                orderby a.CreatedAt, a.Id
-                select f
-            ).ToListAsync(ct);
-        }
-
-        var hasSystemMarker = source.Kind == DirectMessageKind.System && !string.IsNullOrWhiteSpace(source.SystemKey);
-        if (string.IsNullOrWhiteSpace(source.Text) && sourceFiles.Count == 0 && !hasSystemMarker)
-            throw new InvalidOperationException("Message must contain text or attachments.");
-
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
-
-        var clones = sourceFiles.Select(f => new ChatFile
-        {
-            UploaderId = senderId,
-            OriginalFileName = f.OriginalFileName,
-            SafeFileName = string.IsNullOrWhiteSpace(f.SafeFileName) ? f.OriginalFileName : f.SafeFileName,
-            ContentType = f.ContentType,
-            DetectedContentType = string.IsNullOrWhiteSpace(f.DetectedContentType) ? f.ContentType : f.DetectedContentType,
-            SizeBytes = f.SizeBytes,
-            StoredPath = f.StoredPath,
-            Bucket = string.IsNullOrWhiteSpace(f.Bucket) ? "jaezoo-files" : f.Bucket,
-            ObjectKey = string.IsNullOrWhiteSpace(f.ObjectKey) ? f.StoredPath : f.ObjectKey,
-            Sha256 = f.Sha256 ?? string.Empty,
-            Kind = f.Kind,
-            ScanStatus = f.ScanStatus,
-            IsPotentiallyDangerous = f.IsPotentiallyDangerous,
-            RiskNote = f.RiskNote,
-            CreatedAt = now,
-            IsAttached = true,
-            AttachedAt = now
-        }).ToList();
-
-        if (clones.Count > 0)
-            db.ChatFiles.AddRange(clones);
-
-        var message = new GroupMessage
-        {
-            GroupChatId = groupId,
-            SenderId = senderId,
-            Text = (source.Text ?? string.Empty).Trim(),
-            SentAt = now,
-            E2eeEnvelopeVersion = source.E2eeEnvelopeVersion,
-            E2eeProtocol = source.E2eeProtocol,
-            GroupSecurityEpoch = Math.Max(1, chat.SecurityEpoch),
-            Kind = source.Kind,
-            SystemKey = string.IsNullOrWhiteSpace(source.SystemKey) ? null : source.SystemKey.Trim(),
-            ForwardedFromMessageId = source.Id
-        };
-        db.GroupMessages.Add(message);
-
-        foreach (var file in clones)
-        {
-            db.GroupMessageAttachments.Add(new GroupMessageAttachment
-            {
-                MessageId = message.Id,
-                FileId = file.Id,
-                CreatedAt = now
-            });
-        }
-
-        chat.UpdatedAt = now;
+        var group = await mls.RequireMessageContextAsync(senderId, null, message.GroupChatId, request.DeviceId, request.Epoch, request.Ciphertext, ct);
+        message.Ciphertext = request.Ciphertext;
+        message.MlsEpoch = request.Epoch;
+        message.SenderDeviceId = request.DeviceId;
+        message.EditedAt = DateTime.UtcNow;
+        mls.AppendMessageEvent(group.Id, MlsEventKind.MessageEdited, message.Id, request.Epoch, senderId, request.DeviceId);
         await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
-        return (chat, message);
+        return message;
     }
 
-    public async Task<(GroupChat chat, GroupMessage message)> ForwardMessageAsync(
-        Guid senderId,
-        Guid groupId,
-        DirectMessage source,
-        bool includeAttachments,
-        CancellationToken ct = default)
+    /// <summary>Records a deletion in the MLS event log so devices that sync later drop the message too.</summary>
+    public async Task AppendDeletionEventAsync(GroupMessage message, CancellationToken ct = default)
     {
-        if (source.DeletedAt.HasValue)
-            throw new InvalidOperationException("Deleted message cannot be forwarded.");
-
-        var chat = await GetChatForMemberAsync(groupId, senderId, ct)
-            ?? throw new InvalidOperationException("Group chat not found or access denied.");
-        var now = DateTime.UtcNow;
-
-        List<ChatFile> sourceFiles = [];
-        if (includeAttachments)
-        {
-            sourceFiles = await (
-                from a in db.DirectMessageAttachments
-                join f in db.ChatFiles on a.FileId equals f.Id
-                where a.MessageId == source.Id
-                orderby a.CreatedAt, a.Id
-                select f
-            ).ToListAsync(ct);
-        }
-
-        var hasSystemMarker = source.Kind == DirectMessageKind.System && !string.IsNullOrWhiteSpace(source.SystemKey);
-        if (string.IsNullOrWhiteSpace(source.Text) && sourceFiles.Count == 0 && !hasSystemMarker)
-            throw new InvalidOperationException("Message must contain text or attachments.");
-
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
-
-        var clones = sourceFiles.Select(f => new ChatFile
-        {
-            UploaderId = senderId,
-            OriginalFileName = f.OriginalFileName,
-            SafeFileName = string.IsNullOrWhiteSpace(f.SafeFileName) ? f.OriginalFileName : f.SafeFileName,
-            ContentType = f.ContentType,
-            DetectedContentType = string.IsNullOrWhiteSpace(f.DetectedContentType) ? f.ContentType : f.DetectedContentType,
-            SizeBytes = f.SizeBytes,
-            StoredPath = f.StoredPath,
-            Bucket = string.IsNullOrWhiteSpace(f.Bucket) ? "jaezoo-files" : f.Bucket,
-            ObjectKey = string.IsNullOrWhiteSpace(f.ObjectKey) ? f.StoredPath : f.ObjectKey,
-            Sha256 = f.Sha256 ?? string.Empty,
-            Kind = f.Kind,
-            ScanStatus = f.ScanStatus,
-            IsPotentiallyDangerous = f.IsPotentiallyDangerous,
-            RiskNote = f.RiskNote,
-            CreatedAt = now,
-            IsAttached = true,
-            AttachedAt = now
-        }).ToList();
-
-        if (clones.Count > 0)
-            db.ChatFiles.AddRange(clones);
-
-        var message = new GroupMessage
-        {
-            GroupChatId = groupId,
-            SenderId = senderId,
-            Text = (source.Text ?? string.Empty).Trim(),
-            SentAt = now,
-            E2eeEnvelopeVersion = source.E2eeEnvelopeVersion,
-            E2eeProtocol = source.E2eeProtocol,
-            GroupSecurityEpoch = Math.Max(1, chat.SecurityEpoch),
-            Kind = source.Kind,
-            SystemKey = string.IsNullOrWhiteSpace(source.SystemKey) ? null : source.SystemKey.Trim(),
-            ForwardedFromMessageId = source.Id
-        };
-        db.GroupMessages.Add(message);
-
-        foreach (var file in clones)
-        {
-            db.GroupMessageAttachments.Add(new GroupMessageAttachment
-            {
-                MessageId = message.Id,
-                FileId = file.Id,
-                CreatedAt = now
-            });
-        }
-
-        chat.UpdatedAt = now;
+        var group = await mls.FindGroupAsync(null, message.GroupChatId, ct);
+        if (group is null || message.Kind != DirectMessageKind.User) return;
+        mls.AppendMessageEvent(group.Id, MlsEventKind.MessageDeleted, message.Id, group.Epoch, message.DeletedById ?? message.SenderId, null);
         await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
-        return (chat, message);
     }
 
     public async Task<GroupMessage?> ValidateReadCursorAsync(Guid groupId, Guid me, Guid messageId, CancellationToken ct = default)

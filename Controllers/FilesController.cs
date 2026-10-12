@@ -99,7 +99,7 @@ public class FilesController(
             join gm in db.GroupChatMembers.AsNoTracking() on m.GroupChatId equals gm.GroupChatId
             where a.FileId == fileId
                   && gm.UserId == me
-                  && (g.HistoryPolicy == 1 || m.SentAt >= gm.JoinedAt)
+                  && m.SentAt >= gm.JoinedAt
             select a.Id
         ).AnyAsync(ct);
     }
@@ -214,6 +214,64 @@ public class FilesController(
                     log.LogWarning(ex, "Failed to delete temp upload file {TempPath}", tempPath);
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Вложение, зашифрованное на устройстве (ключ лежит внутри MLS-сообщения). Сервер хранит непрозрачный
+    /// блок: имя, тип и содержимое ему неизвестны, поэтому антивирусная проверка и превью невозможны.
+    /// </summary>
+    [HttpPost("upload-encrypted")]
+    [EnableRateLimiting("file-upload")]
+    [RequireVerifiedEmail]
+    [RequireRiskCaptcha("file-upload", 5, 60)]
+    [RequestSizeLimit(long.MaxValue)]
+    public async Task<ActionResult<FileUploadResponse>> UploadEncrypted(IFormFile file, CancellationToken ct)
+    {
+        if (file == null || file.Length == 0)
+            return BadRequest(new { error = "Файл не найден или пустой." });
+        if (file.Length > MaxUploadBytes)
+            return BadRequest(new { error = $"Файл слишком большой: максимум {MaxUploadBytes / (1024 * 1024)} МБ." });
+
+        try
+        {
+            var now = DateTime.UtcNow;
+            var fileId = Guid.NewGuid();
+            var bucket = bucketRouter.GetBucket(StoredFileKind.File);
+            var objectKey = FileBucketRouter.BuildObjectKey(StoredFileKind.File, now, fileId, ".bin");
+
+            await using (var input = file.OpenReadStream())
+            {
+                await storage.PutAsync(bucket, objectKey, input, "application/octet-stream", ct);
+            }
+
+            var entity = new ChatFile
+            {
+                Id = fileId,
+                UploaderId = MeId,
+                OriginalFileName = "encrypted.bin",
+                SafeFileName = "encrypted.bin",
+                ContentType = "application/octet-stream",
+                DetectedContentType = "application/octet-stream",
+                SizeBytes = file.Length,
+                Bucket = bucket,
+                ObjectKey = objectKey,
+                StoredPath = objectKey,
+                Kind = StoredFileKind.File,
+                ScanStatus = FileScanStatus.ClientEncrypted,
+                CreatedAt = now,
+                IsAttached = false
+            };
+            db.ChatFiles.Add(entity);
+            await db.SaveChangesAsync(ct);
+
+            return Ok(new FileUploadResponse(entity.Id, entity.OriginalFileName, entity.ContentType, entity.SizeBytes,
+                BuildFileUrl(entity), false, false, entity.ScanStatus.ToString(), true, true, null));
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "Encrypted upload failed: user={UserId}", MeId);
+            return StatusCode(500, new { error = "Не удалось загрузить файл. Попробуйте ещё раз." });
         }
     }
 
