@@ -8,13 +8,13 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace JaeZoo.Server.Migrations
 {
     /// <summary>
-    /// Removes the legacy E2EE (pre-MLS). Owner decision (2026-10-12): old encrypted history is cleared.
+    /// Removes the legacy (pre-MLS) message encryption schema and data. Owner decision (2026-10-12): old encrypted history is cleared.
     /// DESTRUCTIVE: take a database backup (pg_dump) before deploying. Down() restores the schema only;
     /// the deleted rows can come back only from that backup.
     /// </summary>
     [DbContext(typeof(AppDbContext))]
-    [Migration("20261012181000_RemoveLegacyE2ee")]
-    public partial class RemoveLegacyE2ee : Migration
+    [Migration("20261012181000_RemoveLegacyEncryption")]
+    public partial class RemoveLegacyEncryption : Migration
     {
         // User messages of the old scheme, plus system rows protected by the removed server-side
         // MessageTextProtector ("jzenc1:" prefix) and the old E2EE service notices.

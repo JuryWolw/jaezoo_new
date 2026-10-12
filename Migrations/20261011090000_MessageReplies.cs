@@ -7,7 +7,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 namespace JaeZoo.Server.Migrations
 {
-    /// <summary>Ответы на сообщения: ссылка на исходное сообщение (без текста — E2EE не затрагивается).</summary>
+    /// <summary>Ответы на сообщения: колонка ReplyToMessageId (позже перенесена внутрь шифротекста и удалена).</summary>
     [Microsoft.EntityFrameworkCore.Infrastructure.DbContext(typeof(AppDbContext))]
     [Migration("20261011090000_MessageReplies")]
     public partial class MessageReplies : Migration
