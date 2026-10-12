@@ -249,7 +249,7 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage, M
     }
 
     /// <summary>User message: only an MLS ciphertext of the dialog's group is accepted (the server cannot read it).</summary>
-    public async Task<(DirectDialog dialog, DirectMessage message, MlsGroupEvent ev)> CreateUserMessageAsync(
+    public async Task<(DirectDialog dialog, DirectMessage message, MlsGroupEvent ev, MessageDto dto)> CreateUserMessageAsync(
         Guid senderId,
         Guid peerId,
         SendMessageRequest request,
@@ -262,7 +262,6 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage, M
         var group = await mls.RequireMessageContextAsync(senderId, dlg.Id, null, request.DeviceId, request.Epoch, request.Ciphertext, ct);
         var files = await LoadAttachableFilesAsync(senderId, request.FileIds, requireClientEncrypted: true, ct);
 
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
         var now = DateTime.UtcNow;
         var message = new DirectMessage
         {
@@ -279,8 +278,9 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage, M
         var ev = mls.AppendMessageEvent(group.Id, MlsEventKind.Message, message.Id, request.Epoch, senderId, request.DeviceId);
 
         await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
-        return (dlg, message, ev);
+        // One SaveChanges is atomic; the reply is built from what we wrote (no re-read on the hot path).
+        var dto = ToMessageDto(message, files.Select(ToAttachmentDto).ToList(), group.Id);
+        return (dlg, message, ev, dto);
     }
 
     /// <summary>Service notice in plain text (system chat JaeZoo, call log entries). Never used for user content.</summary>

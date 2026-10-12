@@ -28,7 +28,8 @@ public class ChatController(
     GroupChatService groupChats,
     FileCleanupService fileCleanup,
     IHubContext<ChatHub> hub,
-    IWebHostEnvironment env) : ControllerBase
+    IWebHostEnvironment env,
+    IServiceScopeFactory scopes) : ControllerBase
 {
 
     private Guid MeId
@@ -328,13 +329,22 @@ public class ChatController(
         try
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
-            if (!await chat.AreFriends(MeId, friendId, ct)) return Forbid();
-            var peerVerified = await IsEmailConfirmedAsync(friendId, ct);
-            if (!peerVerified) return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Переписка пока недоступна." });
+            // Friendship and the peer's verified e-mail in one round trip (hot path of every send).
+            var me = MeId;
+            var peer = await db.Users.AsNoTracking()
+                .Where(u => u.Id == friendId)
+                .Select(u => new
+                {
+                    u.EmailConfirmed,
+                    Friends = db.Friendships.Any(f => f.Status == FriendshipStatus.Accepted &&
+                        ((f.RequesterId == me && f.AddresseeId == friendId) || (f.RequesterId == friendId && f.AddresseeId == me)))
+                })
+                .FirstOrDefaultAsync(ct);
+            if (peer is null || !peer.Friends) return Forbid();
+            if (!peer.EmailConfirmed) return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Переписка пока недоступна." });
 
-            var created = await chat.CreateUserMessageAsync(MeId, friendId, body, ct);
-            var dto = await chat.GetMessageDtoAsync(created.dialog.Id, created.message.Id, ct);
-            if (dto is null) return Problem("Failed to build message dto.", statusCode: 500);
+            var created = await chat.CreateUserMessageAsync(me, friendId, body, ct);
+            var dto = created.dto;
 
             await BroadcastCreated(friendId, dto, ct);
             return Ok(dto);
@@ -519,14 +529,35 @@ public class ChatController(
 
     private async Task BroadcastCreated(Guid peerId, MessageDto dto, CancellationToken ct)
     {
-        await hub.Clients.User(MeId.ToString()).SendAsync("ChatMessageCreated", new ChatRealtimeMessageDto(peerId, dto), ct);
-        await hub.Clients.User(peerId.ToString()).SendAsync("ChatMessageCreated", new ChatRealtimeMessageDto(MeId, dto), ct);
+        var me = MeId;
+        await hub.Clients.User(me.ToString()).SendAsync("ChatMessageCreated", new ChatRealtimeMessageDto(peerId, dto), ct);
+        await hub.Clients.User(peerId.ToString()).SendAsync("ChatMessageCreated", new ChatRealtimeMessageDto(me, dto), ct);
 
-        var dlg = await chat.GetOrCreateDialogAsync(MeId, peerId, ct);
-        var unread = await chat.GetUnreadForUserAsync(dlg, peerId, ct);
-        var typedUnread = new ChatUnreadChangedDto(MeId, unread.count, unread.firstId, unread.firstAt);
+        // The unread counter is not needed for the sender's reply: compute it after responding.
+        RunInBackground("direct unread", async sp =>
+        {
+            var chats = sp.GetRequiredService<DirectChatService>();
+            var dlg = await chats.GetOrCreateDialogAsync(me, peerId);
+            var unread = await chats.GetUnreadForUserAsync(dlg, peerId, CancellationToken.None);
+            await hub.Clients.User(peerId.ToString()).SendAsync("ChatUnreadChanged", new ChatUnreadChangedDto(me, unread.count, unread.firstId, unread.firstAt));
+        });
+    }
 
-        await hub.Clients.User(peerId.ToString()).SendAsync("ChatUnreadChanged", typedUnread, ct);
+    /// <summary>Fire-and-forget work with its own DI scope (the request scope is gone once we reply).</summary>
+    private void RunInBackground(string what, Func<IServiceProvider, Task> work)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = scopes.CreateScope();
+                await work(scope.ServiceProvider);
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Background {What} failed.", what);
+            }
+        });
     }
 
 
@@ -1046,7 +1077,7 @@ public class ChatController(
             if (body is null) return BadRequest(new { error = "Body is required." });
 
             var created = await groupChats.CreateUserMessageAsync(MeId, groupId, body, ct);
-            var dto = await groupChats.GetMessageDtoAsync(groupId, created.message.Id, ct);
+            var dto = created.dto;
             if (dto is null) return Problem("Failed to build message dto.", statusCode: 500);
 
             await BroadcastGroupCreated(groupId, dto, ct);
@@ -1250,16 +1281,18 @@ public class ChatController(
     private async Task BroadcastGroupCreated(Guid groupId, MessageDto dto, CancellationToken ct)
     {
         var memberIds = await GetGroupMemberIdsAsync(groupId, ct);
-        foreach (var memberId in memberIds)
-        {
-            await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatMessageCreated", new GroupChatRealtimeMessageDto(groupId, dto), ct);
-        }
+        await hub.Clients.Users(memberIds.Select(m => m.ToString()).ToList()).SendAsync("GroupChatMessageCreated", new GroupChatRealtimeMessageDto(groupId, dto), ct);
 
-        foreach (var memberId in memberIds.Where(x => x != dto.SenderId))
+        var senderId = dto.SenderId;
+        RunInBackground("group unread", async sp =>
         {
-            var unread = await groupChats.GetUnreadForUserAsync(groupId, memberId, ct);
-            await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatUnreadChanged", new GroupChatUnreadChangedDto(groupId, unread.count, unread.firstId, unread.firstAt), ct);
-        }
+            var groups = sp.GetRequiredService<GroupChatService>();
+            foreach (var memberId in memberIds.Where(x => x != senderId))
+            {
+                var unread = await groups.GetUnreadForUserAsync(groupId, memberId);
+                await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatUnreadChanged", new GroupChatUnreadChangedDto(groupId, unread.count, unread.firstId, unread.firstAt));
+            }
+        });
     }
 
     private async Task BroadcastGroupUpdatedMessage(Guid groupId, MessageDto dto, CancellationToken ct)

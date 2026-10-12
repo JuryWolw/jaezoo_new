@@ -55,11 +55,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
     public async Task<GroupChat?> GetChatForMemberAsync(Guid groupId, Guid userId, CancellationToken ct = default)
     {
-        var isMember = await IsMemberAsync(groupId, userId, ct);
-        if (!isMember)
-            return null;
-
-        return await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct);
+        // One round trip: the chat, only if the user is a member.
+        return await db.GroupChats
+            .FirstOrDefaultAsync(g => g.Id == groupId && db.GroupChatMembers.Any(m => m.GroupChatId == groupId && m.UserId == userId), ct);
     }
 
     /// <summary>Service notice in plain text (member added, group call started/ended). Never user content.</summary>
@@ -656,7 +654,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
     }
 
     /// <summary>User message: only an MLS ciphertext of the chat's MLS group is accepted.</summary>
-    public async Task<(GroupChat chat, GroupMessage message, MlsGroupEvent ev)> CreateUserMessageAsync(
+    public async Task<(GroupChat chat, GroupMessage message, MlsGroupEvent ev, MessageDto dto)> CreateUserMessageAsync(
         Guid senderId,
         Guid groupId,
         SendMessageRequest request,
@@ -680,7 +678,6 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
                 throw new InvalidOperationException("Вложения сообщений группы должны быть зашифрованы на устройстве.");
         }
 
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
         var now = DateTime.UtcNow;
         var message = new GroupMessage
         {
@@ -704,8 +701,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         var ev = mls.AppendMessageEvent(group.Id, MlsEventKind.Message, message.Id, request.Epoch, senderId, request.DeviceId);
         chat.UpdatedAt = now;
         await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
-        return (chat, message, ev);
+        // One SaveChanges is atomic; the reply is built from what we wrote (no re-read on the hot path).
+        var dto = ToMessageDto(message, files.Select(ToAttachmentDto).ToList(), group.Id);
+        return (chat, message, ev, dto);
     }
 
     /// <summary>Edit = new MLS ciphertext for the same message id (re-delivered through the event log).</summary>

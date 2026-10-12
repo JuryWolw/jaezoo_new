@@ -544,14 +544,28 @@ public sealed class MlsDeliveryService(AppDbContext db)
     {
         if (ciphertext is not { Length: > 0 and <= MaxMessageBytes })
             throw MlsDeliveryException.Invalid("Сообщение должно быть зашифровано (MLS).");
-        var group = await FindGroupAsync(dialogId, groupChatId, ct)
-                    ?? throw new MlsDeliveryException("no_group", "Для чата ещё не создана MLS-группа.", 409);
-        await RequireActiveDeviceAsync(senderId, deviceId, ct);
-        if (!await db.MlsGroupMembers.AnyAsync(m => m.GroupId == group.Id && m.DeviceId == deviceId, ct))
+
+        // Hot path of every send: group, device and leaf membership in one database round trip.
+        var groups = db.MlsGroups.AsNoTracking();
+        groups = dialogId.HasValue ? groups.Where(g => g.DialogId == dialogId) : groups.Where(g => g.GroupChatId == groupChatId);
+        var row = await groups
+            .Select(g => new
+            {
+                Group = g,
+                DeviceActive = db.UserDevices.Any(d => d.Id == deviceId && d.UserId == senderId && d.RevokedAt == null),
+                IsLeaf = db.MlsGroupMembers.Any(m => m.GroupId == g.Id && m.DeviceId == deviceId),
+            })
+            .FirstOrDefaultAsync(ct);
+
+        if (row is null)
+            throw new MlsDeliveryException("no_group", "Для чата ещё не создана MLS-группа.", 409);
+        if (!row.DeviceActive)
+            throw new MlsDeliveryException("device_inactive", "Устройство не зарегистрировано или отозвано.", 403);
+        if (!row.IsLeaf)
             throw MlsDeliveryException.Forbidden("Устройство не состоит в группе чата.");
-        if (epoch > group.Epoch || epoch < group.Epoch - MessageEpochTolerance)
-            throw MlsDeliveryException.EpochConflict(group.Epoch);
-        return group;
+        if (epoch > row.Group.Epoch || epoch < row.Group.Epoch - MessageEpochTolerance)
+            throw MlsDeliveryException.EpochConflict(row.Group.Epoch);
+        return row.Group;
     }
 
     public MlsGroupEvent AppendMessageEvent(Guid groupId, MlsEventKind kind, Guid messageId, long epoch, Guid senderId, Guid? deviceId)
