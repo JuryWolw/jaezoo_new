@@ -37,8 +37,12 @@ public sealed class MlsDeliveryService(AppDbContext db)
     public const int MaxCommitBytes = 256 * 1024;
     public const int MaxMessageBytes = 128 * 1024;
 
-    /// <summary>Messages may be encrypted in the current epoch or up to this many epochs back (receivers keep them).</summary>
-    public const int MessageEpochTolerance = 2;
+    /// <summary>
+    /// Messages are accepted only in the group's current epoch. Accepting older epochs would let a sender
+    /// that has not yet processed a Remove commit encrypt to a removed member (found by MlsMessengerTests).
+    /// A stale sender gets <c>epoch_conflict</c>, syncs the commits and re-encrypts.
+    /// </summary>
+    public const int MessageEpochTolerance = 0;
 
     public const string DeviceLimitMessage = "Достигнут лимит устройств, отзовите одно из списка.";
 
