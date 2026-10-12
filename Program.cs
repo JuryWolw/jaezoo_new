@@ -427,6 +427,24 @@ using (var scope = app.Services.CreateScope())
             logger.LogError(ex, "Failed to ensure DirectDialogs read-state columns.");
         }
     }
+    else if (db.Database.IsSqlite())
+    {
+        // Local development database: same read-state columns (SQLite has no ADD COLUMN IF NOT EXISTS).
+        var columns = new Dictionary<string, string>
+        {
+            ["LastReadAtUser1"] = "TEXT NOT NULL DEFAULT '0001-01-01 00:00:00'",
+            ["LastReadMessageIdUser1"] = "TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000'",
+            ["LastReadAtUser2"] = "TEXT NOT NULL DEFAULT '0001-01-01 00:00:00'",
+            ["LastReadMessageIdUser2"] = "TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000'",
+        };
+        foreach (var (name, definition) in columns)
+        {
+            var exists = await db.Database.SqlQueryRaw<int>(
+                "SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('DirectDialogs') WHERE name = '" + name + "'").SingleAsync();
+            if (exists == 0)
+                await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"DirectDialogs\" ADD COLUMN \"" + name + "\" " + definition + ";");
+        }
+    }
 }
 
 // ---------- wwwroot/avatars ----------
@@ -1315,3 +1333,6 @@ static async Task EnsureModerationSchemaAsync(AppDbContext db, ILogger logger)
         logger.LogError(ex, "Failed to ensure moderation schema.");
     }
 }
+
+/// <summary>Entry point type, visible to integration tests (WebApplicationFactory).</summary>
+public partial class Program;

@@ -24,12 +24,17 @@ namespace JaeZoo.Server.Migrations
         private const string LegacyGroupMessages =
             """SELECT "Id" FROM "GroupMessages" WHERE "Kind" = 0 OR "Text" LIKE 'jzenc1:%' OR "SystemKey" IN ('group_history_available', 'group_security_keys_updated')""";
 
-        private static readonly string ClearLegacyHistory = $"""
+        // Files of removed messages are marked deleted (FileCleanupService removes the blobs). Postgres only:
+        // on a fresh database "ChatFiles.DeletedAt" is added by startup schema code after migrations.
+        private static readonly string MarkLegacyFilesDeleted = $"""
             UPDATE "ChatFiles" SET "DeletedAt" = CURRENT_TIMESTAMP
                 WHERE "DeletedAt" IS NULL AND "Id" IN (
                     SELECT "FileId" FROM "DirectMessageAttachments" WHERE "MessageId" IN ({LegacyDirectMessages})
                     UNION
                     SELECT "FileId" FROM "GroupMessageAttachments" WHERE "MessageId" IN ({LegacyGroupMessages}));
+            """;
+
+        private static readonly string ClearLegacyHistory = $"""
             DELETE FROM "DirectMessageAttachments" WHERE "MessageId" IN ({LegacyDirectMessages});
             DELETE FROM "GroupMessageAttachments" WHERE "MessageId" IN ({LegacyGroupMessages});
             DELETE FROM "DirectMessages" WHERE "Id" IN ({LegacyDirectMessages});
@@ -38,6 +43,8 @@ namespace JaeZoo.Server.Migrations
 
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            if (ActiveProvider.Contains("Npgsql", StringComparison.OrdinalIgnoreCase))
+                migrationBuilder.Sql(MarkLegacyFilesDeleted);
             migrationBuilder.Sql(ClearLegacyHistory);
 
             if (ActiveProvider.Contains("Npgsql", StringComparison.OrdinalIgnoreCase))
