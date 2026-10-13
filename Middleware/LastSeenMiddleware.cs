@@ -1,19 +1,30 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Security.Claims;
 using JaeZoo.Server.Data;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Middleware
 {
+    /// <summary>
+    /// Updates User.LastSeen at most once a minute per user. The write runs in the background with one UPDATE,
+    /// so it never adds database round trips to the request that triggered it.
+    /// </summary>
     public class LastSeenMiddleware
     {
         private readonly RequestDelegate _next;
+        private readonly IServiceScopeFactory _scopes;
+        private readonly ILogger<LastSeenMiddleware> _log;
         private static readonly ConcurrentDictionary<Guid, DateTime> _last = new();
         private static readonly TimeSpan _ttl = TimeSpan.FromSeconds(60);
 
-        public LastSeenMiddleware(RequestDelegate next) => _next = next;
+        public LastSeenMiddleware(RequestDelegate next, IServiceScopeFactory scopes, ILogger<LastSeenMiddleware> log)
+        {
+            _next = next;
+            _scopes = scopes;
+            _log = log;
+        }
 
-        public async Task Invoke(HttpContext ctx, AppDbContext db)
+        public async Task Invoke(HttpContext ctx)
         {
             if (ctx.User?.Identity?.IsAuthenticated == true)
             {
@@ -25,12 +36,19 @@ namespace JaeZoo.Server.Middleware
                     if (now - when >= _ttl)
                     {
                         _last[uid] = now;
-                        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == uid);
-                        if (user != null)
+                        _ = Task.Run(async () =>
                         {
-                            user.LastSeen = now;
-                            await db.SaveChangesAsync();
-                        }
+                            try
+                            {
+                                using var scope = _scopes.CreateScope();
+                                var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                                await db.Users.Where(u => u.Id == uid).ExecuteUpdateAsync(s => s.SetProperty(u => u.LastSeen, now));
+                            }
+                            catch (Exception ex)
+                            {
+                                _log.LogWarning(ex, "LastSeen update failed for {UserId}", uid);
+                            }
+                        });
                     }
                 }
             }

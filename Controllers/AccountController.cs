@@ -297,6 +297,7 @@ namespace JaeZoo.Server.Controllers
             await _db.Users.Where(u => u.Id == uid).ExecuteDeleteAsync(ct);
 
             await tx.CommitAsync(ct);
+            HttpContext.RequestServices.GetRequiredService<AuthStateCache>().InvalidateUser(uid);
 
             _log.LogWarning("User account deleted completely. UserId={UserId} PublicId={PublicId}", uid, me.PublicId);
             await _securityAudit.TryWriteAsync(User, HttpContext, "Security.AccountDeleted", "User", uid.ToString(), $"Account deleted completely. publicId={me.PublicId}; ownedGroups={ownedGroupIds.Count}; uploadedObjects={storageObjects.Count}", ct);

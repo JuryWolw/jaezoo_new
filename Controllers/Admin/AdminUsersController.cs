@@ -183,6 +183,7 @@ public sealed class AdminUsersController(AppDbContext db, IObjectStorage storage
         await db.ChatFiles.Where(f => f.UploaderId == userId).ExecuteDeleteAsync(ct);
         await db.Users.Where(u => u.Id == userId).ExecuteDeleteAsync(ct);
         await tx.CommitAsync(ct);
+        HttpContext.RequestServices.GetRequiredService<AuthStateCache>().InvalidateUser(userId);
 
         await audit.WriteAsync(User, HttpContext, "UserDeleted", "User", userId.ToString(), $"Deleted user {user.PublicId} / {UserIdentityService.GetPublicName(user)}. Reason: {reason}", ct);
         return NoContent();

@@ -42,8 +42,11 @@ var isPg = conn.Contains("Host=", StringComparison.OrdinalIgnoreCase)
            || conn.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase)
            || conn.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase);
 
-if (isPg) builder.Services.AddDbContext<AppDbContext>(o => o.UseNpgsql(conn));
-else builder.Services.AddDbContext<AppDbContext>(o => o.UseSqlite(conn));
+// Auth state of every request is cached in memory; EF saves of users/sessions invalidate it (Security/AuthStateCache.cs).
+builder.Services.AddSingleton<AuthStateCache>();
+builder.Services.AddSingleton<AuthStateInvalidationInterceptor>();
+if (isPg) builder.Services.AddDbContext<AppDbContext>((sp, o) => o.UseNpgsql(conn).AddInterceptors(sp.GetRequiredService<AuthStateInvalidationInterceptor>()));
+else builder.Services.AddDbContext<AppDbContext>((sp, o) => o.UseSqlite(conn).AddInterceptors(sp.GetRequiredService<AuthStateInvalidationInterceptor>()));
 
 // ---------- Files / multipart limits ----------
 var maxUploadBytes = builder.Configuration.GetValue<long?>("Files:MaxUploadBytes") ?? (2L * 1024 * 1024 * 1024);
@@ -107,35 +110,59 @@ builder.Services
                     return;
                 }
 
-                var tokenUser = await db.Users
-                    .Where(u => u.Id == userId)
-                    .Select(u => new { u.TokenVersion, u.SecurityStamp, u.IsDisabled })
-                    .FirstOrDefaultAsync();
+                var sidValue = context.Principal?.FindFirst("sid")?.Value;
+                var hasSession = Guid.TryParse(sidValue, out var sessionId);
+                var authCache = context.HttpContext.RequestServices.GetRequiredService<AuthStateCache>();
 
-                if (tokenUser is null || tokenUser.IsDisabled)
+                // Hot path of every request: answered from memory; on a miss user and session come in one round trip.
+                if (!authCache.TryGetUser(userId, out var tokenUser) || (hasSession && !authCache.IsSessionKnownActive(sessionId, userId)))
+                {
+                    var now = DateTime.UtcNow;
+                    var row = await db.Users.AsNoTracking()
+                        .Where(u => u.Id == userId)
+                        .Select(u => new
+                        {
+                            u.TokenVersion,
+                            u.SecurityStamp,
+                            u.IsDisabled,
+                            u.EmailConfirmed,
+                            SessionExpiresAt = db.UserSessions
+                                .Where(s => s.Id == sessionId && s.UserId == userId && s.RevokedAt == null && s.ExpiresAt > now)
+                                .Select(s => (DateTime?)s.ExpiresAt)
+                                .FirstOrDefault()
+                        })
+                        .FirstOrDefaultAsync();
+
+                    if (row is null)
+                    {
+                        context.Fail("User is missing or disabled.");
+                        return;
+                    }
+
+                    tokenUser = new AuthStateCache.UserState(row.TokenVersion, row.SecurityStamp ?? string.Empty, row.IsDisabled, row.EmailConfirmed);
+                    authCache.SetUser(userId, tokenUser);
+                    if (hasSession)
+                    {
+                        if (row.SessionExpiresAt is not { } sessionExpiresAt)
+                        {
+                            context.Fail("Session revoked or expired.");
+                            return;
+                        }
+                        authCache.SetSessionActive(sessionId, userId, sessionExpiresAt);
+                    }
+                }
+
+                if (tokenUser.IsDisabled)
                 {
                     context.Fail("User is missing or disabled.");
                     return;
                 }
 
-                if (tokenUser.TokenVersion != tokenVersion || !string.Equals(tokenUser.SecurityStamp ?? string.Empty, securityStampValue, StringComparison.Ordinal))
+                if (tokenUser.TokenVersion != tokenVersion || !string.Equals(tokenUser.SecurityStamp, securityStampValue, StringComparison.Ordinal))
                 {
                     context.Fail("Token was revoked by security change.");
                     return;
                 }
-
-                var sidValue = context.Principal?.FindFirst("sid")?.Value;
-                if (!Guid.TryParse(sidValue, out var sessionId))
-                    return;
-
-                var now = DateTime.UtcNow;
-                var active = await db.UserSessions.AnyAsync(s =>
-                    s.Id == sessionId &&
-                    s.RevokedAt == null &&
-                    s.ExpiresAt > now);
-
-                if (!active)
-                    context.Fail("Session revoked or expired.");
             }
         };
     });

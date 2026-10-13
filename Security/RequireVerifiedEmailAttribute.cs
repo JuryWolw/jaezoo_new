@@ -29,6 +29,11 @@ public sealed class RequireVerifiedEmailAttribute : Attribute, IAsyncAuthorizati
             return;
         }
 
+        // Token validation has just cached the user's state; a database read is needed only on a miss.
+        var authCache = context.HttpContext.RequestServices.GetService<AuthStateCache>();
+        if (authCache != null && authCache.TryGetUser(userId, out var cached) && cached.EmailConfirmed)
+            return;
+
         var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
         var confirmed = await db.Users
             .AsNoTracking()

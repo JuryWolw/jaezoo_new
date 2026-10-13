@@ -1,4 +1,5 @@
 ﻿using JaeZoo.Server.Data;
+using System.Collections.Concurrent;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Services.Storage;
 using JaeZoo.Server.Models.Mls;
@@ -13,6 +14,19 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage, M
     public IObjectStorage Storage => storage;
 
     public static (Guid a, Guid b) OrderPair(Guid x, Guid y) => x < y ? (x, y) : (y, x);
+
+    // A dialog id never changes for a pair of users: the send hot path looks it up once per process.
+    private static readonly ConcurrentDictionary<(Guid, Guid), Guid> DialogIds = new();
+
+    private async Task<Guid> GetOrCreateDialogIdAsync(Guid aId, Guid bId, CancellationToken ct)
+    {
+        var pair = OrderPair(aId, bId);
+        if (DialogIds.TryGetValue(pair, out var id)) return id;
+        if (DialogIds.Count > 100_000) DialogIds.Clear();
+        id = (await GetOrCreateDialogAsync(aId, bId, ct)).Id;
+        DialogIds[pair] = id;
+        return id;
+    }
 
     public async Task<bool> AreFriends(Guid me, Guid other, CancellationToken ct = default) =>
         await db.Friendships.AnyAsync(f =>
@@ -249,7 +263,7 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage, M
     }
 
     /// <summary>User message: only an MLS ciphertext of the dialog's group is accepted (the server cannot read it).</summary>
-    public async Task<(DirectDialog dialog, DirectMessage message, MlsGroupEvent ev, MessageDto dto)> CreateUserMessageAsync(
+    public async Task<(Guid dialogId, DirectMessage message, MlsGroupEvent ev, MessageDto dto)> CreateUserMessageAsync(
         Guid senderId,
         Guid peerId,
         SendMessageRequest request,
@@ -258,14 +272,14 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage, M
         if (SystemChatService.IsSystemUser(peerId))
             throw new InvalidOperationException("Системный чат JaeZoo только для чтения.");
 
-        var dlg = await GetOrCreateDialogAsync(senderId, peerId, ct);
-        var group = await mls.RequireMessageContextAsync(senderId, dlg.Id, null, request.DeviceId, request.Epoch, request.Ciphertext, ct);
+        var dialogId = await GetOrCreateDialogIdAsync(senderId, peerId, ct);
+        var group = await mls.RequireMessageContextAsync(senderId, dialogId, null, request.DeviceId, request.Epoch, request.Ciphertext, ct);
         var files = await LoadAttachableFilesAsync(senderId, request.FileIds, requireClientEncrypted: true, ct);
 
         var now = DateTime.UtcNow;
         var message = new DirectMessage
         {
-            DialogId = dlg.Id,
+            DialogId = dialogId,
             SenderId = senderId,
             Ciphertext = request.Ciphertext,
             MlsEpoch = request.Epoch,
@@ -280,7 +294,7 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage, M
         await db.SaveChangesAsync(ct);
         // One SaveChanges is atomic; the reply is built from what we wrote (no re-read on the hot path).
         var dto = ToMessageDto(message, files.Select(ToAttachmentDto).ToList(), group.Id);
-        return (dlg, message, ev, dto);
+        return (dialogId, message, ev, dto);
     }
 
     /// <summary>Service notice in plain text (system chat JaeZoo, call log entries). Never used for user content.</summary>

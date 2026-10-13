@@ -1,6 +1,7 @@
 using JaeZoo.Server.Data;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Models.Mls;
+using JaeZoo.Server.Security;
 using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Services.Mls;
@@ -22,7 +23,7 @@ public sealed class MlsDeliveryException(string code, string message, int status
 /// MLS Delivery Service (RFC 9420, section 4 / RFC 9750): devices, KeyPackages, commit ordering by epoch,
 /// Welcome delivery and an ordered per-group event log. Never sees keys or plaintext.
 /// </summary>
-public sealed class MlsDeliveryService(AppDbContext db)
+public sealed class MlsDeliveryService(AppDbContext db, AuthStateCache? authCache = null)
 {
     /// <summary>Maximum active devices per user (one constant, change here).</summary>
     public const int MaxDevicesPerUser = 5;
@@ -78,6 +79,7 @@ public sealed class MlsDeliveryService(AppDbContext db)
             await db.UserSessions
                 .Where(s => s.Id == oldSession && s.UserId == userId && s.RevokedAt == null)
                 .ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, now), ct);
+            authCache?.InvalidateSession(oldSession);
         }
 
         device.SessionId = sessionId ?? device.SessionId;
@@ -133,6 +135,7 @@ public sealed class MlsDeliveryService(AppDbContext db)
         {
             await db.UserSessions.Where(s => s.Id == sid && s.RevokedAt == null)
                 .ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, now), ct);
+            authCache?.InvalidateSession(sid);
         }
 
         await db.MlsKeyPackages.Where(k => k.DeviceId == deviceId).ExecuteDeleteAsync(ct);
