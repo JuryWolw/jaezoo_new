@@ -29,6 +29,25 @@ public class AuthController(
 {
     private readonly PasswordHasher<User> _hasher = new();
 
+    public sealed record LoginAvailabilityRequest(string? Login);
+
+    /// <summary>
+    /// Live check for the registration form. Answers the same thing a registration attempt would, so it reveals
+    /// nothing new; POST keeps the login out of URLs and access logs, and the limit slows down enumeration.
+    /// </summary>
+    [HttpPost("login-available")]
+    [EnableRateLimiting("login-check")]
+    public async Task<IActionResult> LoginAvailable([FromBody] LoginAvailabilityRequest r, CancellationToken ct)
+    {
+        var login = (r?.Login ?? string.Empty).Trim();
+        if (!UserIdentityService.IsValidLogin(login))
+            return Ok(new { available = false, reason = "Логин: 3-32 символа, латиница, цифры, точка, дефис или подчёркивание." });
+
+        var loginHash = IdentityDataProtector.HashLogin(login);
+        var taken = await db.Users.AsNoTracking().AnyAsync(u => u.LoginHash == loginHash, ct);
+        return Ok(new { available = !taken, reason = taken ? "Логин уже занят." : null });
+    }
+
     [HttpPost("register")]
     public async Task<IActionResult> Register([FromBody] RegisterRequest r, CancellationToken ct)
     {
