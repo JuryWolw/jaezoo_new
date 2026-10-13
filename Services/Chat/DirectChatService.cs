@@ -18,14 +18,20 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage, M
     // A dialog id never changes for a pair of users: the send hot path looks it up once per process.
     private static readonly ConcurrentDictionary<(Guid, Guid), Guid> DialogIds = new();
 
-    private async Task<Guid> GetOrCreateDialogIdAsync(Guid aId, Guid bId, CancellationToken ct)
+    // Sending never creates a dialog: it exists since the dialog's MLS group was created (after the friendship check).
+    private async Task<Guid> FindDialogIdForSendAsync(Guid aId, Guid bId, CancellationToken ct)
     {
         var pair = OrderPair(aId, bId);
         if (DialogIds.TryGetValue(pair, out var id)) return id;
+        var found = await db.DirectDialogs.AsNoTracking()
+            .Where(d => d.User1Id == pair.a && d.User2Id == pair.b)
+            .Select(d => (Guid?)d.Id)
+            .FirstOrDefaultAsync(ct);
+        if (found is not { } dialogId)
+            throw new MlsDeliveryException("no_group", "Для чата ещё не создана MLS-группа.", 409);
         if (DialogIds.Count > 100_000) DialogIds.Clear();
-        id = (await GetOrCreateDialogAsync(aId, bId, ct)).Id;
-        DialogIds[pair] = id;
-        return id;
+        DialogIds[pair] = dialogId;
+        return dialogId;
     }
 
     public async Task<bool> AreFriends(Guid me, Guid other, CancellationToken ct = default) =>
@@ -272,8 +278,8 @@ public sealed class DirectChatService(AppDbContext db, IObjectStorage storage, M
         if (SystemChatService.IsSystemUser(peerId))
             throw new InvalidOperationException("Системный чат JaeZoo только для чтения.");
 
-        var dialogId = await GetOrCreateDialogIdAsync(senderId, peerId, ct);
-        var group = await mls.RequireMessageContextAsync(senderId, dialogId, null, request.DeviceId, request.Epoch, request.Ciphertext, ct);
+        var dialogId = await FindDialogIdForSendAsync(senderId, peerId, ct);
+        var group = await mls.RequireMessageContextAsync(senderId, dialogId, null, request.DeviceId, request.Epoch, request.Ciphertext, ct, directPeerId: peerId);
         var files = await LoadAttachableFilesAsync(senderId, request.FileIds, requireClientEncrypted: true, ct);
 
         var now = DateTime.UtcNow;

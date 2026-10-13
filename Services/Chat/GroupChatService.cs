@@ -654,15 +654,14 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
     }
 
     /// <summary>User message: only an MLS ciphertext of the chat's MLS group is accepted.</summary>
-    public async Task<(GroupChat chat, GroupMessage message, MlsGroupEvent ev, MessageDto dto)> CreateUserMessageAsync(
+    public async Task<(Guid groupId, GroupMessage message, MlsGroupEvent ev, MessageDto dto)> CreateUserMessageAsync(
         Guid senderId,
         Guid groupId,
         SendMessageRequest request,
         CancellationToken ct = default)
     {
-        var chat = await GetChatForMemberAsync(groupId, senderId, ct)
-            ?? throw new InvalidOperationException("Group chat not found or access denied.");
-        var group = await mls.RequireMessageContextAsync(senderId, null, groupId, request.DeviceId, request.Epoch, request.Ciphertext, ct);
+        // Membership is checked inside the MLS context query: one round trip before the insert.
+        var group = await mls.RequireMessageContextAsync(senderId, null, groupId, request.DeviceId, request.Epoch, request.Ciphertext, ct, requireGroupMember: true);
 
         var ids = (request.FileIds ?? Array.Empty<Guid>()).Where(x => x != Guid.Empty).Distinct().Take(10).ToList();
         var files = ids.Count == 0 ? new List<ChatFile>() : await db.ChatFiles.Where(f => ids.Contains(f.Id)).ToListAsync(ct);
@@ -699,11 +698,17 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         }
 
         var ev = mls.AppendMessageEvent(group.Id, MlsEventKind.Message, message.Id, request.Epoch, senderId, request.DeviceId);
-        chat.UpdatedAt = now;
+        // UpdatedAt goes into the same batch through a key-only stub (the chat row is not read on the hot path).
+        var tracked = db.GroupChats.Local.FirstOrDefault(g => g.Id == groupId);
+        var chatStub = tracked ?? db.GroupChats.Attach(new GroupChat { Id = groupId }).Entity;
+        chatStub.UpdatedAt = now;
+        db.Entry(chatStub).Property(g => g.UpdatedAt).IsModified = true;
         await db.SaveChangesAsync(ct);
+        if (tracked is null)
+            db.Entry(chatStub).State = EntityState.Detached; // never let later reads in this request see the stub
         // One SaveChanges is atomic; the reply is built from what we wrote (no re-read on the hot path).
         var dto = ToMessageDto(message, files.Select(ToAttachmentDto).ToList(), group.Id);
-        return (chat, message, ev, dto);
+        return (groupId, message, ev, dto);
     }
 
     /// <summary>Edit = new MLS ciphertext for the same message id (re-delivered through the event log).</summary>

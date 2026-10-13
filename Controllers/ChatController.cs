@@ -329,20 +329,8 @@ public class ChatController(
         try
         {
             if (body is null) return BadRequest(new { error = "Body is required." });
-            // Friendship and the peer's verified e-mail in one round trip (hot path of every send).
+            // Friendship and the peer's verified e-mail are checked inside the MLS context query (one round trip).
             var me = MeId;
-            var peer = await db.Users.AsNoTracking()
-                .Where(u => u.Id == friendId)
-                .Select(u => new
-                {
-                    u.EmailConfirmed,
-                    Friends = db.Friendships.Any(f => f.Status == FriendshipStatus.Accepted &&
-                        ((f.RequesterId == me && f.AddresseeId == friendId) || (f.RequesterId == friendId && f.AddresseeId == me)))
-                })
-                .FirstOrDefaultAsync(ct);
-            if (peer is null || !peer.Friends) return Forbid();
-            if (!peer.EmailConfirmed) return StatusCode(StatusCodes.Status403Forbidden, new { code = "email_not_verified", message = "Собеседник ещё не подтвердил почту. Переписка пока недоступна." });
-
             var created = await chat.CreateUserMessageAsync(me, friendId, body, ct);
             var dto = created.dto;
 
@@ -351,7 +339,7 @@ public class ChatController(
         }
         catch (MlsDeliveryException ex)
         {
-            return StatusCode(ex.StatusCode, new { code = ex.Code, error = ex.Message });
+            return StatusCode(ex.StatusCode, new { code = ex.Code, error = ex.Message, message = ex.Message });
         }
         catch (Exception ex)
         {
@@ -1278,21 +1266,25 @@ public class ChatController(
         return query;
     }
 
-    private async Task BroadcastGroupCreated(Guid groupId, MessageDto dto, CancellationToken ct)
+    private Task BroadcastGroupCreated(Guid groupId, MessageDto dto, CancellationToken ct)
     {
-        var memberIds = await GetGroupMemberIdsAsync(groupId, ct);
-        await hub.Clients.Users(memberIds.Select(m => m.ToString()).ToList()).SendAsync("GroupChatMessageCreated", new GroupChatRealtimeMessageDto(groupId, dto), ct);
-
+        // The member list costs a database round trip: fetched after the reply, not before it.
         var senderId = dto.SenderId;
-        RunInBackground("group unread", async sp =>
+        RunInBackground("group message broadcast", async sp =>
         {
             var groups = sp.GetRequiredService<GroupChatService>();
+            var memberIds = await sp.GetRequiredService<AppDbContext>().GroupChatMembers.AsNoTracking()
+                .Where(m => m.GroupChatId == groupId)
+                .Select(m => m.UserId)
+                .ToListAsync();
+            await hub.Clients.Users(memberIds.Select(m => m.ToString()).ToList()).SendAsync("GroupChatMessageCreated", new GroupChatRealtimeMessageDto(groupId, dto));
             foreach (var memberId in memberIds.Where(x => x != senderId))
             {
                 var unread = await groups.GetUnreadForUserAsync(groupId, memberId);
                 await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatUnreadChanged", new GroupChatUnreadChangedDto(groupId, unread.count, unread.firstId, unread.firstAt));
             }
         });
+        return Task.CompletedTask;
     }
 
     private async Task BroadcastGroupUpdatedMessage(Guid groupId, MessageDto dto, CancellationToken ct)

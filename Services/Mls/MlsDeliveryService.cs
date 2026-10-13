@@ -543,12 +543,15 @@ public sealed class MlsDeliveryService(AppDbContext db, AuthStateCache? authCach
     /// group exists, the sender device is an active leaf, and the epoch is recent.
     /// </summary>
     public async Task<MlsGroupState> RequireMessageContextAsync(
-        Guid senderId, Guid? dialogId, Guid? groupChatId, Guid deviceId, long epoch, byte[]? ciphertext, CancellationToken ct)
+        Guid senderId, Guid? dialogId, Guid? groupChatId, Guid deviceId, long epoch, byte[]? ciphertext, CancellationToken ct,
+        Guid? directPeerId = null, bool requireGroupMember = false)
     {
         if (ciphertext is not { Length: > 0 and <= MaxMessageBytes })
             throw MlsDeliveryException.Invalid("Сообщение должно быть зашифровано (MLS).");
 
-        // Hot path of every send: group, device and leaf membership in one database round trip.
+        // Hot path of every send: group, device, leaf membership and (direct chats) the peer rules in one round trip.
+        var hasPeer = directPeerId.HasValue;
+        var peerId = directPeerId ?? Guid.Empty;
         var groups = db.MlsGroups.AsNoTracking();
         groups = dialogId.HasValue ? groups.Where(g => g.DialogId == dialogId) : groups.Where(g => g.GroupChatId == groupChatId);
         var row = await groups
@@ -557,11 +560,21 @@ public sealed class MlsDeliveryService(AppDbContext db, AuthStateCache? authCach
                 Group = g,
                 DeviceActive = db.UserDevices.Any(d => d.Id == deviceId && d.UserId == senderId && d.RevokedAt == null),
                 IsLeaf = db.MlsGroupMembers.Any(m => m.GroupId == g.Id && m.DeviceId == deviceId),
+                Friends = !hasPeer || db.Friendships.Any(f => f.Status == FriendshipStatus.Accepted &&
+                    ((f.RequesterId == senderId && f.AddresseeId == peerId) || (f.RequesterId == peerId && f.AddresseeId == senderId))),
+                PeerVerified = !hasPeer || db.Users.Any(u => u.Id == peerId && u.EmailConfirmed),
+                IsMember = !requireGroupMember || db.GroupChatMembers.Any(m => m.GroupChatId == groupChatId && m.UserId == senderId),
             })
             .FirstOrDefaultAsync(ct);
 
         if (row is null)
             throw new MlsDeliveryException("no_group", "Для чата ещё не создана MLS-группа.", 409);
+        if (!row.IsMember)
+            throw new MlsDeliveryException("not_member", "Вы не состоите в этой группе.", 403);
+        if (!row.Friends)
+            throw new MlsDeliveryException("not_friends", "Переписка доступна только с друзьями.", 403);
+        if (!row.PeerVerified)
+            throw new MlsDeliveryException("email_not_verified", "Собеседник ещё не подтвердил почту. Переписка пока недоступна.", 403);
         if (!row.DeviceActive)
             throw new MlsDeliveryException("device_inactive", "Устройство не зарегистрировано или отозвано.", 403);
         if (!row.IsLeaf)
