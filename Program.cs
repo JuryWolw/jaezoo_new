@@ -257,15 +257,36 @@ builder.Services.AddResponseCaching();
 // ---------- Rate limiting ----------
 builder.Services.AddRateLimiter(options =>
 {
+    // Общий лимит: по пользователю (вошедшие), по IP — только для анонимных запросов.
+    // Раньше было 100 в минуту на IP для всего: обычная загрузка клиента (друзья, история, аватарки) в него упиралась,
+    // а пользователи за одним NAT делили лимит.
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
-        RateLimitPartition.GetFixedWindowLimiter(
-            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+    {
+        var key = RateLimitKey(ctx);
+        return RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: key,
             factory: _ => new FixedWindowRateLimiterOptions
             {
-                PermitLimit = 100,
+                PermitLimit = key.StartsWith("u:", StringComparison.Ordinal) ? 600 : 300,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0
-            }));
+            });
+    });
+
+    // Отказ — 429 с временем ожидания и понятным текстом (по умолчанию было 503, клиент принимал это за сбой сервера).
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = async (context, ct) =>
+    {
+        var retryAfter = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var ra) ? ra : TimeSpan.FromSeconds(10);
+        var seconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
+        context.HttpContext.Response.Headers.RetryAfter = seconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        await context.HttpContext.Response.WriteAsJsonAsync(new
+        {
+            code = "rate_limited",
+            retryAfterSeconds = seconds,
+            message = $"Слишком часто. Подождите {seconds} с."
+        }, ct);
+    };
 
     options.AddPolicy("auth", httpContext =>
         RateLimitPartition.GetFixedWindowLimiter(
@@ -287,16 +308,17 @@ builder.Services.AddRateLimiter(options =>
                 QueueLimit = 0
             }));
 
+    // Сообщения: «ведро» на 15 штук подряд, дальше одно в 2 секунды (≈30 в минуту) — живой разговор не упирается,
+    // спам и боты упираются быстро, а клиент получает точное время ожидания (Retry-After).
     options.AddPolicy("chat-write", httpContext =>
-        RateLimitPartition.GetFixedWindowLimiter(
-            partitionKey: httpContext.User.FindFirst("sub")?.Value
-                          ?? httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
-                          ?? httpContext.Connection.RemoteIpAddress?.ToString()
-                          ?? "unknown",
-            factory: _ => new FixedWindowRateLimiterOptions
+        RateLimitPartition.GetTokenBucketLimiter(
+            partitionKey: RateLimitKey(httpContext),
+            factory: _ => new TokenBucketRateLimiterOptions
             {
-                PermitLimit = 25,
-                Window = TimeSpan.FromMinutes(1),
+                TokenLimit = 15,
+                TokensPerPeriod = 1,
+                ReplenishmentPeriod = TimeSpan.FromSeconds(2),
+                AutoReplenishment = true,
                 QueueLimit = 0
             }));
 
@@ -308,7 +330,7 @@ builder.Services.AddRateLimiter(options =>
                           ?? "unknown",
             factory: _ => new FixedWindowRateLimiterOptions
             {
-                PermitLimit = 10,
+                PermitLimit = 20, // альбом до 10 фото + запас
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0
             }));
@@ -549,8 +571,9 @@ if (swaggerEnabled)
 app.UseResponseCompression();
 app.UseResponseCaching();
 
-app.UseRateLimiter();
+// Ограничитель — после проверки токена: лимиты считаются по пользователю, а не по IP.
 app.UseAuthentication();
+app.UseRateLimiter();
 app.UseAuthorization();
 
 app.UseMiddleware<LastSeenMiddleware>();
@@ -570,6 +593,13 @@ app.MapHub<CallsHub>("/hubs/calls");
 app.MapGet("/", () => Results.Ok(new { service = "JaeZoo.Server", status = "ok", swagger = swaggerEnabled }));
 
 app.Run();
+
+// Ключ лимита запросов: вошедший пользователь — по id, иначе по IP (за Caddy — реальный IP из X-Forwarded-For).
+static string RateLimitKey(HttpContext ctx)
+{
+    var uid = ctx.User.FindFirst("sub")?.Value ?? ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    return !string.IsNullOrEmpty(uid) ? "u:" + uid : "ip:" + (ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown");
+}
 
 
 
