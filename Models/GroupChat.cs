@@ -24,6 +24,15 @@ public class GroupChat
     [MaxLength(512)]
     public string? AvatarUrl { get; set; }
 
+    /// <summary>Группа или канал. Задаётся при создании и не меняется.</summary>
+    public GroupChatKind Kind { get; set; } = GroupChatKind.Group;
+
+    /// <summary>Канал: подпись автора под постом (иначе пост — от имени канала).</summary>
+    public bool SignPosts { get; set; }
+
+    /// <summary>Канал: закреплённый пост.</summary>
+    public Guid? PinnedMessageId { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;

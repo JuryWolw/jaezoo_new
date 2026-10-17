@@ -534,11 +534,20 @@ namespace JaeZoo.Server.Migrations
                         .HasColumnType("boolean")
                         .HasDefaultValue(false);
 
+                    b.Property<int>("Kind")
+                        .HasColumnType("integer");
+
                     b.Property<int>("MemberLimit")
                         .HasColumnType("integer");
 
                     b.Property<Guid>("OwnerId")
                         .HasColumnType("uuid");
+
+                    b.Property<Guid?>("PinnedMessageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("SignPosts")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("Title")
                         .IsRequired()
@@ -552,9 +561,99 @@ namespace JaeZoo.Server.Migrations
 
                     b.HasIndex("IsPublic");
 
+                    b.HasIndex("Kind", "IsPublic");
+
                     b.HasIndex("OwnerId", "CreatedAt");
 
                     b.ToTable("GroupChats");
+                });
+
+            modelBuilder.Entity("JaeZoo.Server.Models.GroupBan", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("BannedById")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("GroupChatId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("GroupChatId", "UserId")
+                        .IsUnique();
+
+                    b.ToTable("GroupBans");
+                });
+
+            modelBuilder.Entity("JaeZoo.Server.Models.GroupInvite", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("CreatedById")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("GroupChatId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int?>("MaxUses")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Uses")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Code")
+                        .IsUnique();
+
+                    b.HasIndex("GroupChatId");
+
+                    b.ToTable("GroupInvites");
+                });
+
+            modelBuilder.Entity("JaeZoo.Server.Models.GroupMessageView", b =>
+                {
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("ViewedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("MessageId", "UserId");
+
+                    b.ToTable("GroupMessageViews");
                 });
 
             modelBuilder.Entity("JaeZoo.Server.Models.GroupChatMember", b =>

@@ -50,6 +50,26 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return false;
     }
 
+    // ---------- Каналы ----------
+
+    /// <summary>Открытый канал читают все (в том числе до вступления), посты — публичный контент открытым текстом.</summary>
+    public static bool IsPublicChannel(GroupChat chat) => chat.Kind == GroupChatKind.Channel && chat.IsPublic;
+
+    /// <summary>В канале пишут владелец, админы и модераторы; в группе — все участники.</summary>
+    public static bool CanPost(GroupChat chat, GroupChatMember? member) =>
+        member is not null && (chat.Kind != GroupChatKind.Channel || chat.OwnerId == member.UserId || member.Role >= GroupChatRole.Moderator);
+
+    /// <summary>Бан и удаление чужих постов: владелец, админы, модераторы.</summary>
+    public static bool CanModerate(GroupChat chat, GroupChatMember? member) =>
+        member is not null && (chat.OwnerId == member.UserId || member.Role >= GroupChatRole.Moderator);
+
+    /// <summary>Закрытый канал — MLS-группа (каждое вступление — commit), поэтому лимит скромнее, чем у открытого.</summary>
+    public static int MemberLimitFor(GroupChatKind kind, bool isPublic) =>
+        kind == GroupChatKind.Channel ? (isPublic ? 100_000 : 500) : MaxGroupMembers;
+
+    private Task<bool> IsBannedAsync(Guid groupId, Guid userId, CancellationToken ct) =>
+        db.GroupBans.AsNoTracking().AnyAsync(b => b.GroupChatId == groupId && b.UserId == userId, ct);
+
     public async Task<bool> IsMemberAsync(Guid groupId, Guid userId, CancellationToken ct = default) =>
         await db.GroupChatMembers.AsNoTracking().AnyAsync(m => m.GroupChatId == groupId && m.UserId == userId, ct);
 
@@ -89,8 +109,10 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         return (chat, message);
     }
 
-    public async Task<GroupChat> CreateChatAsync(Guid ownerId, string? title, string? description, IReadOnlyCollection<Guid>? memberIds, bool isPublic = false, CancellationToken ct = default)
+    public async Task<GroupChat> CreateChatAsync(Guid ownerId, string? title, string? description, IReadOnlyCollection<Guid>? memberIds, bool isPublic = false, CancellationToken ct = default,
+        GroupChatKind kind = GroupChatKind.Group, bool signPosts = false)
     {
+        var memberLimit = MemberLimitFor(kind, isPublic);
         var normalizedTitle = (title ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(normalizedTitle))
             throw new InvalidOperationException("Title is required.");
@@ -103,8 +125,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             .Distinct()
             .ToList();
 
-        if (requested.Count + 1 > MaxGroupMembers)
-            throw new InvalidOperationException($"Group member limit is {MaxGroupMembers}.");
+        if (requested.Count + 1 > memberLimit)
+            throw new InvalidOperationException($"Group member limit is {memberLimit}.");
 
         if (requested.Count > 0)
         {
@@ -135,7 +157,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             Title = normalizedTitle,
             Description = normalizedDescription,
             OwnerId = ownerId,
-            MemberLimit = MaxGroupMembers,
+            MemberLimit = memberLimit,
+            Kind = kind,
+            SignPosts = signPosts,
             IsPublic = isPublic,
             CreatedAt = now,
             UpdatedAt = now
@@ -183,7 +207,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
         chat.Title = normalizedTitle;
         chat.Description = NormalizeDescription(description);
-        if (isPublic.HasValue)
+        // Канал не меняет тип: история открытого канала — открытый текст, закрытого — MLS.
+        if (isPublic.HasValue && chat.Kind == GroupChatKind.Group)
             chat.IsPublic = isPublic.Value;
         chat.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -239,6 +264,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
         if (currentMembers.Count + requested.Count > chat.MemberLimit)
             throw new InvalidOperationException($"Group member limit is {chat.MemberLimit}.");
+
+        if (await db.GroupBans.AsNoTracking().AnyAsync(b => b.GroupChatId == groupId && requested.Contains(b.UserId), ct))
+            throw new InvalidOperationException("Пользователь заблокирован в этом чате — сначала снимите бан.");
 
         var acceptedFriendIds = await db.Friendships
             .AsNoTracking()
@@ -413,25 +441,25 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         }).ToList();
     }
 
-    public async Task<GroupChatSummaryDto?> GetSummaryAsync(Guid groupId, Guid me, CancellationToken ct = default)
+    /// <summary>Сводка чата для пользователя. Открытый канал (allowPublicPreview) видно и до вступления.</summary>
+    public async Task<GroupChatSummaryDto?> GetSummaryAsync(Guid groupId, Guid me, CancellationToken ct = default, bool allowPublicPreview = false)
     {
-        if (!await IsMemberAsync(groupId, me, ct))
-            return null;
-
         var chat = await db.GroupChats.AsNoTracking().FirstOrDefaultAsync(g => g.Id == groupId, ct);
         if (chat is null)
             return null;
 
         var member = await db.GroupChatMembers.AsNoTracking().FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == me, ct);
-        if (member is null)
+        if (member is null && !(allowPublicPreview && IsPublicChannel(chat)))
             return null;
 
-        var myRole = GetEffectiveRole(chat, member);
+        var myRole = member is null ? GroupChatRole.Member : GetEffectiveRole(chat, member);
         var memberCount = await db.GroupChatMembers.AsNoTracking().CountAsync(m => m.GroupChatId == groupId, ct);
         var lastMessageQuery = db.GroupMessages
             .AsNoTracking()
             .Where(m => m.GroupChatId == groupId);
 
+        // История открытого канала видна целиком; в группе и закрытом канале — с момента вступления.
+        if (member is not null && !IsPublicChannel(chat))
         {
             var joinedAt = DirectChatService.EnsureUtc(member.JoinedAt);
             lastMessageQuery = lastMessageQuery.Where(m => m.SentAt >= joinedAt);
@@ -446,7 +474,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         if (lastMessage is not null)
             lastMessageDto = await GetMessageDtoAsync(groupId, lastMessage.Id, ct);
 
-        var unread = await GetUnreadForUserAsync(groupId, me, ct);
+        var unread = member is null ? (0, null, null) : await GetUnreadForUserAsync(groupId, me, ct);
+        var canEdit = member is not null && CanEditGroup(chat, member);
         return new GroupChatSummaryDto(
             chat.Id,
             chat.Title,
@@ -463,21 +492,28 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             GroupChatRoleInfo.GetDisplayName(myRole),
             GroupChatRoleInfo.GetColorHex(myRole),
             GroupChatRoleInfo.GetColorName(myRole),
-            CanEditGroup(chat, member),
-            CanEditGroup(chat, member),
-            CanManageRoles(chat, member),
+            canEdit,
+            canEdit,
+            member is not null && CanManageRoles(chat, member),
             unread.count,
             unread.firstId,
             unread.firstAt,
             chat.IsPublic,
-            true);
+            member is not null)
+        {
+            Kind = chat.Kind,
+            SignPosts = chat.SignPosts,
+            PinnedMessageId = chat.PinnedMessageId,
+            CanPost = CanPost(chat, member),
+            CanModerate = CanModerate(chat, member)
+        };
     }
 
-    public async Task<List<GroupChatSummaryDto>> ListForUserAsync(Guid me, CancellationToken ct = default)
+    public async Task<List<GroupChatSummaryDto>> ListForUserAsync(Guid me, CancellationToken ct = default, GroupChatKind kind = GroupChatKind.Group)
     {
         var groupIds = await db.GroupChatMembers
             .AsNoTracking()
-            .Where(m => m.UserId == me)
+            .Where(m => m.UserId == me && db.GroupChats.Any(g => g.Id == m.GroupChatId && g.Kind == kind))
             .OrderByDescending(m => m.JoinedAt)
             .Select(m => m.GroupChatId)
             .Distinct()
@@ -498,7 +534,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
     }
 
 
-    public async Task<List<PublicGroupSearchDto>> SearchPublicAsync(Guid me, string? query, int take = 30, CancellationToken ct = default)
+    public async Task<List<PublicGroupSearchDto>> SearchPublicAsync(Guid me, string? query, int take = 30, CancellationToken ct = default, GroupChatKind kind = GroupChatKind.Group)
     {
         var q = (query ?? string.Empty).Trim();
         if (q.Length < 2)
@@ -517,7 +553,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         var hasGuid = Guid.TryParse(q, out var queryGuid);
         var groups = await db.GroupChats
             .AsNoTracking()
-            .Where(g => g.IsPublic &&
+            .Where(g => g.IsPublic && g.Kind == kind &&
                 ((hasGuid && g.Id == queryGuid) || g.Title.ToLower().Contains(lower) || (g.Description != null && g.Description.ToLower().Contains(lower))))
             .OrderBy(g => hasGuid && g.Id == queryGuid ? 0 : 1)
             .ThenBy(g => g.Title)
@@ -543,7 +579,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             g.CreatedAt,
             g.UpdatedAt,
             g.IsPublic,
-            memberSet.Contains(g.Id))).ToList();
+            memberSet.Contains(g.Id)) { Kind = g.Kind }).ToList();
     }
 
     public async Task<GroupChat> JoinPublicAsync(Guid groupId, Guid me, CancellationToken ct = default)
@@ -553,6 +589,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
         if (!chat.IsPublic)
             throw new InvalidOperationException("This group is private. You can join it only by invite.");
+        if (await IsBannedAsync(groupId, me, ct))
+            throw new InvalidOperationException("Вы заблокированы в этом чате.");
 
         var isAlreadyMember = await db.GroupChatMembers.AnyAsync(m => m.GroupChatId == groupId && m.UserId == me, ct);
         if (isAlreadyMember)

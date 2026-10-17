@@ -315,6 +315,9 @@ public sealed class MlsDeliveryService(AppDbContext db, AuthStateCache? authCach
                 .Select(m => m.UserId)
                 .ToListAsync(ct);
             if (!members.Contains(me)) throw MlsDeliveryException.Forbidden();
+            // Открытый канал — публичный контент без MLS-группы (см. docs/MLS_ARCHITECTURE.md, «Каналы»).
+            if (await db.GroupChats.AsNoTracking().AnyAsync(c => c.Id == conversationId && c.Kind == GroupChatKind.Channel && c.IsPublic, ct))
+                throw new MlsDeliveryException("public_channel", "У открытого канала нет шифрования: посты публичные.", 400);
             return (members, null, conversationId);
         }
 
@@ -564,6 +567,11 @@ public sealed class MlsDeliveryService(AppDbContext db, AuthStateCache? authCach
                     ((f.RequesterId == senderId && f.AddresseeId == peerId) || (f.RequesterId == peerId && f.AddresseeId == senderId))),
                 PeerVerified = !hasPeer || db.Users.Any(u => u.Id == peerId && u.EmailConfirmed),
                 IsMember = !requireGroupMember || db.GroupChatMembers.Any(m => m.GroupChatId == groupChatId && m.UserId == senderId),
+                // Канал: пишут только владелец, админы и модераторы (подписчики читают).
+                CanPost = !groupChatId.HasValue || !db.GroupChats.Any(c => c.Id == groupChatId && c.Kind == GroupChatKind.Channel
+                    && c.OwnerId != senderId
+                    && !db.GroupChatMembers.Any(m => m.GroupChatId == groupChatId && m.UserId == senderId && m.Role >= GroupChatRole.Moderator)),
+                IsPublicChannel = groupChatId.HasValue && db.GroupChats.Any(c => c.Id == groupChatId && c.Kind == GroupChatKind.Channel && c.IsPublic),
             })
             .FirstOrDefaultAsync(ct);
 
@@ -571,6 +579,10 @@ public sealed class MlsDeliveryService(AppDbContext db, AuthStateCache? authCach
             throw new MlsDeliveryException("no_group", "Для чата ещё не создана MLS-группа.", 409);
         if (!row.IsMember)
             throw new MlsDeliveryException("not_member", "Вы не состоите в этой группе.", 403);
+        if (row.IsPublicChannel)
+            throw new MlsDeliveryException("public_channel", "Посты открытого канала публикуются открытым текстом.", 400);
+        if (!row.CanPost)
+            throw new MlsDeliveryException("cannot_post", "Писать в канал могут только админы и модераторы.", 403);
         if (!row.Friends)
             throw new MlsDeliveryException("not_friends", "Переписка доступна только с друзьями.", 403);
         if (!row.PeerVerified)

@@ -1205,8 +1205,14 @@ public class ChatController(
         {
             var msg = await db.GroupMessages.FirstOrDefaultAsync(m => m.Id == messageId, ct);
             if (msg is null) return NotFound(new { error = "Message not found." });
-            if (msg.SenderId != MeId) return Forbid();
-            if (!await groupChats.IsMemberAsync(msg.GroupChatId, MeId, ct)) return Forbid();
+            if (msg.SenderId != MeId)
+            {
+                // Чужой пост удаляет только модератор канала (владелец, админ, модератор).
+                var chat = await db.GroupChats.AsNoTracking().FirstOrDefaultAsync(g => g.Id == msg.GroupChatId, ct);
+                var actor = await db.GroupChatMembers.AsNoTracking().FirstOrDefaultAsync(m => m.GroupChatId == msg.GroupChatId && m.UserId == MeId, ct);
+                if (chat is null || chat.Kind != GroupChatKind.Channel || !GroupChatService.CanModerate(chat, actor)) return Forbid();
+            }
+            else if (!await groupChats.IsMemberAsync(msg.GroupChatId, MeId, ct)) return Forbid();
             if (msg.DeletedAt.HasValue) return Ok(new { ok = true });
 
             var attachedFileIds = await db.GroupMessageAttachments

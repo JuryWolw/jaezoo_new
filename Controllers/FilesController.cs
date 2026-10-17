@@ -92,6 +92,18 @@ public class FilesController(
         if (canAccessDirect)
             return true;
 
+        // Вложения открытого канала публичные: их видит любой, кто может читать канал (кроме заблокированных).
+        var inPublicChannel = await (
+            from a in db.GroupMessageAttachments.AsNoTracking()
+            join m in db.GroupMessages.AsNoTracking() on a.MessageId equals m.Id
+            join g in db.GroupChats.AsNoTracking() on m.GroupChatId equals g.Id
+            where a.FileId == fileId && g.Kind == GroupChatKind.Channel && g.IsPublic
+                  && !db.GroupBans.Any(b => b.GroupChatId == g.Id && b.UserId == me)
+            select a.Id
+        ).AnyAsync(ct);
+        if (inPublicChannel)
+            return true;
+
         return await (
             from a in db.GroupMessageAttachments.AsNoTracking()
             join m in db.GroupMessages.AsNoTracking() on a.MessageId equals m.Id

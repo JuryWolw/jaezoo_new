@@ -20,6 +20,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GroupChat> GroupChats => Set<GroupChat>();
     public DbSet<GroupChatMember> GroupChatMembers => Set<GroupChatMember>();
     public DbSet<GroupMessage> GroupMessages => Set<GroupMessage>();
+    public DbSet<GroupBan> GroupBans => Set<GroupBan>();
+    public DbSet<GroupInvite> GroupInvites => Set<GroupInvite>();
+    public DbSet<GroupMessageView> GroupMessageViews => Set<GroupMessageView>();
     public DbSet<GroupMessageAttachment> GroupMessageAttachments => Set<GroupMessageAttachment>();
     public DbSet<GroupAvatar> GroupAvatars => Set<GroupAvatar>();
     public DbSet<GroupVoiceSession> GroupVoiceSessions => Set<GroupVoiceSession>();
@@ -84,6 +87,14 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<GroupChat>()
             .HasIndex(g => g.IsPublic);
+
+        // ---------- Каналы ----------
+        b.Entity<GroupChat>().Property(g => g.Kind).HasConversion<int>();
+        b.Entity<GroupChat>().HasIndex(g => new { g.Kind, g.IsPublic });
+        b.Entity<GroupBan>().HasIndex(x => new { x.GroupChatId, x.UserId }).IsUnique();
+        b.Entity<GroupInvite>().HasIndex(x => x.Code).IsUnique();
+        b.Entity<GroupInvite>().HasIndex(x => x.GroupChatId);
+        b.Entity<GroupMessageView>().HasKey(x => new { x.MessageId, x.UserId });
 
 
         // ---------- MLS delivery service ----------

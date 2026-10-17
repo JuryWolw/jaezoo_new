@@ -250,7 +250,18 @@ public record GroupChatSummaryDto(
     DateTime? FirstUnreadAt = null,
     bool IsPublic = false,
     bool IsMember = true
-);
+)
+{
+    /// <summary>Группа или канал.</summary>
+    public GroupChatKind Kind { get; init; }
+    /// <summary>Канал: подпись автора под постами.</summary>
+    public bool SignPosts { get; init; }
+    public Guid? PinnedMessageId { get; init; }
+    /// <summary>Канал: может ли пользователь публиковать посты (владелец, админ, модератор).</summary>
+    public bool CanPost { get; init; } = true;
+    /// <summary>Канал: может ли банить и удалять чужие посты (владелец, админ, модератор).</summary>
+    public bool CanModerate { get; init; }
+}
 
 public record GroupChatDetailsDto(GroupChatSummaryDto Chat, IReadOnlyList<GroupChatMemberDto> Members);
 
@@ -266,7 +277,10 @@ public record PublicGroupSearchDto(
     DateTime UpdatedAt,
     bool IsPublic,
     bool IsMember
-);
+)
+{
+    public GroupChatKind Kind { get; init; }
+}
 public record GroupUnreadChatDto(Guid GroupId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt)
 {
     public Guid? LastReadByOtherMessageId { get; init; }
@@ -547,3 +561,30 @@ public sealed record TwoFactorEmailCodeResponse(
 
 public record FileCloneRequest(IReadOnlyList<Guid> FileIds);
 public record FileCloneResult(Guid SourceId, Guid FileId);
+
+// ---------- Каналы ----------
+
+public record CreateChannelRequest(string Title, string? Description = null, bool IsPublic = true, bool SignPosts = false);
+public record UpdateChannelRequest(string Title, string? Description = null, bool SignPosts = false);
+
+/// <summary>Пост открытого канала: открытый текст (публичный контент) и незашифрованные вложения.</summary>
+public record PublicPostRequest(string? Text, IReadOnlyList<Guid>? FileIds = null);
+public record EditPublicPostRequest(string Text);
+
+public record PinPostRequest(Guid? MessageId);
+public record MarkPostsViewedRequest(IReadOnlyList<Guid> MessageIds);
+
+/// <summary>Лента канала: посты и число просмотров каждого.</summary>
+public record ChannelPostsDto(IReadOnlyList<MessageDto> Posts, IReadOnlyDictionary<Guid, int> Views);
+
+/// <summary>Канал глазами пользователя (в том числе ещё не вступившего в открытый канал).</summary>
+public record ChannelDetailsDto(GroupChatSummaryDto Channel, bool IsMember, bool IsBanned);
+
+public record BanMemberRequest(string? Reason);
+public record ChannelBanDto(Guid UserId, string UserName, string? AvatarUrl, DateTime CreatedAt, string? Reason);
+
+public record CreateInviteRequest(int? ExpiresInHours = null, int? MaxUses = null);
+public record InviteDto(Guid Id, string Code, string Url, DateTime CreatedAt, DateTime? ExpiresAt, int? MaxUses, int Uses, bool IsActive);
+
+/// <summary>Предпросмотр по ссылке-приглашению: что за чат, сколько участников, состоит ли уже пользователь.</summary>
+public record InvitePreviewDto(Guid ChatId, GroupChatKind Kind, string Title, string? Description, string? AvatarUrl, int MemberCount, bool IsMember);
