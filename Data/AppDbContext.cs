@@ -27,6 +27,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<UserRole> UserRoles => Set<UserRole>();
     public DbSet<AdminAuditLog> AdminAuditLogs => Set<AdminAuditLog>();
     public DbSet<AdminBroadcast> AdminBroadcasts => Set<AdminBroadcast>();
+    public DbSet<NewsPost> NewsPosts => Set<NewsPost>();
     public DbSet<UserSession> UserSessions => Set<UserSession>();
     public DbSet<EmailVerificationCode> EmailVerificationCodes => Set<EmailVerificationCode>();
     public DbSet<ModerationBan> ModerationBans => Set<ModerationBan>();
@@ -229,6 +230,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<AdminBroadcast>().HasIndex(x => x.CreatedAt);
         b.Entity<AdminBroadcast>().HasIndex(x => x.TargetUserId);
+        b.Entity<NewsPost>().HasIndex(x => x.PublishedAt);
+        b.Entity<NewsPost>().HasIndex(x => x.Version);
 
         b.Entity<AdminAuditLog>()
             .Property(a => a.ActorPublicId)

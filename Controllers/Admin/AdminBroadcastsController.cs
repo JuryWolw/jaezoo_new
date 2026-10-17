@@ -185,7 +185,7 @@ public sealed class AdminBroadcastsController(
             .ToListAsync(ct);
     }
 
-    private static async Task DeliverToSystemChatAsync(IServiceScopeFactory scopeFactory, ILogger logger, List<Guid> recipients, string text, List<Guid> fileIds)
+    internal static async Task DeliverToSystemChatAsync(IServiceScopeFactory scopeFactory, ILogger logger, List<Guid> recipients, string text, List<Guid> fileIds)
     {
         var delivered = 0;
         foreach (var chunk in recipients.Chunk(50))

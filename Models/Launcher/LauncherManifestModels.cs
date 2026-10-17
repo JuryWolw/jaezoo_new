@@ -12,6 +12,9 @@ public sealed class LauncherManifest
     /// Пусто у старых манифестов — тогда используется {channel}/{area}/package.zip.
     /// </summary>
     public string? PackageKey { get; set; }
+
+    /// <summary>Список изменений релиза (ReleaseTool). Сервер публикует из него новость «Обновление x.y.z».</summary>
+    public string? ReleaseNotes { get; set; }
     public List<LauncherManifestFile> Files { get; set; } = new();
 }
 

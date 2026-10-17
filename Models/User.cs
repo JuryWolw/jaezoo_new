@@ -117,5 +117,8 @@ namespace JaeZoo.Server.Models
         public DateTime? CurrentActivityUpdatedAt { get; set; }
 
         public DateTime? LastSeen { get; set; } // обновляем на каждом авторизованном запросе
+
+        /// <summary>Время публикации последней новости, которую пользователь видел (точка «новое» на вкладке).</summary>
+        public DateTime? LastSeenNewsAt { get; set; }
     }
 }

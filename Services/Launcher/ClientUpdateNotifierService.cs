@@ -1,4 +1,5 @@
 using JaeZoo.Server.Hubs;
+using JaeZoo.Server.Services.News;
 using Microsoft.AspNetCore.SignalR;
 
 namespace JaeZoo.Server.Services.Launcher;
@@ -7,6 +8,7 @@ namespace JaeZoo.Server.Services.Launcher;
 /// Следит за манифестом клиента в бакете и, когда выходит новая версия, сообщает всем онлайн-клиентам
 /// через ChatHub событием <c>ClientUpdateAvailable</c> ({ version }). Клиент сам решает, новее ли это его версии.
 /// При старте сервера рассылки нет: клиенты проверяют версию сами при подключении.
+/// Если в манифесте есть список изменений, публикуется новость «Обновление x.y.z» (один раз на версию).
 /// </summary>
 public sealed class ClientUpdateNotifierService : BackgroundService
 {
@@ -17,16 +19,20 @@ public sealed class ClientUpdateNotifierService : BackgroundService
 
     private readonly ILauncherUpdateService _updates;
     private readonly IHubContext<ChatHub> _hub;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ClientUpdateNotifierService> _logger;
     private string? _knownVersion;
+    private string? _releasePostCheckedFor;
 
     public ClientUpdateNotifierService(
         ILauncherUpdateService updates,
         IHubContext<ChatHub> hub,
+        IServiceScopeFactory scopeFactory,
         ILogger<ClientUpdateNotifierService> logger)
     {
         _updates = updates;
         _hub = hub;
+        _scopeFactory = scopeFactory;
         _logger = logger;
     }
 
@@ -67,6 +73,13 @@ public sealed class ClientUpdateNotifierService : BackgroundService
         var version = manifest.Version?.Trim();
         if (string.IsNullOrWhiteSpace(version))
             return;
+
+        if (_releasePostCheckedFor != version)
+        {
+            using var scope = _scopeFactory.CreateScope();
+            await scope.ServiceProvider.GetRequiredService<NewsService>().EnsureReleasePostAsync(version, manifest.ReleaseNotes, cancellationToken);
+            _releasePostCheckedFor = version;
+        }
 
         if (_knownVersion == null)
         {
