@@ -100,6 +100,7 @@ public sealed class NewsService(AppDbContext db, IHubContext<ChatHub> hub, IServ
     {
         var plain = string.Join(' ', (body ?? string.Empty)
             .Split('\n')
+            .Where(l => !l.TrimStart().StartsWith("![", StringComparison.Ordinal))
             .Select(l => l.Trim().TrimStart('#', '-', ' ').Replace("**", string.Empty))
             .Where(l => l.Length > 0));
         return plain.Length <= max ? plain : plain[..max].TrimEnd() + "…";
