@@ -768,6 +768,74 @@ namespace JaeZoo.Server.Migrations
                     b.ToTable("GroupMessageAttachments");
                 });
 
+            modelBuilder.Entity("JaeZoo.Server.Models.HistoryAccessRequest", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("DeviceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<byte[]>("KeyPackage")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<Guid?>("ResolvedByDeviceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId", "Status");
+
+                    b.ToTable("HistoryAccessRequests");
+                });
+
+            modelBuilder.Entity("JaeZoo.Server.Models.HistoryGrant", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<byte[]>("Ciphertext")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("FromDeviceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("TargetDeviceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<byte[]>("Welcome")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TargetDeviceId");
+
+                    b.ToTable("HistoryGrants");
+                });
+
             modelBuilder.Entity("JaeZoo.Server.Models.HistoryRecord", b =>
                 {
                     b.Property<Guid>("UserId")
@@ -1929,6 +1997,24 @@ namespace JaeZoo.Server.Migrations
                     b.HasOne("JaeZoo.Server.Models.GroupMessage", null)
                         .WithMany("Attachments")
                         .HasForeignKey("MessageId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("JaeZoo.Server.Models.HistoryAccessRequest", b =>
+                {
+                    b.HasOne("JaeZoo.Server.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("JaeZoo.Server.Models.HistoryGrant", b =>
+                {
+                    b.HasOne("JaeZoo.Server.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

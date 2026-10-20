@@ -21,6 +21,12 @@ public sealed record UploadHistoryRequest(Guid DeviceId, IReadOnlyList<HistoryRe
 public sealed record UploadHistoryResult(int Stored, IReadOnlyList<Guid> Rejected);
 public sealed record HistoryRecordDto(Guid MessageId, byte[] Blob);
 public sealed record HistoryPageDto(IReadOnlyList<HistoryRecordDto> Records, string? Next, bool HasMore);
+public sealed record CreateAccessRequestRequest(Guid DeviceId, byte[] KeyPackage);
+public sealed record AccessRequestDto(Guid Id, Guid DeviceId, string DeviceName, string Platform, DateTime CreatedAt, byte[] KeyPackage);
+public sealed record ApproveAccessRequestRequest(Guid DeviceId, byte[] Welcome, byte[] Ciphertext);
+public sealed record DeclineAccessRequestRequest(Guid DeviceId);
+public sealed record SendGrantRequest(Guid DeviceId, Guid TargetDeviceId, byte[] Welcome, byte[] Ciphertext);
+public sealed record GrantDto(Guid Id, Guid FromDeviceId, byte[] Welcome, byte[] Ciphertext);
 
 /// <summary>
 /// Storage for multi-device history (see docs/MLS_ARCHITECTURE.md, «Перенос истории»). Holds only sealed blobs:
@@ -175,6 +181,137 @@ public sealed class HistoryService(AppDbContext db, MlsDeliveryService mls)
 
         var next = rows.Count == 0 ? after : rows[^1].UpdatedAt.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture);
         return new HistoryPageDto(rows.Where(r => r.Alive).Select(r => new HistoryRecordDto(r.MessageId, r.Blob)).ToList(), next, rows.Count == take);
+    }
+
+    // ---------- device link: a new device gets the history key from an own device ----------
+
+    public static readonly TimeSpan AccessRequestLifetime = TimeSpan.FromMinutes(15);
+    public const int MaxTransferBytes = 64 * 1024;
+    public const int MaxPendingGrantsPerDevice = 20;
+
+    /// <summary>A new device asks for the key. Earlier pending requests of the same device are replaced.</summary>
+    public async Task<HistoryAccessRequest> CreateAccessRequestAsync(Guid me, CreateAccessRequestRequest req, CancellationToken ct)
+    {
+        if (req.KeyPackage is not { Length: > 0 and <= MlsDeliveryService.MaxKeyPackageBytes })
+            throw new HistoryException("invalid", "Некорректный ключ устройства.");
+        await mls.RequireActiveDeviceAsync(me, req.DeviceId, ct);
+        if (!await db.HistoryVaults.AnyAsync(v => v.UserId == me, ct))
+            throw new HistoryException("no_vault", "Истории ещё нет: её не с чего переносить.", 404);
+
+        await db.HistoryAccessRequests
+            .Where(r => r.UserId == me && r.DeviceId == req.DeviceId && r.Status == HistoryAccessStatus.Pending)
+            .ExecuteDeleteAsync(ct);
+        var now = DateTime.UtcNow;
+        var request = new HistoryAccessRequest
+        {
+            UserId = me,
+            DeviceId = req.DeviceId,
+            KeyPackage = req.KeyPackage,
+            Status = HistoryAccessStatus.Pending,
+            CreatedAt = now,
+            ExpiresAt = now + AccessRequestLifetime,
+        };
+        db.HistoryAccessRequests.Add(request);
+        await db.SaveChangesAsync(ct);
+        return request;
+    }
+
+    /// <summary>Pending requests of the account's other active devices (for «Новый вход … — это вы?»).</summary>
+    public async Task<List<AccessRequestDto>> PendingAccessRequestsAsync(Guid me, Guid deviceId, CancellationToken ct)
+    {
+        await mls.RequireActiveDeviceAsync(me, deviceId, ct);
+        var now = DateTime.UtcNow;
+        return await (
+            from r in db.HistoryAccessRequests.AsNoTracking()
+            join d in db.UserDevices.AsNoTracking() on r.DeviceId equals d.Id
+            where r.UserId == me && r.Status == HistoryAccessStatus.Pending && r.ExpiresAt > now
+                  && r.DeviceId != deviceId && d.RevokedAt == null && d.UserId == me
+            orderby r.CreatedAt
+            select new AccessRequestDto(r.Id, r.DeviceId, d.Name, d.Platform, r.CreatedAt, r.KeyPackage)
+        ).ToListAsync(ct);
+    }
+
+    /// <summary>Status for the requesting device: 0 pending, 1 approved, 2 declined, 3 expired.</summary>
+    public async Task<int> AccessRequestStatusAsync(Guid me, Guid deviceId, Guid requestId, CancellationToken ct)
+    {
+        await mls.RequireActiveDeviceAsync(me, deviceId, ct);
+        var r = await db.HistoryAccessRequests.AsNoTracking().FirstOrDefaultAsync(x => x.Id == requestId && x.UserId == me && x.DeviceId == deviceId, ct)
+                ?? throw new HistoryException("not_found", "Запрос не найден.", 404);
+        return r.Status == HistoryAccessStatus.Pending && r.ExpiresAt <= DateTime.UtcNow ? 3 : (int)r.Status;
+    }
+
+    /// <summary>An own device approved: the request is closed and the grant is queued for the requesting device.</summary>
+    public async Task<HistoryAccessRequest> ApproveAccessRequestAsync(Guid me, Guid requestId, ApproveAccessRequestRequest req, CancellationToken ct)
+    {
+        ValidateTransfer(req.Welcome, req.Ciphertext);
+        await mls.RequireActiveDeviceAsync(me, req.DeviceId, ct);
+        var r = await RequirePendingAsync(me, requestId, req.DeviceId, ct);
+        await mls.RequireActiveDeviceAsync(me, r.DeviceId, ct);
+        var now = DateTime.UtcNow;
+        var closed = await db.HistoryAccessRequests
+            .Where(x => x.Id == r.Id && x.Status == HistoryAccessStatus.Pending)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, HistoryAccessStatus.Approved).SetProperty(x => x.ResolvedByDeviceId, req.DeviceId), ct);
+        if (closed != 1) throw new HistoryException("already_resolved", "Запрос уже обработан на другом устройстве.", 409);
+        db.HistoryGrants.Add(new HistoryGrant { UserId = me, TargetDeviceId = r.DeviceId, FromDeviceId = req.DeviceId, Welcome = req.Welcome, Ciphertext = req.Ciphertext, CreatedAt = now });
+        await db.SaveChangesAsync(ct);
+        r.Status = HistoryAccessStatus.Approved;
+        return r;
+    }
+
+    public async Task<HistoryAccessRequest> DeclineAccessRequestAsync(Guid me, Guid requestId, Guid deviceId, CancellationToken ct)
+    {
+        await mls.RequireActiveDeviceAsync(me, deviceId, ct);
+        var r = await RequirePendingAsync(me, requestId, deviceId, ct);
+        await db.HistoryAccessRequests
+            .Where(x => x.Id == r.Id && x.Status == HistoryAccessStatus.Pending)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, HistoryAccessStatus.Declined).SetProperty(x => x.ResolvedByDeviceId, deviceId), ct);
+        r.Status = HistoryAccessStatus.Declined;
+        return r;
+    }
+
+    private async Task<HistoryAccessRequest> RequirePendingAsync(Guid me, Guid requestId, Guid resolverDeviceId, CancellationToken ct)
+    {
+        var r = await db.HistoryAccessRequests.AsNoTracking().FirstOrDefaultAsync(x => x.Id == requestId && x.UserId == me, ct)
+                ?? throw new HistoryException("not_found", "Запрос не найден.", 404);
+        if (r.DeviceId == resolverDeviceId) throw new HistoryException("invalid", "Устройство не может подтвердить само себя.");
+        if (r.Status != HistoryAccessStatus.Pending) throw new HistoryException("already_resolved", "Запрос уже обработан на другом устройстве.", 409);
+        if (r.ExpiresAt <= DateTime.UtcNow) throw new HistoryException("expired", "Запрос устарел, начните заново на новом устройстве.", 410);
+        return r;
+    }
+
+    /// <summary>The changed key for another own device (after a revoke), without a request.</summary>
+    public async Task SendGrantAsync(Guid me, SendGrantRequest req, CancellationToken ct)
+    {
+        ValidateTransfer(req.Welcome, req.Ciphertext);
+        if (req.TargetDeviceId == req.DeviceId) throw new HistoryException("invalid", "Нельзя отправить ключ самому себе.");
+        await mls.RequireActiveDeviceAsync(me, req.DeviceId, ct);
+        await mls.RequireActiveDeviceAsync(me, req.TargetDeviceId, ct);
+        if (await db.HistoryGrants.CountAsync(g => g.TargetDeviceId == req.TargetDeviceId, ct) >= MaxPendingGrantsPerDevice)
+            throw new HistoryException("too_many", "У устройства слишком много непрочитанных ключей.", 429);
+        db.HistoryGrants.Add(new HistoryGrant { UserId = me, TargetDeviceId = req.TargetDeviceId, FromDeviceId = req.DeviceId, Welcome = req.Welcome, Ciphertext = req.Ciphertext });
+        await db.SaveChangesAsync(ct);
+    }
+
+    public async Task<List<GrantDto>> GrantsAsync(Guid me, Guid deviceId, CancellationToken ct)
+    {
+        await mls.RequireActiveDeviceAsync(me, deviceId, ct);
+        return await db.HistoryGrants.AsNoTracking()
+            .Where(g => g.UserId == me && g.TargetDeviceId == deviceId)
+            .OrderBy(g => g.CreatedAt)
+            .Select(g => new GrantDto(g.Id, g.FromDeviceId, g.Welcome, g.Ciphertext))
+            .ToListAsync(ct);
+    }
+
+    public async Task AckGrantAsync(Guid me, Guid deviceId, Guid grantId, CancellationToken ct)
+    {
+        await mls.RequireActiveDeviceAsync(me, deviceId, ct);
+        await db.HistoryGrants.Where(g => g.Id == grantId && g.UserId == me && g.TargetDeviceId == deviceId).ExecuteDeleteAsync(ct);
+    }
+
+    private static void ValidateTransfer(byte[]? welcome, byte[]? ciphertext)
+    {
+        if (welcome is not { Length: > 0 and <= MaxTransferBytes } || ciphertext is not { Length: > 0 and <= MaxTransferBytes })
+            throw new HistoryException("invalid", "Некорректные данные передачи.");
     }
 
     /// <summary>A message was deleted: its archived copies are of no use to anyone.</summary>

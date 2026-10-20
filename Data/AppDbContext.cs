@@ -47,6 +47,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<MlsGroupInfo> MlsGroupInfos => Set<MlsGroupInfo>();
     public DbSet<HistoryVault> HistoryVaults => Set<HistoryVault>();
     public DbSet<HistoryRecord> HistoryRecords => Set<HistoryRecord>();
+    public DbSet<HistoryAccessRequest> HistoryAccessRequests => Set<HistoryAccessRequest>();
+    public DbSet<HistoryGrant> HistoryGrants => Set<HistoryGrant>();
     public DbSet<TwoFactorLoginChallenge> TwoFactorLoginChallenges => Set<TwoFactorLoginChallenge>();
     public DbSet<LoginAlertToken> LoginAlertTokens => Set<LoginAlertToken>();
 
@@ -139,6 +141,13 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<HistoryRecord>().HasIndex(r => new { r.UserId, r.UpdatedAt });
         b.Entity<HistoryRecord>().HasIndex(r => r.MessageId);
         b.Entity<HistoryRecord>().HasOne<User>().WithMany().HasForeignKey(r => r.UserId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<HistoryAccessRequest>().HasKey(r => r.Id);
+        b.Entity<HistoryAccessRequest>().Property(r => r.Status).HasConversion<int>();
+        b.Entity<HistoryAccessRequest>().HasIndex(r => new { r.UserId, r.Status });
+        b.Entity<HistoryAccessRequest>().HasOne<User>().WithMany().HasForeignKey(r => r.UserId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<HistoryGrant>().HasKey(g => g.Id);
+        b.Entity<HistoryGrant>().HasIndex(g => g.TargetDeviceId);
+        b.Entity<HistoryGrant>().HasOne<User>().WithMany().HasForeignKey(g => g.UserId).OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<TwoFactorRecoveryCode>()
             .Property(c => c.CodeHash)
