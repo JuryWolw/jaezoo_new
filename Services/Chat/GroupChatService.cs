@@ -67,6 +67,26 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
     public static int MemberLimitFor(GroupChatKind kind, bool isPublic) =>
         kind == GroupChatKind.Channel ? (isPublic ? 100_000 : 500) : MaxGroupMembers;
 
+    /// <summary>
+    /// Кому рассылать изменения состава. В группе и закрытом канале — всем участникам (их клиенты сверяют MLS-группу).
+    /// В открытом канале — только владельцу и модераторам: подписчиков может быть сто тысяч, MLS там нет,
+    /// а рассылать каждому полный список на каждое вступление — нагрузка без пользы.
+    /// </summary>
+    public async Task<List<Guid>> GetRosterAudienceAsync(Guid groupId, CancellationToken ct = default)
+    {
+        var chat = await db.GroupChats.AsNoTracking()
+            .Where(g => g.Id == groupId)
+            .Select(g => new { g.Kind, g.IsPublic, g.OwnerId })
+            .FirstOrDefaultAsync(ct);
+        var query = db.GroupChatMembers.AsNoTracking().Where(m => m.GroupChatId == groupId);
+        if (chat is { Kind: GroupChatKind.Channel, IsPublic: true })
+        {
+            var ownerId = chat.OwnerId;
+            query = query.Where(m => m.UserId == ownerId || m.Role >= GroupChatRole.Moderator);
+        }
+        return await query.Select(m => m.UserId).ToListAsync(ct);
+    }
+
     private Task<bool> IsBannedAsync(Guid groupId, Guid userId, CancellationToken ct) =>
         db.GroupBans.AsNoTracking().AnyAsync(b => b.GroupChatId == groupId && b.UserId == userId, ct);
 

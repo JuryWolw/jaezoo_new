@@ -24,6 +24,7 @@ public sealed class ChannelsController(
     GroupChatService groups,
     ChannelService channels,
     IHubContext<ChatHub> hub,
+    IServiceScopeFactory scopes,
     ILogger<ChannelsController> log) : ControllerBase
 {
     private Guid MeId
@@ -61,7 +62,7 @@ public sealed class ChannelsController(
     public Task<ActionResult<ChannelDetailsDto>> Update(Guid id, [FromBody] UpdateChannelRequest body, CancellationToken ct) => Run(async () =>
     {
         await channels.UpdateSettingsAsync(id, MeId, body, ct);
-        await BroadcastUpdatedAsync(id, ct);
+        await BroadcastUpdatedAsync(id);
         return (await channels.GetDetailsAsync(id, MeId, ct))!;
     });
 
@@ -72,7 +73,7 @@ public sealed class ChannelsController(
     {
         await channels.RequireChannelAsync(id, ct);
         await groups.JoinPublicAsync(id, MeId, ct);
-        await BroadcastMembersChangedAsync(id, ct);
+        await BroadcastMembersChangedAsync(id);
         return (await channels.GetDetailsAsync(id, MeId, ct))!;
     });
 
@@ -87,7 +88,7 @@ public sealed class ChannelsController(
     public Task<ActionResult<MessageDto>> CreatePost(Guid id, [FromBody] PublicPostRequest body, CancellationToken ct) => Run(async () =>
     {
         var (message, dto) = await channels.CreatePublicPostAsync(id, MeId, body, ct);
-        await BroadcastPostCreatedAsync(id, message.SenderId, dto, ct);
+        await BroadcastPostCreatedAsync(id, message.SenderId, dto);
         return dto;
     });
 
@@ -96,7 +97,7 @@ public sealed class ChannelsController(
     public Task<ActionResult<MessageDto>> EditPost(Guid messageId, [FromBody] EditPublicPostRequest body, CancellationToken ct) => Run(async () =>
     {
         var (message, dto) = await channels.EditPublicPostAsync(messageId, MeId, body, ct);
-        await SendToMembersAsync(message.GroupChatId, "GroupChatMessageUpdated", new GroupChatMessageUpdatedDto(message.GroupChatId, dto), ct);
+        await SendToMembersAsync(message.GroupChatId, "GroupChatMessageUpdated", new GroupChatMessageUpdatedDto(message.GroupChatId, dto));
         return dto;
     });
 
@@ -104,7 +105,7 @@ public sealed class ChannelsController(
     public Task<ActionResult<ChannelDetailsDto>> Pin(Guid id, [FromBody] PinPostRequest body, CancellationToken ct) => Run(async () =>
     {
         await channels.PinAsync(id, MeId, body.MessageId, ct);
-        await BroadcastUpdatedAsync(id, ct);
+        await BroadcastUpdatedAsync(id);
         return (await channels.GetDetailsAsync(id, MeId, ct))!;
     });
 
@@ -121,7 +122,7 @@ public sealed class ChannelsController(
     public Task<ActionResult<object>> Ban(Guid id, Guid userId, [FromBody] BanMemberRequest? body, CancellationToken ct) => Run<object>(async () =>
     {
         await channels.BanAsync(id, MeId, userId, body?.Reason, ct);
-        await BroadcastMembersChangedAsync(id, ct, userId);
+        await BroadcastMembersChangedAsync(id, userId);
         return new { ok = true };
     });
 
@@ -160,7 +161,7 @@ public sealed class ChannelsController(
     {
         var (chat, wasMember) = await channels.JoinByInviteAsync(code, MeId, ct);
         if (!wasMember)
-            await BroadcastMembersChangedAsync(chat.Id, ct);
+            await BroadcastMembersChangedAsync(chat.Id);
         var count = await db.GroupChatMembers.AsNoTracking().CountAsync(m => m.GroupChatId == chat.Id, ct);
         return new InvitePreviewDto(chat.Id, chat.Kind, chat.Title, chat.Description, GroupChatService.GetAvatarUrl(chat), count, true);
     });
@@ -184,42 +185,91 @@ public sealed class ChannelsController(
         }
     }
 
-    private async Task<List<Guid>> MemberIdsAsync(Guid chatId, CancellationToken ct) =>
-        await db.GroupChatMembers.AsNoTracking().Where(m => m.GroupChatId == chatId).Select(m => m.UserId).ToListAsync(ct);
+    // ---------- рассылки ----------
+    // Подписчиков открытого канала может быть очень много: рассылки идут в фоне после ответа (свой scope БД),
+    // чтобы запрос автора/вступающего не ждал обхода всех подписчиков.
 
-    private async Task SendToMembersAsync(Guid chatId, string method, object payload, CancellationToken ct)
+    private void RunInBackground(string what, Func<IServiceProvider, Task> work)
     {
-        var ids = await MemberIdsAsync(chatId, ct);
-        await hub.Clients.Users(ids.Select(x => x.ToString()).ToList()).SendAsync(method, payload, ct);
-    }
-
-    private async Task BroadcastPostCreatedAsync(Guid chatId, Guid senderId, MessageDto dto, CancellationToken ct)
-    {
-        var ids = await MemberIdsAsync(chatId, ct);
-        await hub.Clients.Users(ids.Select(x => x.ToString()).ToList()).SendAsync("GroupChatMessageCreated", new GroupChatRealtimeMessageDto(chatId, dto), ct);
-        foreach (var memberId in ids.Where(x => x != senderId))
+        _ = Task.Run(async () =>
         {
-            var unread = await groups.GetUnreadForUserAsync(chatId, memberId, ct);
-            await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatUnreadChanged", new GroupChatUnreadChangedDto(chatId, unread.count, unread.firstId, unread.firstAt), ct);
-        }
+            try
+            {
+                using var scope = scopes.CreateScope();
+                await work(scope.ServiceProvider);
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Channels: background {What} failed.", what);
+            }
+        });
     }
 
-    private async Task BroadcastUpdatedAsync(Guid chatId, CancellationToken ct)
+    private static Task<List<Guid>> MemberIdsAsync(IServiceProvider sp, Guid chatId) =>
+        sp.GetRequiredService<AppDbContext>().GroupChatMembers.AsNoTracking()
+            .Where(m => m.GroupChatId == chatId).Select(m => m.UserId).ToListAsync();
+
+    private static List<string> ToUserIds(IEnumerable<Guid> ids) => ids.Select(x => x.ToString()).ToList();
+
+    private Task SendToMembersAsync(Guid chatId, string method, object payload)
     {
-        foreach (var memberId in await MemberIdsAsync(chatId, ct))
+        RunInBackground(method, async sp =>
+            await hub.Clients.Users(ToUserIds(await MemberIdsAsync(sp, chatId))).SendAsync(method, payload));
+        return Task.CompletedTask;
+    }
+
+    private Task BroadcastPostCreatedAsync(Guid chatId, Guid senderId, MessageDto dto)
+    {
+        RunInBackground("post broadcast", async sp =>
         {
-            var summary = await groups.GetSummaryAsync(chatId, memberId, ct);
-            if (summary is not null)
-                await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatUpdated", new GroupChatUpdatedDto(summary), ct);
-        }
+            var groupService = sp.GetRequiredService<GroupChatService>();
+            var ids = await MemberIdsAsync(sp, chatId);
+            await hub.Clients.Users(ToUserIds(ids)).SendAsync("GroupChatMessageCreated", new GroupChatRealtimeMessageDto(chatId, dto));
+            foreach (var memberId in ids.Where(x => x != senderId))
+            {
+                var unread = await groupService.GetUnreadForUserAsync(chatId, memberId);
+                await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatUnreadChanged", new GroupChatUnreadChangedDto(chatId, unread.count, unread.firstId, unread.firstAt));
+            }
+        });
+        return Task.CompletedTask;
     }
 
-    /// <summary>Состав изменился: участникам (закрытый канал сверяет MLS-группу) и, при бане, самому заблокированному.</summary>
-    private async Task BroadcastMembersChangedAsync(Guid chatId, CancellationToken ct, Guid? alsoNotify = null)
+    /// <summary>Карточка канала изменилась (название, аватар, закреп): каждому — его собственная сводка (права у всех разные).</summary>
+    private Task BroadcastUpdatedAsync(Guid chatId)
     {
-        var members = await groups.GetMemberDtosAsync(chatId, ct);
-        var targets = members.Select(m => m.UserId).Concat(alsoNotify is { } extra ? new[] { extra } : Array.Empty<Guid>()).Distinct().Select(x => x.ToString()).ToList();
-        await hub.Clients.Users(targets).SendAsync("GroupChatMembersChanged", new GroupChatMembersChangedDto(chatId, members), ct);
-        await BroadcastUpdatedAsync(chatId, ct);
+        RunInBackground("channel update broadcast", async sp =>
+        {
+            var groupService = sp.GetRequiredService<GroupChatService>();
+            foreach (var memberId in await MemberIdsAsync(sp, chatId))
+            {
+                var summary = await groupService.GetSummaryAsync(chatId, memberId);
+                if (summary is not null)
+                    await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatUpdated", new GroupChatUpdatedDto(summary));
+            }
+        });
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Состав изменился. Закрытый канал: всем участникам (клиенты сверяют MLS-группу). Открытый: только владельцу
+    /// и модераторам (см. <see cref="GroupChatService.GetRosterAudienceAsync"/>). При бане — ещё и заблокированному.
+    /// </summary>
+    private Task BroadcastMembersChangedAsync(Guid chatId, Guid? alsoNotify = null)
+    {
+        RunInBackground("roster broadcast", async sp =>
+        {
+            var groupService = sp.GetRequiredService<GroupChatService>();
+            var members = await groupService.GetMemberDtosAsync(chatId);
+            var audience = await groupService.GetRosterAudienceAsync(chatId);
+            var targets = audience.Concat(alsoNotify is { } extra ? new[] { extra } : Array.Empty<Guid>()).Distinct().ToList();
+            await hub.Clients.Users(ToUserIds(targets)).SendAsync("GroupChatMembersChanged", new GroupChatMembersChangedDto(chatId, members));
+            foreach (var memberId in audience)
+            {
+                var summary = await groupService.GetSummaryAsync(chatId, memberId);
+                if (summary is not null)
+                    await hub.Clients.User(memberId.ToString()).SendAsync("GroupChatUpdated", new GroupChatUpdatedDto(summary));
+            }
+        });
+        return Task.CompletedTask;
     }
 }

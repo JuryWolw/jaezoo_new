@@ -120,7 +120,8 @@ public class ChatController(
     private async Task<bool> CanCreateGroupSystemMessageAsync(Guid groupId, Guid userId, CancellationToken ct)
     {
         var group = await db.GroupChats.AsNoTracking().FirstOrDefaultAsync(g => g.Id == groupId, ct);
-        if (group is null) return false;
+        // В каналах служебных сообщений («добавлен», звонки) нет — лента только из постов.
+        if (group is null || group.Kind == GroupChatKind.Channel) return false;
 
         var member = await db.GroupChatMembers.AsNoTracking()
             .FirstOrDefaultAsync(m => m.GroupChatId == groupId && m.UserId == userId, ct);
@@ -137,6 +138,8 @@ public class ChatController(
         CancellationToken ct)
     {
         if (groupId == Guid.Empty || senderId == Guid.Empty || !IsKnownGroupSystemKey(systemKey))
+            return null;
+        if (await db.GroupChats.AsNoTracking().AnyAsync(g => g.Id == groupId && g.Kind == GroupChatKind.Channel, ct))
             return null;
 
         var cleanText = CleanSystemMessageText(text);
@@ -772,7 +775,7 @@ public class ChatController(
 
             var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
             if (summary is not null)
-                await BroadcastGroupUpdated(summary, ct);
+                await BroadcastGroupUpdated(summary, ct, rosterChange: true);
 
             var addedNames = await GetPublicUserNamesAsync(addedIds, ct);
             foreach (var addedId in addedIds)
@@ -806,7 +809,7 @@ public class ChatController(
 
             var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
             if (summary is not null)
-                await BroadcastGroupUpdated(summary, ct);
+                await BroadcastGroupUpdated(summary, ct, rosterChange: true);
 
 
             return Ok(members);
@@ -852,7 +855,7 @@ public class ChatController(
             await groupChats.LeaveAsync(groupId, MeId, ct);
             await BroadcastGroupMembersChanged(groupId, ct);
 
-            var memberIds = await GetGroupMemberIdsAsync(groupId, ct);
+            var memberIds = await groupChats.GetRosterAudienceAsync(groupId, ct);
             foreach (var memberId in memberIds)
             {
                 var summary = await groupChats.GetSummaryAsync(groupId, memberId, ct);
@@ -1311,9 +1314,10 @@ public class ChatController(
         }
     }
 
-    private async Task BroadcastGroupUpdated(GroupChatSummaryDto summary, CancellationToken ct)
+    // rosterChange: вступление/выход — в открытом канале сводку получают только владелец и модераторы.
+    private async Task BroadcastGroupUpdated(GroupChatSummaryDto summary, CancellationToken ct, bool rosterChange = false)
     {
-        var memberIds = await GetGroupMemberIdsAsync(summary.Id, ct);
+        var memberIds = rosterChange ? await groupChats.GetRosterAudienceAsync(summary.Id, ct) : await GetGroupMemberIdsAsync(summary.Id, ct);
         foreach (var memberId in memberIds)
         {
             var memberSummary = memberId == MeId ? summary : await groupChats.GetSummaryAsync(summary.Id, memberId, ct);
@@ -1329,7 +1333,9 @@ public class ChatController(
     private async Task BroadcastGroupMembersChanged(Guid groupId, CancellationToken ct, IEnumerable<Guid>? alsoNotify = null)
     {
         var members = await groupChats.GetMemberDtosAsync(groupId, ct);
-        var targets = members.Select(m => m.UserId).Concat(alsoNotify ?? Array.Empty<Guid>()).Distinct().Select(x => x.ToString()).ToList();
+        // Открытый канал: только персоналу канала (подписчиков слишком много, MLS там нет).
+        var audience = await groupChats.GetRosterAudienceAsync(groupId, ct);
+        var targets = audience.Concat(alsoNotify ?? Array.Empty<Guid>()).Distinct().Select(x => x.ToString()).ToList();
         await hub.Clients.Users(targets).SendAsync("GroupChatMembersChanged", new GroupChatMembersChangedDto(groupId, members), ct);
     }
 
