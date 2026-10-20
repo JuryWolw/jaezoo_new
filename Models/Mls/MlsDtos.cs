@@ -36,7 +36,8 @@ public sealed record MlsConversationDto(
     Guid? GroupId,
     long Epoch,
     IReadOnlyList<DeviceRefDto> Members,
-    IReadOnlyList<DeviceRefDto> ExpectedDevices);
+    IReadOnlyList<DeviceRefDto> ExpectedDevices,
+    long? GroupInfoEpoch = null);
 
 public sealed record CreateMlsGroupRequest(Guid GroupId, Guid DeviceId, MlsConversationKind Kind, Guid ConversationId);
 
@@ -76,3 +77,14 @@ public sealed record MlsWelcomeDto(
     byte[] Welcome);
 
 public sealed record MlsDeviceRevokedDto(Guid UserId, Guid DeviceId);
+
+/// <summary>GroupInfo of <paramref name="Epoch"/>, published by a member device after its commit (or to heal a stale one).</summary>
+public sealed record PublishGroupInfoRequest(Guid DeviceId, long Epoch, byte[] GroupInfo);
+
+public sealed record MlsGroupInfoDto(Guid GroupId, long Epoch, byte[] GroupInfo);
+
+/// <summary>External Commit (RFC 9420 §12.4.3.2) by <paramref name="DeviceId"/>, built on <paramref name="Epoch"/>.</summary>
+public sealed record ExternalJoinRequest(Guid DeviceId, long Epoch, byte[] Commit);
+
+/// <summary>A conversation whose MLS group this device can join by External Commit (it is not a leaf yet).</summary>
+public sealed record MissingConversationDto(MlsConversationKind Kind, Guid ConversationId, Guid GroupId);

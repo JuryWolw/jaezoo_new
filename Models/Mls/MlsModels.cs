@@ -121,3 +121,17 @@ public sealed class MlsWelcome
     public byte[] Data { get; set; } = Array.Empty<byte>();
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
+
+/// <summary>
+/// Latest GroupInfo a member published (RFC 9420 §12.4.3: ratchet tree + external public key, signed by the
+/// member). Public data: lets a participant's new device join by External Commit when no member is online.
+/// Valid only while <see cref="Epoch"/> equals the group's current epoch.
+/// </summary>
+public sealed class MlsGroupInfo
+{
+    public Guid GroupId { get; set; }
+    public long Epoch { get; set; }
+    public Guid PublishedByDeviceId { get; set; }
+    public byte[] Data { get; set; } = Array.Empty<byte>();
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+}

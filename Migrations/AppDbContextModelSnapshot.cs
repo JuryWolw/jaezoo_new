@@ -884,6 +884,29 @@ namespace JaeZoo.Server.Migrations
                     b.ToTable("MlsGroupEvents");
                 });
 
+            modelBuilder.Entity("JaeZoo.Server.Models.Mls.MlsGroupInfo", b =>
+                {
+                    b.Property<Guid>("GroupId")
+                        .HasColumnType("uuid");
+
+                    b.Property<byte[]>("Data")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<long>("Epoch")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("PublishedByDeviceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("GroupId");
+
+                    b.ToTable("MlsGroupInfos");
+                });
+
             modelBuilder.Entity("JaeZoo.Server.Models.Mls.MlsGroupMember", b =>
                 {
                     b.Property<Guid>("GroupId")
@@ -1877,6 +1900,15 @@ namespace JaeZoo.Server.Migrations
                 });
 
             modelBuilder.Entity("JaeZoo.Server.Models.Mls.MlsGroupEvent", b =>
+                {
+                    b.HasOne("JaeZoo.Server.Models.Mls.MlsGroupState", null)
+                        .WithMany()
+                        .HasForeignKey("GroupId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("JaeZoo.Server.Models.Mls.MlsGroupInfo", b =>
                 {
                     b.HasOne("JaeZoo.Server.Models.Mls.MlsGroupState", null)
                         .WithMany()

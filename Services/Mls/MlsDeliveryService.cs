@@ -38,6 +38,9 @@ public sealed class MlsDeliveryService(AppDbContext db, AuthStateCache? authCach
     public const int MaxCommitBytes = 256 * 1024;
     public const int MaxMessageBytes = 128 * 1024;
 
+    /// <summary>GroupInfo carries the whole ratchet tree: about 0.4 KB per leaf (500-member private channel ≈ 200 KB).</summary>
+    public const int MaxGroupInfoBytes = 1024 * 1024;
+
     /// <summary>
     /// Messages are accepted only in the group's current epoch. Accepting older epochs would let a sender
     /// that has not yet processed a Remove commit encrypt to a removed member (found by MlsMessengerTests).
@@ -345,7 +348,10 @@ public sealed class MlsDeliveryService(AppDbContext db, AuthStateCache? authCach
                 .Where(m => m.GroupId == group.Id)
                 .Select(m => new DeviceRefDto(m.UserId, m.DeviceId))
                 .ToListAsync(ct);
-        return new MlsConversationDto(kind, conversationId, group?.Id, group?.Epoch ?? 0, members, expected);
+        long? groupInfoEpoch = group is null
+            ? null
+            : await db.MlsGroupInfos.AsNoTracking().Where(i => i.GroupId == group.Id).Select(i => (long?)i.Epoch).FirstOrDefaultAsync(ct);
+        return new MlsConversationDto(kind, conversationId, group?.Id, group?.Epoch ?? 0, members, expected, groupInfoEpoch);
     }
 
     /// <summary>Registers a new MLS group at epoch 0 with the creator's leaf. Conflict if the conversation already has one.</summary>
@@ -530,6 +536,121 @@ public sealed class MlsDeliveryService(AppDbContext db, AuthStateCache? authCach
 
     public async Task AckWelcomeAsync(Guid me, Guid welcomeId, CancellationToken ct) =>
         await db.MlsWelcomes.Where(w => w.Id == welcomeId && w.TargetUserId == me).ExecuteDeleteAsync(ct);
+
+    // ---------- External Commit (RFC 9420 §12.4.3.2) ----------
+
+    /// <summary>
+    /// Stores the GroupInfo of the current epoch. Only a member device may publish, and only for the epoch the
+    /// group is in now (a stale GroupInfo would only produce rejected joins). Newer replaces older.
+    /// </summary>
+    public async Task PublishGroupInfoAsync(Guid me, Guid groupId, PublishGroupInfoRequest req, CancellationToken ct)
+    {
+        if (req.GroupInfo is not { Length: > 0 and <= MaxGroupInfoBytes })
+            throw MlsDeliveryException.Invalid("Некорректный GroupInfo.");
+        var (group, _) = await RequireGroupForMemberAsync(me, groupId, ct);
+        await RequireActiveDeviceAsync(me, req.DeviceId, ct);
+        if (!await db.MlsGroupMembers.AnyAsync(m => m.GroupId == groupId && m.DeviceId == req.DeviceId, ct))
+            throw MlsDeliveryException.Forbidden("Устройство не состоит в группе.");
+        if (req.Epoch != group.Epoch)
+            throw MlsDeliveryException.EpochConflict(group.Epoch);
+
+        var now = DateTime.UtcNow;
+        var updated = await db.MlsGroupInfos
+            .Where(i => i.GroupId == groupId && i.Epoch <= req.Epoch)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(i => i.Epoch, req.Epoch)
+                .SetProperty(i => i.Data, req.GroupInfo)
+                .SetProperty(i => i.PublishedByDeviceId, req.DeviceId)
+                .SetProperty(i => i.UpdatedAt, now), ct);
+        if (updated == 0 && !await db.MlsGroupInfos.AnyAsync(i => i.GroupId == groupId, ct))
+        {
+            db.MlsGroupInfos.Add(new MlsGroupInfo { GroupId = groupId, Epoch = req.Epoch, Data = req.GroupInfo, PublishedByDeviceId = req.DeviceId, UpdatedAt = now });
+            try { await db.SaveChangesAsync(ct); }
+            catch (DbUpdateException) { /* a concurrent publish of the same epoch won: fine */ }
+        }
+    }
+
+    /// <summary>Current GroupInfo for a participant (null when none was published for the current epoch).</summary>
+    public async Task<MlsGroupInfoDto?> GetGroupInfoAsync(Guid me, Guid groupId, CancellationToken ct)
+    {
+        var (group, _) = await RequireGroupForMemberAsync(me, groupId, ct);
+        var info = await db.MlsGroupInfos.AsNoTracking().FirstOrDefaultAsync(i => i.GroupId == groupId, ct);
+        return info is null || info.Epoch != group.Epoch ? null : new MlsGroupInfoDto(groupId, info.Epoch, info.Data);
+    }
+
+    /// <summary>
+    /// Accepts an External Commit: a participant's own active device joins (or re-joins, replacing its stale
+    /// leaf) without a member adding it. Same epoch rule as other commits. The server cannot verify the MLS
+    /// content; members process the commit cryptographically and reconcile the roster with the device list.
+    /// </summary>
+    public async Task<(MlsGroupEvent ev, List<Guid> participants)> ExternalJoinAsync(Guid me, Guid groupId, ExternalJoinRequest req, CancellationToken ct)
+    {
+        if (req.Commit is not { Length: > 0 and <= MaxCommitBytes })
+            throw MlsDeliveryException.Invalid("Некорректный коммит.");
+        var (_, participants) = await RequireGroupForMemberAsync(me, groupId, ct);
+        await RequireActiveDeviceAsync(me, req.DeviceId, ct);
+
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var now = DateTime.UtcNow;
+        var advanced = await db.MlsGroups
+            .Where(g => g.Id == groupId && g.Epoch == req.Epoch)
+            .ExecuteUpdateAsync(s => s.SetProperty(g => g.Epoch, g => g.Epoch + 1).SetProperty(g => g.UpdatedAt, now), ct);
+        if (advanced != 1)
+        {
+            await tx.RollbackAsync(ct);
+            var current = await db.MlsGroups.AsNoTracking().Where(g => g.Id == groupId).Select(g => g.Epoch).FirstAsync(ct);
+            throw MlsDeliveryException.EpochConflict(current);
+        }
+
+        var ev = new MlsGroupEvent
+        {
+            GroupId = groupId,
+            Kind = MlsEventKind.Commit,
+            Epoch = req.Epoch,
+            SenderUserId = me,
+            SenderDeviceId = req.DeviceId,
+            Payload = req.Commit,
+            CreatedAt = now,
+        };
+        db.MlsGroupEvents.Add(ev);
+        if (!await db.MlsGroupMembers.AnyAsync(m => m.GroupId == groupId && m.DeviceId == req.DeviceId, ct))
+            db.MlsGroupMembers.Add(new MlsGroupMember { GroupId = groupId, DeviceId = req.DeviceId, UserId = me, AddedAtEpoch = req.Epoch + 1 });
+        // Welcomes queued for this device in this group refer to older epochs now.
+        await db.MlsWelcomes.Where(w => w.GroupId == groupId && w.TargetDeviceId == req.DeviceId).ExecuteDeleteAsync(ct);
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return (ev, participants);
+    }
+
+    /// <summary>
+    /// Conversations of the user that can be joined right away by External Commit (a GroupInfo of the current epoch
+    /// is published), newest first. The device skips those it has state for: a leaf on the server whose local state
+    /// was lost (restore, disk cleanup) re-joins the same way. A new device calls this at start.
+    /// </summary>
+    public async Task<List<MissingConversationDto>> MissingConversationsAsync(Guid me, Guid deviceId, CancellationToken ct)
+    {
+        await RequireActiveDeviceAsync(me, deviceId, ct);
+        var myDialogs = db.DirectDialogs.AsNoTracking().Where(d => d.User1Id == me || d.User2Id == me).Select(d => d.Id);
+        var myGroupChats = db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == me).Select(m => m.GroupChatId);
+        var rows = await (
+            from g in db.MlsGroups.AsNoTracking()
+            join i in db.MlsGroupInfos.AsNoTracking() on g.Id equals i.GroupId
+            where i.Epoch == g.Epoch
+                  && ((g.DialogId != null && myDialogs.Contains(g.DialogId.Value))
+                      || (g.GroupChatId != null && myGroupChats.Contains(g.GroupChatId.Value)))
+            orderby g.UpdatedAt descending
+            select g
+        ).Take(500).ToListAsync(ct);
+
+        var dialogIds = rows.Where(g => g.DialogId.HasValue).Select(g => g.DialogId!.Value).ToList();
+        var peers = await db.DirectDialogs.AsNoTracking()
+            .Where(d => dialogIds.Contains(d.Id))
+            .Select(d => new { d.Id, Peer = d.User1Id == me ? d.User2Id : d.User1Id })
+            .ToDictionaryAsync(d => d.Id, d => d.Peer, ct);
+        return rows
+            .Select(g => new MissingConversationDto(g.Kind, g.GroupChatId ?? peers[g.DialogId!.Value], g.Id))
+            .ToList();
+    }
 
     /// <summary>For direct chats the conversation id seen by a user is the other participant's user id.</summary>
     public async Task<Guid> ConversationIdForViewerAsync(MlsGroupState g, Guid viewer, CancellationToken ct)

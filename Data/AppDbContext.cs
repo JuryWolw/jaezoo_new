@@ -44,6 +44,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<MlsGroupMember> MlsGroupMembers => Set<MlsGroupMember>();
     public DbSet<MlsGroupEvent> MlsGroupEvents => Set<MlsGroupEvent>();
     public DbSet<MlsWelcome> MlsWelcomes => Set<MlsWelcome>();
+    public DbSet<MlsGroupInfo> MlsGroupInfos => Set<MlsGroupInfo>();
     public DbSet<TwoFactorLoginChallenge> TwoFactorLoginChallenges => Set<TwoFactorLoginChallenge>();
     public DbSet<LoginAlertToken> LoginAlertTokens => Set<LoginAlertToken>();
 
@@ -125,6 +126,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<MlsWelcome>().HasIndex(w => new { w.TargetDeviceId, w.CreatedAt });
         b.Entity<MlsWelcome>().HasOne<MlsGroupState>().WithMany().HasForeignKey(w => w.GroupId).OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<MlsGroupInfo>().HasKey(i => i.GroupId);
+        b.Entity<MlsGroupInfo>().HasOne<MlsGroupState>().WithMany().HasForeignKey(i => i.GroupId).OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<TwoFactorRecoveryCode>()
             .Property(c => c.CodeHash)

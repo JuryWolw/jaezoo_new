@@ -151,6 +151,39 @@ public sealed class MlsController(
         return Ok(new CommitAcceptedDto(ev.Id, ev.Epoch + 1));
     });
 
+    // ---------- External Commit: a new device joins without waiting for a member to add it ----------
+
+    [HttpPut("groups/{groupId:guid}/group-info")]
+    [RequestSizeLimit(MlsDeliveryService.MaxGroupInfoBytes * 2)]
+    public Task<ActionResult> PublishGroupInfo(Guid groupId, [FromBody] PublishGroupInfoRequest body, CancellationToken ct) => Run(async () =>
+    {
+        await mls.PublishGroupInfoAsync(MeId, groupId, body, ct);
+        return NoContent();
+    });
+
+    [HttpGet("groups/{groupId:guid}/group-info")]
+    public Task<ActionResult> GroupInfo(Guid groupId, CancellationToken ct) => Run(async () =>
+    {
+        var info = await mls.GetGroupInfoAsync(MeId, groupId, ct);
+        return info is null ? NotFound(new { code = "no_group_info", error = "GroupInfo текущей эпохи ещё не опубликован." }) : Ok(info);
+    });
+
+    [HttpPost("groups/{groupId:guid}/external-join")]
+    [EnableRateLimiting("chat-write")]
+    public Task<ActionResult> ExternalJoin(Guid groupId, [FromBody] ExternalJoinRequest body, CancellationToken ct) => Run(async () =>
+    {
+        var me = MeId;
+        var (ev, participants) = await mls.ExternalJoinAsync(me, groupId, body, ct);
+        var eventDto = new MlsEventDto(ev.Id, ev.GroupId, ev.Kind, ev.Epoch, ev.SenderUserId, ev.SenderDeviceId, ev.CreatedAt, ev.Payload, null);
+        await hub.Clients.Users(participants.Select(p => p.ToString()).ToList()).SendAsync("MlsCommit", eventDto, ct);
+        log.LogInformation("MLS external join accepted. Group={GroupId} Epoch={Epoch} Event={EventId}", groupId, ev.Epoch + 1, ev.Id);
+        return Ok(new CommitAcceptedDto(ev.Id, ev.Epoch + 1));
+    });
+
+    [HttpGet("conversations/missing")]
+    public Task<ActionResult> MissingConversations([FromQuery] Guid deviceId, CancellationToken ct) =>
+        Run(async () => Ok(await mls.MissingConversationsAsync(MeId, deviceId, ct)));
+
     /// <summary>Ordered events after <paramref name="after"/>: commits and message events with current message data.</summary>
     [HttpGet("groups/{groupId:guid}/events")]
     public Task<ActionResult> Events(Guid groupId, [FromQuery] long after = 0, [FromQuery] int take = 200, CancellationToken ct = default) => Run(async () =>
