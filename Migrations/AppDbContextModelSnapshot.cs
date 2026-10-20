@@ -768,6 +768,64 @@ namespace JaeZoo.Server.Migrations
                     b.ToTable("GroupMessageAttachments");
                 });
 
+            modelBuilder.Entity("JaeZoo.Server.Models.HistoryRecord", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<byte[]>("Blob")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<string>("CiphertextHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("UserId", "MessageId");
+
+                    b.HasIndex("MessageId");
+
+                    b.HasIndex("UserId", "UpdatedAt");
+
+                    b.ToTable("HistoryRecords");
+                });
+
+            modelBuilder.Entity("JaeZoo.Server.Models.HistoryVault", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<byte[]>("Keyring")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<byte[]>("PasswordWrap")
+                        .HasColumnType("bytea");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("UpdatedByDeviceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("Version")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("UserId");
+
+                    b.ToTable("HistoryVaults");
+                });
+
             modelBuilder.Entity("JaeZoo.Server.Models.GroupVoiceParticipant", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1871,6 +1929,24 @@ namespace JaeZoo.Server.Migrations
                     b.HasOne("JaeZoo.Server.Models.GroupMessage", null)
                         .WithMany("Attachments")
                         .HasForeignKey("MessageId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("JaeZoo.Server.Models.HistoryRecord", b =>
+                {
+                    b.HasOne("JaeZoo.Server.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("JaeZoo.Server.Models.HistoryVault", b =>
+                {
+                    b.HasOne("JaeZoo.Server.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

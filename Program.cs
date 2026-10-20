@@ -202,6 +202,7 @@ builder.Services.AddScoped<SystemChatService>();
 builder.Services.AddScoped<JaeZoo.Server.Services.News.NewsService>();
 builder.Services.AddScoped<GroupChatService>();
 builder.Services.AddScoped<ChannelService>();
+builder.Services.AddScoped<JaeZoo.Server.Services.History.HistoryService>();
 builder.Services.AddScoped<JaeZoo.Server.Services.Mls.MlsDeliveryService>();
 builder.Services.AddHostedService<JaeZoo.Server.Services.Mls.MlsDeviceCleanupService>();
 builder.Services.AddScoped<AdminAuditService>();

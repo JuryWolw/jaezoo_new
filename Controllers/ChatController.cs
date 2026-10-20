@@ -502,6 +502,7 @@ public class ChatController(
             await db.SaveChangesAsync(ct);
             await fileCleanup.DeleteFilesForMessageAsync(attachedFileIds, ct);
             await chat.AppendDeletionEventAsync(msg, ct);
+            await db.HistoryRecords.Where(r => r.MessageId == msg.Id).ExecuteDeleteAsync(ct); // archived copies (multi-device history)
 
             var dialog = await db.DirectDialogs.AsNoTracking().FirstAsync(d => d.Id == msg.DialogId, ct);
             var peerId = dialog.User1Id == MeId ? dialog.User2Id : dialog.User1Id;
@@ -1232,6 +1233,7 @@ public class ChatController(
             msg.Ciphertext = null;
             await db.SaveChangesAsync(ct);
             await groupChats.AppendDeletionEventAsync(msg, ct);
+            await db.HistoryRecords.Where(r => r.MessageId == msg.Id).ExecuteDeleteAsync(ct); // archived copies (multi-device history)
             await fileCleanup.DeleteFilesForMessageAsync(attachedFileIds, ct);
 
             await BroadcastGroupDeleted(msg.GroupChatId, msg.Id, msg.DeletedAt.Value, MeId, ct);

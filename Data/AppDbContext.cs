@@ -45,6 +45,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<MlsGroupEvent> MlsGroupEvents => Set<MlsGroupEvent>();
     public DbSet<MlsWelcome> MlsWelcomes => Set<MlsWelcome>();
     public DbSet<MlsGroupInfo> MlsGroupInfos => Set<MlsGroupInfo>();
+    public DbSet<HistoryVault> HistoryVaults => Set<HistoryVault>();
+    public DbSet<HistoryRecord> HistoryRecords => Set<HistoryRecord>();
     public DbSet<TwoFactorLoginChallenge> TwoFactorLoginChallenges => Set<TwoFactorLoginChallenge>();
     public DbSet<LoginAlertToken> LoginAlertTokens => Set<LoginAlertToken>();
 
@@ -129,6 +131,14 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<MlsGroupInfo>().HasKey(i => i.GroupId);
         b.Entity<MlsGroupInfo>().HasOne<MlsGroupState>().WithMany().HasForeignKey(i => i.GroupId).OnDelete(DeleteBehavior.Cascade);
+
+        b.Entity<HistoryVault>().HasKey(v => v.UserId);
+        b.Entity<HistoryVault>().HasOne<User>().WithMany().HasForeignKey(v => v.UserId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<HistoryRecord>().HasKey(r => new { r.UserId, r.MessageId });
+        b.Entity<HistoryRecord>().Property(r => r.CiphertextHash).HasMaxLength(64);
+        b.Entity<HistoryRecord>().HasIndex(r => new { r.UserId, r.UpdatedAt });
+        b.Entity<HistoryRecord>().HasIndex(r => r.MessageId);
+        b.Entity<HistoryRecord>().HasOne<User>().WithMany().HasForeignKey(r => r.UserId).OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<TwoFactorRecoveryCode>()
             .Property(c => c.CodeHash)
