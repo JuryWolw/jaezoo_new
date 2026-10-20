@@ -546,6 +546,27 @@ public class AuthController(
     }
 
     [Authorize]
+    public sealed record VerifyPasswordRequest(string? Password);
+
+    /// <summary>
+    /// Re-checks the account password of the signed-in user before a sensitive action on the device (e.g. showing
+    /// the history recovery key). Rate-limited per user; failures are audited like failed logins.
+    /// </summary>
+    [Authorize]
+    [HttpPost("verify-password")]
+    [EnableRateLimiting("security-sensitive")]
+    public async Task<IActionResult> VerifyPassword([FromBody] VerifyPasswordRequest r, CancellationToken ct)
+    {
+        var uid = GetCurrentUserId();
+        var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        if (user is null || string.IsNullOrEmpty(user.PasswordHash) || string.IsNullOrEmpty(r?.Password))
+            return Ok(new { ok = false });
+        var ok = _hasher.VerifyHashedPassword(user, user.PasswordHash, r.Password) != PasswordVerificationResult.Failed;
+        if (!ok)
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.PasswordRecheckFailed", "User", uid.ToString(), "Wrong password on re-check.", ct);
+        return Ok(new { ok });
+    }
+
     [HttpPost("logout")]
     public async Task<IActionResult> Logout([FromBody] LogoutRequest? r, CancellationToken ct)
     {
