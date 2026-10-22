@@ -157,7 +157,7 @@ namespace JaeZoo.Server.Controllers
         public async Task<ActionResult<UserProfileDto>> Me(CancellationToken ct)
         {
             var me = await _db.Users.FirstAsync(u => u.Id == MeId, ct);
-            return Ok(ToProfileDto(me));
+            return Ok(ToProfileDto(me) with { Badges = await LoadBadgesAsync(me.Id, ct) });
         }
 
         [HttpGet("{id:guid}")]
@@ -167,7 +167,7 @@ namespace JaeZoo.Server.Controllers
             var u = await _db.Users.FirstOrDefaultAsync(x => x.Id == id, ct);
             if (u == null) return NotFound();
 
-            return Ok(ToPublicDto(u));
+            return Ok(ToPublicDto(u) with { Badges = await LoadBadgesAsync(u.Id, ct) });
         }
 
         [HttpPut("profile")]
@@ -627,6 +627,14 @@ namespace JaeZoo.Server.Controllers
                 IsActivityFresh(u) ? u.CurrentActivityName : null,
                 IsActivityFresh(u) ? u.CurrentActivityUpdatedAt : null
             );
+
+        /// <summary>Плашки пользователя по порядку, заданному в админке.</summary>
+        private async Task<List<UserBadgeDto>> LoadBadgesAsync(Guid userId, CancellationToken ct) =>
+            await (from ub in _db.UserBadges.AsNoTracking()
+                   join b in _db.Badges.AsNoTracking() on ub.BadgeId equals b.Id
+                   where ub.UserId == userId
+                   orderby b.SortOrder, b.Title
+                   select new UserBadgeDto(b.Id, b.Title, b.ColorHex, b.Icon)).ToListAsync(ct);
 
         private PublicUserDto ToPublicDto(User u) =>
             new PublicUserDto(

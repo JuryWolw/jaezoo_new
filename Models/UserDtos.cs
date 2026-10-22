@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace JaeZoo.Server.Models
 {
@@ -23,7 +24,11 @@ namespace JaeZoo.Server.Models
         bool ShowActivity = true,
         string? CurrentActivityName = null,
         DateTime? CurrentActivityUpdatedAt = null
-    );
+    )
+    {
+        /// <summary>Плашки у ника («Разработчик», «Тестер», «Партнёр» …), выдаются из админки.</summary>
+        public IReadOnlyList<UserBadgeDto>? Badges { get; init; }
+    }
 
     // Публичный профиль (для других)
     public record PublicUserDto(
@@ -40,7 +45,13 @@ namespace JaeZoo.Server.Models
         LastSeenVisibility LastSeenVisibility = LastSeenVisibility.Approximate,
         string? CurrentActivityName = null,
         DateTime? CurrentActivityUpdatedAt = null
-    );
+    )
+    {
+        public IReadOnlyList<UserBadgeDto>? Badges { get; init; }
+    }
+
+    /// <summary>Плашка у ника: подпись, цвет (#RRGGBB), значок (символ Segoe MDL2 или эмодзи, может не быть).</summary>
+    public record UserBadgeDto(Guid Id, string Title, string ColorHex, string? Icon);
 
     public record UserAvatarDto(
         Guid Id,

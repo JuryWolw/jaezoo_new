@@ -27,6 +27,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GroupMessageAttachment> GroupMessageAttachments => Set<GroupMessageAttachment>();
     public DbSet<GroupAvatar> GroupAvatars => Set<GroupAvatar>();
     public DbSet<GroupBanner> GroupBanners => Set<GroupBanner>();
+    public DbSet<SiteContent> SiteContents => Set<SiteContent>();
+    public DbSet<Badge> Badges => Set<Badge>();
+    public DbSet<UserBadge> UserBadges => Set<UserBadge>();
     public DbSet<GroupVoiceSession> GroupVoiceSessions => Set<GroupVoiceSession>();
     public DbSet<GroupVoiceParticipant> GroupVoiceParticipants => Set<GroupVoiceParticipant>();
     public DbSet<UserRole> UserRoles => Set<UserRole>();
@@ -672,6 +675,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
         b.Entity<GroupBanner>()
             .HasIndex(a => a.GroupChatId);
+        b.Entity<UserBadge>().HasKey(x => new { x.UserId, x.BadgeId });
+        b.Entity<UserBadge>().HasIndex(x => x.BadgeId);
+        b.Entity<UserBadge>().HasOne<User>().WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<UserBadge>().HasOne<Badge>().WithMany().HasForeignKey(x => x.BadgeId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<GroupBanner>()
             .HasOne<GroupChat>()
             .WithMany()

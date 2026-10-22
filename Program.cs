@@ -200,6 +200,7 @@ builder.Services.AddScoped<TokenService>();
 builder.Services.AddScoped<DirectChatService>();
 builder.Services.AddScoped<SystemChatService>();
 builder.Services.AddScoped<JaeZoo.Server.Services.News.NewsService>();
+builder.Services.AddScoped<JaeZoo.Server.Services.SiteContentService>();
 builder.Services.AddScoped<GroupChatService>();
 builder.Services.AddScoped<ChannelService>();
 builder.Services.AddScoped<JaeZoo.Server.Services.History.HistoryService>();
