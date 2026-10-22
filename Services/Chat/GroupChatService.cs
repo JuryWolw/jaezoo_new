@@ -525,7 +525,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             SignPosts = chat.SignPosts,
             PinnedMessageId = chat.PinnedMessageId,
             CanPost = CanPost(chat, member),
-            CanModerate = CanModerate(chat, member)
+            CanModerate = CanModerate(chat, member),
+            BannerUrl = chat.BannerUrl
         };
     }
 

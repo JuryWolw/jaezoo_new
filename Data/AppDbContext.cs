@@ -25,6 +25,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GroupMessageView> GroupMessageViews => Set<GroupMessageView>();
     public DbSet<GroupMessageAttachment> GroupMessageAttachments => Set<GroupMessageAttachment>();
     public DbSet<GroupAvatar> GroupAvatars => Set<GroupAvatar>();
+    public DbSet<GroupBanner> GroupBanners => Set<GroupBanner>();
     public DbSet<GroupVoiceSession> GroupVoiceSessions => Set<GroupVoiceSession>();
     public DbSet<GroupVoiceParticipant> GroupVoiceParticipants => Set<GroupVoiceParticipant>();
     public DbSet<UserRole> UserRoles => Set<UserRole>();
@@ -659,6 +660,15 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .OnDelete(DeleteBehavior.Cascade);
         b.Entity<GroupAvatar>()
             .HasIndex(a => a.GroupChatId);
+
+        b.Entity<GroupBanner>()
+            .HasIndex(a => a.GroupChatId);
+        b.Entity<GroupBanner>()
+            .HasOne<GroupChat>()
+            .WithMany()
+            .HasForeignKey(a => a.GroupChatId)
+            .OnDelete(DeleteBehavior.Cascade);
+        b.Entity<GroupChat>().Property(g => g.BannerUrl).HasMaxLength(512);
 
         b.Entity<GroupAvatar>()
             .HasOne<GroupChat>()

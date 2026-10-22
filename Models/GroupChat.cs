@@ -24,6 +24,10 @@ public class GroupChat
     [MaxLength(512)]
     public string? AvatarUrl { get; set; }
 
+    /// <summary>Шапка (как у профиля): ссылка с версией на /banners/groups/{id}, null — без шапки.</summary>
+    [MaxLength(512)]
+    public string? BannerUrl { get; set; }
+
     /// <summary>Группа или канал. Задаётся при создании и не меняется.</summary>
     public GroupChatKind Kind { get; set; } = GroupChatKind.Group;
 

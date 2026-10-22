@@ -261,6 +261,8 @@ public record GroupChatSummaryDto(
     public bool CanPost { get; init; } = true;
     /// <summary>Канал: может ли банить и удалять чужие посты (владелец, админ, модератор).</summary>
     public bool CanModerate { get; init; }
+    /// <summary>Шапка группы или канала (null — нет).</summary>
+    public string? BannerUrl { get; init; }
 }
 
 public record GroupChatDetailsDto(GroupChatSummaryDto Chat, IReadOnlyList<GroupChatMemberDto> Members);

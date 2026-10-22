@@ -461,7 +461,7 @@ namespace JaeZoo.Server.Controllers
             if (!TryParseStorageUrl(user.ProfileBannerUrl, out var bucket, out var key)) return NotFound();
 
             var obj = await _storage.GetAsync(bucket, key, ct);
-            Response.Headers.CacheControl = "public,max-age=3600";
+            Response.Headers.CacheControl = "private,max-age=3600";
             return File(obj.Stream, string.IsNullOrWhiteSpace(obj.ContentType) ? "image/jpeg" : obj.ContentType);
         }
 
@@ -560,7 +560,7 @@ namespace JaeZoo.Server.Controllers
             if (current != null)
             {
                 var obj = await _storage.GetAsync(current.Bucket, current.ObjectKey, ct);
-                Response.Headers.CacheControl = "public,max-age=3600";
+                Response.Headers.CacheControl = "private,max-age=3600";
                 return File(obj.Stream, string.IsNullOrWhiteSpace(current.ContentType) ? obj.ContentType : current.ContentType);
             }
 
@@ -587,7 +587,7 @@ namespace JaeZoo.Server.Controllers
                 return StatusCode(StatusCodes.Status304NotModified);
 
             Response.Headers.ETag = etag;
-            Response.Headers.CacheControl = "public,max-age=3600";
+            Response.Headers.CacheControl = "private,max-age=3600";
 
             return File(avatar.Data, avatar.ContentType ?? "image/png");
         }

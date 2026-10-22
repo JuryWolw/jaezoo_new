@@ -512,6 +512,33 @@ namespace JaeZoo.Server.Migrations
                     b.ToTable("GroupAvatars");
                 });
 
+            modelBuilder.Entity("JaeZoo.Server.Models.GroupBanner", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<byte[]>("Data")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<Guid>("GroupChatId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("GroupChatId");
+
+                    b.ToTable("GroupBanners");
+                });
+
             modelBuilder.Entity("JaeZoo.Server.Models.GroupChat", b =>
                 {
                     b.Property<Guid>("Id")
@@ -519,6 +546,10 @@ namespace JaeZoo.Server.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<string>("AvatarUrl")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("BannerUrl")
                         .HasMaxLength(512)
                         .HasColumnType("character varying(512)");
 
@@ -1957,6 +1988,15 @@ namespace JaeZoo.Server.Migrations
                         .IsRequired();
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("JaeZoo.Server.Models.GroupBanner", b =>
+                {
+                    b.HasOne("JaeZoo.Server.Models.GroupChat", null)
+                        .WithMany()
+                        .HasForeignKey("GroupChatId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("JaeZoo.Server.Models.GroupAvatar", b =>

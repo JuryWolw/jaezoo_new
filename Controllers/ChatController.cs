@@ -47,10 +47,11 @@ public class ChatController(
         }
     }
 
-    private string GetGroupDefaultAvatarPath()
+    /// <summary>Аватарка по умолчанию: у группы розовая, у канала тёмно-красная (у пользователя — белая, default.png).</summary>
+    private string GetGroupDefaultAvatarPath(bool isChannel = false)
     {
         var root = env.WebRootPath ?? Path.Combine(env.ContentRootPath, "wwwroot");
-        var groupDefault = Path.Combine(root, "avatars", "default_group.png");
+        var groupDefault = Path.Combine(root, "avatars", isChannel ? "default_channel.png" : "default_group.png");
         if (System.IO.File.Exists(groupDefault))
             return groupDefault;
 
@@ -963,7 +964,8 @@ public class ChatController(
 
         if (avatar is null || avatar.Data.Length == 0)
         {
-            var path = GetGroupDefaultAvatarPath();
+            var isChannel = await db.GroupChats.AsNoTracking().AnyAsync(g => g.Id == id && g.Kind == GroupChatKind.Channel, ct);
+            var path = GetGroupDefaultAvatarPath(isChannel);
             if (System.IO.File.Exists(path))
                 return PhysicalFile(path, "image/png");
             return NotFound();
@@ -975,8 +977,99 @@ public class ChatController(
             return StatusCode(StatusCodes.Status304NotModified);
 
         Response.Headers.ETag = etag;
-        Response.Headers.CacheControl = "public,max-age=3600";
+        Response.Headers.CacheControl = "private,max-age=3600"; // see GetGroupBanner
         return File(avatar.Data, avatar.ContentType ?? "image/png");
+    }
+
+    // ===================== шапка группы / канала =====================
+
+    [RequestSizeLimit(8 * 1024 * 1024)]
+    [HttpPost("groups/{groupId:guid}/banner/upload")]
+    [RequireVerifiedEmail]
+    public async Task<ActionResult<GroupChatSummaryDto>> UploadGroupBanner(Guid groupId, IFormFile file, CancellationToken ct)
+    {
+        var group = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct);
+        if (group is null) return NotFound(new { error = "Group chat not found." });
+        if (!await CanChangeGroupImagesAsync(group, ct)) return Forbid();
+
+        if (file == null || file.Length == 0)
+            return BadRequest(new { error = "Файл не найден." });
+        var allowed = new[] { "image/png", "image/jpeg", "image/webp" };
+        if (!allowed.Contains(file.ContentType ?? string.Empty, StringComparer.OrdinalIgnoreCase))
+            return BadRequest(new { error = "Поддерживаются только PNG/JPEG/WEBP." });
+
+        await using var ms = new MemoryStream();
+        await file.CopyToAsync(ms, ct);
+        var bytes = ms.ToArray();
+        if (bytes.Length == 0)
+            return BadRequest(new { error = "Пустой файл." });
+
+        // Старые шапки не нужны: держим одну строку на чат.
+        await db.GroupBanners.Where(b => b.GroupChatId == groupId).ExecuteDeleteAsync(ct);
+        db.GroupBanners.Add(new GroupBanner
+        {
+            GroupChatId = groupId,
+            Data = bytes,
+            ContentType = file.ContentType ?? "image/png",
+            CreatedAt = DateTime.UtcNow
+        });
+        group.BannerUrl = $"/banners/groups/{groupId}?v={DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+        group.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
+        if (summary is not null)
+            await BroadcastGroupUpdated(summary, ct);
+        return summary is null ? NotFound() : Ok(summary);
+    }
+
+    [HttpDelete("groups/{groupId:guid}/banner")]
+    public async Task<ActionResult<GroupChatSummaryDto>> DeleteGroupBanner(Guid groupId, CancellationToken ct)
+    {
+        var group = await db.GroupChats.FirstOrDefaultAsync(g => g.Id == groupId, ct);
+        if (group is null) return NotFound(new { error = "Group chat not found." });
+        if (!await CanChangeGroupImagesAsync(group, ct)) return Forbid();
+
+        await db.GroupBanners.Where(b => b.GroupChatId == groupId).ExecuteDeleteAsync(ct);
+        group.BannerUrl = null;
+        group.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        var summary = await groupChats.GetSummaryAsync(groupId, MeId, ct);
+        if (summary is not null)
+            await BroadcastGroupUpdated(summary, ct);
+        return summary is null ? NotFound() : Ok(summary);
+    }
+
+    /// <summary>Шапка, как и аватарка, публичная: её видно в карточке открытого канала ещё до подписки.</summary>
+    [AllowAnonymous]
+    [HttpGet("/banners/groups/{id:guid}")]
+    public async Task<IActionResult> GetGroupBanner(Guid id, CancellationToken ct)
+    {
+        var banner = await db.GroupBanners.AsNoTracking()
+            .Where(b => b.GroupChatId == id)
+            .OrderByDescending(b => b.CreatedAt)
+            .FirstOrDefaultAsync(ct);
+        if (banner is null || banner.Data.Length == 0)
+            return NotFound();
+
+        var etag = $"W/\"{banner.Data.Length}-{banner.CreatedAt.ToUniversalTime():yyyyMMddHHmmss}\"";
+        var ifNone = Request.Headers["If-None-Match"].ToString();
+        if (!string.IsNullOrEmpty(ifNone) && string.Equals(ifNone, etag, StringComparison.Ordinal))
+            return StatusCode(StatusCodes.Status304NotModified);
+
+        Response.Headers.ETag = etag;
+        // private: серверный кэш ответов не различает ?v= и отдавал бы старую шапку после замены.
+        Response.Headers.CacheControl = "private,max-age=3600";
+        return File(banner.Data, banner.ContentType ?? "image/png");
+    }
+
+    /// <summary>Аватарку и шапку меняют владелец и админы (как раньше для аватарки).</summary>
+    private async Task<bool> CanChangeGroupImagesAsync(GroupChat group, CancellationToken ct)
+    {
+        if (group.OwnerId == MeId) return true;
+        var actor = await db.GroupChatMembers.AsNoTracking().FirstOrDefaultAsync(m => m.GroupChatId == group.Id && m.UserId == MeId, ct);
+        return actor is not null && actor.Role == GroupChatRole.Admin;
     }
 
     [HttpGet("groups/{groupId:guid}/history")]
