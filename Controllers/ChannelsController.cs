@@ -113,6 +113,17 @@ public sealed class ChannelsController(
     public Task<ActionResult<IReadOnlyDictionary<Guid, int>>> Views(Guid id, [FromBody] MarkPostsViewedRequest body, CancellationToken ct) => Run(async () =>
         await channels.MarkViewedAsync(id, MeId, body.MessageIds ?? Array.Empty<Guid>(), ct));
 
+    /// <summary>Реакция на пост открытого канала: повторный выбор снимает. Подписчикам уходят новые счётчики.</summary>
+    [HttpPost("posts/{messageId:guid}/reactions")]
+    [EnableRateLimiting("chat-write")]
+    public Task<ActionResult<PostReactionsDto>> React(Guid messageId, [FromBody] ReactRequest body, CancellationToken ct) => Run(async () =>
+    {
+        var result = await channels.ToggleReactionAsync(messageId, MeId, body.Kind, ct);
+        var chatId = await db.GroupMessages.AsNoTracking().Where(m => m.Id == messageId).Select(m => m.GroupChatId).FirstAsync(ct);
+        await SendToMembersAsync(chatId, "ChannelReactionsChanged", new ChannelReactionsChangedDto(chatId, messageId, result.Counts));
+        return result;
+    });
+
     // ---------- Баны (каналы и группы) ----------
 
     [HttpGet("{id:guid}/bans")]

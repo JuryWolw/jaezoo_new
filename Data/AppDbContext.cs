@@ -23,6 +23,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GroupBan> GroupBans => Set<GroupBan>();
     public DbSet<GroupInvite> GroupInvites => Set<GroupInvite>();
     public DbSet<GroupMessageView> GroupMessageViews => Set<GroupMessageView>();
+    public DbSet<GroupMessageReaction> GroupMessageReactions => Set<GroupMessageReaction>();
     public DbSet<GroupMessageAttachment> GroupMessageAttachments => Set<GroupMessageAttachment>();
     public DbSet<GroupAvatar> GroupAvatars => Set<GroupAvatar>();
     public DbSet<GroupBanner> GroupBanners => Set<GroupBanner>();
@@ -101,6 +102,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<GroupInvite>().HasIndex(x => x.Code).IsUnique();
         b.Entity<GroupInvite>().HasIndex(x => x.GroupChatId);
         b.Entity<GroupMessageView>().HasKey(x => new { x.MessageId, x.UserId });
+        b.Entity<GroupMessageReaction>().HasKey(x => new { x.MessageId, x.UserId, x.Kind });
+        b.Entity<GroupMessageReaction>().Property(x => x.Kind).HasMaxLength(16);
 
 
         // ---------- MLS delivery service ----------

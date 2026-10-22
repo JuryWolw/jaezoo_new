@@ -577,7 +577,19 @@ public record PinPostRequest(Guid? MessageId);
 public record MarkPostsViewedRequest(IReadOnlyList<Guid> MessageIds);
 
 /// <summary>Лента канала: посты и число просмотров каждого.</summary>
-public record ChannelPostsDto(IReadOnlyList<MessageDto> Posts, IReadOnlyDictionary<Guid, int> Views);
+public record ChannelPostsDto(IReadOnlyList<MessageDto> Posts, IReadOnlyDictionary<Guid, int> Views)
+{
+    /// <summary>Реакции на посты открытого канала (у закрытого не бывает — сервер не должен их видеть).</summary>
+    public IReadOnlyDictionary<Guid, PostReactionsDto>? Reactions { get; init; }
+}
+
+/// <summary>Реакции поста: сколько каждой и какие поставил сам пользователь.</summary>
+public record PostReactionsDto(IReadOnlyDictionary<string, int> Counts, IReadOnlyList<string> Mine);
+
+public record ReactRequest(string Kind);
+
+/// <summary>SignalR ChannelReactionsChanged: новые счётчики поста (без «моих» — у каждого свои).</summary>
+public record ChannelReactionsChangedDto(Guid ChatId, Guid MessageId, IReadOnlyDictionary<string, int> Counts);
 
 /// <summary>Канал глазами пользователя (в том числе ещё не вступившего в открытый канал).</summary>
 public record ChannelDetailsDto(GroupChatSummaryDto Channel, bool IsMember, bool IsBanned);

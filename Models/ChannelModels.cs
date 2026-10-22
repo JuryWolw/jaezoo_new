@@ -40,3 +40,25 @@ public class GroupMessageView
     public Guid UserId { get; set; }
     public DateTime ViewedAt { get; set; } = DateTime.UtcNow;
 }
+
+/// <summary>Реакция на пост открытого канала: пользователь может поставить несколько разных, каждую — один раз.</summary>
+public class GroupMessageReaction
+{
+    public Guid MessageId { get; set; }
+    public Guid UserId { get; set; }
+
+    /// <summary>Код реакции из <see cref="ChannelReactions.Kinds"/> (не эмодзи: так клиент сам решает, чем её рисовать).</summary>
+    [MaxLength(16)]
+    public string Kind { get; set; } = string.Empty;
+
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
+public static class ChannelReactions
+{
+    /// <summary>Базовый набор: сердце, какашка, лайк, огонь, смех, удивление, грусть и «+rep».</summary>
+    public static readonly IReadOnlySet<string> Kinds = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "heart", "poop", "like", "fire", "laugh", "wow", "sad", "rep"
+    };
+}

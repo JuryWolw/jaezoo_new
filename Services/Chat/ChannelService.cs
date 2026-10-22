@@ -77,8 +77,72 @@ public sealed class ChannelService(AppDbContext db, GroupChatService groups)
         var rows = await q.OrderByDescending(m => m.SentAt).ThenByDescending(m => m.Id).Take(Math.Clamp(take, 1, 100)).ToListAsync(ct);
         rows.Reverse();
         var posts = await groups.BuildMessageDtosAsync(rows, ct);
-        return new ChannelPostsDto(posts, await CountViewsAsync(rows.Select(r => r.Id).ToList(), ct));
+        var ids = rows.Select(r => r.Id).ToList();
+        return new ChannelPostsDto(posts, await CountViewsAsync(ids, ct))
+        {
+            Reactions = chat.IsPublic ? await GetReactionsAsync(ids, me, ct) : null
+        };
     }
+
+    // ---------- Реакции (только открытые каналы: у закрытого сервер не должен знать даже реакции) ----------
+
+    /// <summary>Поставить или снять реакцию (повторный выбор снимает). Ставят подписчики.</summary>
+    public async Task<PostReactionsDto> ToggleReactionAsync(Guid messageId, Guid me, string kind, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(kind) || !ChannelReactions.Kinds.Contains(kind))
+            throw new InvalidOperationException("Такой реакции нет.");
+        var post = await db.GroupMessages.AsNoTracking().FirstOrDefaultAsync(m => m.Id == messageId && m.DeletedAt == null, ct)
+            ?? throw new KeyNotFoundException("Пост не найден.");
+        var chat = await RequireChannelAsync(post.GroupChatId, ct);
+        if (!chat.IsPublic)
+            throw new InvalidOperationException("Реакции есть только в открытых каналах.");
+        if (post.Kind != DirectMessageKind.User)
+            throw new InvalidOperationException("На служебное сообщение реакцию не поставить.");
+        if (!await db.GroupChatMembers.AnyAsync(m => m.GroupChatId == chat.Id && m.UserId == me, ct))
+            throw new UnauthorizedAccessException("Реакции ставят подписчики канала.");
+
+        var existing = await db.GroupMessageReactions.FirstOrDefaultAsync(r => r.MessageId == messageId && r.UserId == me && r.Kind == kind, ct);
+        if (existing is null)
+            db.GroupMessageReactions.Add(new GroupMessageReaction { MessageId = messageId, UserId = me, Kind = kind, CreatedAt = DateTime.UtcNow });
+        else
+            db.GroupMessageReactions.Remove(existing);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException)
+        {
+            // Двойной клик / второе устройство: реакция уже стоит (или уже снята) — итог тот же.
+            db.ChangeTracker.Clear();
+        }
+
+        return (await GetReactionsAsync(new[] { messageId }, me, ct)).TryGetValue(messageId, out var result)
+            ? result
+            : new PostReactionsDto(new Dictionary<string, int>(), Array.Empty<string>());
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, PostReactionsDto>> GetReactionsAsync(IReadOnlyCollection<Guid> messageIds, Guid me, CancellationToken ct)
+    {
+        if (messageIds.Count == 0) return new Dictionary<Guid, PostReactionsDto>();
+        var rows = await db.GroupMessageReactions.AsNoTracking()
+            .Where(r => messageIds.Contains(r.MessageId))
+            .GroupBy(r => new { r.MessageId, r.Kind })
+            .Select(g => new { g.Key.MessageId, g.Key.Kind, Count = g.Count(), Mine = g.Any(x => x.UserId == me) })
+            .ToListAsync(ct);
+        return rows.GroupBy(r => r.MessageId).ToDictionary(
+            g => g.Key,
+            g => new PostReactionsDto(
+                g.ToDictionary(x => x.Kind, x => x.Count),
+                g.Where(x => x.Mine).Select(x => x.Kind).ToList()));
+    }
+
+    /// <summary>Счётчики поста для рассылки подписчикам.</summary>
+    public async Task<IReadOnlyDictionary<string, int>> CountReactionsAsync(Guid messageId, CancellationToken ct) =>
+        await db.GroupMessageReactions.AsNoTracking()
+            .Where(r => r.MessageId == messageId)
+            .GroupBy(r => r.Kind)
+            .Select(g => new { g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
 
     /// <summary>Пост открытого канала: открытый текст и обычные (незашифрованные, проверяемые антивирусом) вложения.</summary>
     public async Task<(GroupMessage Message, MessageDto Dto)> CreatePublicPostAsync(Guid channelId, Guid me, PublicPostRequest request, CancellationToken ct)

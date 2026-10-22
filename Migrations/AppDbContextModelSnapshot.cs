@@ -671,6 +671,26 @@ namespace JaeZoo.Server.Migrations
                     b.ToTable("GroupInvites");
                 });
 
+            modelBuilder.Entity("JaeZoo.Server.Models.GroupMessageReaction", b =>
+                {
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Kind")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("MessageId", "UserId", "Kind");
+
+                    b.ToTable("GroupMessageReactions");
+                });
+
             modelBuilder.Entity("JaeZoo.Server.Models.GroupMessageView", b =>
                 {
                     b.Property<Guid>("MessageId")
