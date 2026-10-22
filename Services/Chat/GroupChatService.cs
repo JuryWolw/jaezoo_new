@@ -63,6 +63,63 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
     public static bool CanModerate(GroupChat chat, GroupChatMember? member) =>
         member is not null && (chat.OwnerId == member.UserId || member.Role >= GroupChatRole.Moderator);
 
+    /// <summary>
+    /// Можно ли писать в ветку <paramref name="rootId"/> канала: id поста — комментарий под ним (режим «ветки», пост не закрыт),
+    /// id канала — беседа (режим «беседа», вступил в неё). Писать могут подписчики; модераторы — и в закрытую ветку.
+    /// </summary>
+    public async Task<(GroupChat Chat, GroupChatMember Member)> EnsureCanCommentAsync(Guid chatId, Guid senderId, Guid rootId, CancellationToken ct)
+    {
+        var chat = await db.GroupChats.AsNoTracking().FirstOrDefaultAsync(g => g.Id == chatId, ct)
+                   ?? throw new KeyNotFoundException("Канал не найден.");
+        if (chat.Kind != GroupChatKind.Channel)
+            throw new InvalidOperationException("Комментарии есть только у каналов.");
+        var member = await db.GroupChatMembers.AsNoTracking().FirstOrDefaultAsync(m => m.GroupChatId == chatId && m.UserId == senderId, ct)
+                     ?? throw new UnauthorizedAccessException("Комментировать могут подписчики канала.");
+        var staff = CanModerate(chat, member);
+
+        if (rootId == chatId)
+        {
+            if (!chat.CommentsMode.HasFlag(ChannelCommentsMode.Discussion))
+                throw new InvalidOperationException("Беседа в этом канале выключена.");
+            if (!member.InDiscussion && !staff)
+                throw new UnauthorizedAccessException("Сначала вступите в беседу канала.");
+            return (chat, member);
+        }
+
+        if (!chat.CommentsMode.HasFlag(ChannelCommentsMode.Threads))
+            throw new InvalidOperationException("Комментарии к постам в этом канале выключены.");
+        var root = await db.GroupMessages.AsNoTracking()
+            .Where(m => m.Id == rootId && m.GroupChatId == chatId)
+            .Select(m => new { m.ThreadRootId, m.DeletedAt, m.Kind, m.CommentsClosed })
+            .FirstOrDefaultAsync(ct);
+        if (root is null || root.ThreadRootId.HasValue || root.DeletedAt.HasValue || root.Kind != DirectMessageKind.User)
+            throw new KeyNotFoundException("Пост не найден.");
+        if (root.CommentsClosed && !staff)
+            throw new InvalidOperationException("Комментарии к этому посту выключены.");
+        return (chat, member);
+    }
+
+    /// <summary>Комментарии и беседа: имя, аватарка и роль автора — подписи «Админ», «Модератор» видны всем, и до подписки.</summary>
+    public async Task<List<MessageDto>> WithAuthorsAsync(Guid chatId, List<MessageDto> messages, CancellationToken ct)
+    {
+        if (messages.Count == 0) return messages;
+        var chat = await db.GroupChats.AsNoTracking().Where(g => g.Id == chatId).Select(g => new { g.OwnerId }).FirstOrDefaultAsync(ct);
+        var ids = messages.Select(m => m.SenderId).Distinct().ToList();
+        var users = await db.Users.AsNoTracking().Where(u => ids.Contains(u.Id)).ToDictionaryAsync(u => u.Id, ct);
+        var roles = await db.GroupChatMembers.AsNoTracking()
+            .Where(m => m.GroupChatId == chatId && ids.Contains(m.UserId))
+            .ToDictionaryAsync(m => m.UserId, m => m.Role, ct);
+        return messages.Select(m => users.TryGetValue(m.SenderId, out var u)
+            ? m with
+            {
+                AuthorName = UserIdentityService.GetPublicName(u.DisplayName, UserIdentityService.GetLogin(u)),
+                AuthorAvatarUrl = UserIdentityService.GetAvatarUrl(u),
+                AuthorRole = roles.TryGetValue(m.SenderId, out var role) ? role : null,
+                AuthorIsOwner = chat?.OwnerId == m.SenderId,
+            }
+            : m).ToList();
+    }
+
     /// <summary>Закрытый канал — MLS-группа (каждое вступление — commit), поэтому лимит скромнее, чем у открытого.</summary>
     public static int MemberLimitFor(GroupChatKind kind, bool isPublic) =>
         kind == GroupChatKind.Channel ? (isPublic ? 100_000 : 500) : MaxGroupMembers;
@@ -413,7 +470,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
 
         var q = db.GroupMessages
             .AsNoTracking()
-            .Where(m => m.GroupChatId == groupId && m.SenderId != userId && m.DeletedAt == null);
+            .Where(m => m.GroupChatId == groupId && m.SenderId != userId && m.DeletedAt == null && m.ThreadRootId == null);
 
         {
             var joinedAt = DirectChatService.EnsureUtc(access.Member.JoinedAt);
@@ -476,7 +533,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         var memberCount = await db.GroupChatMembers.AsNoTracking().CountAsync(m => m.GroupChatId == groupId, ct);
         var lastMessageQuery = db.GroupMessages
             .AsNoTracking()
-            .Where(m => m.GroupChatId == groupId);
+            .Where(m => m.GroupChatId == groupId && m.ThreadRootId == null);
 
         // История открытого канала видна целиком; в группе и закрытом канале — с момента вступления.
         if (member is not null && !IsPublicChannel(chat))
@@ -526,7 +583,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             PinnedMessageId = chat.PinnedMessageId,
             CanPost = CanPost(chat, member),
             CanModerate = CanModerate(chat, member),
-            BannerUrl = chat.BannerUrl
+            BannerUrl = chat.BannerUrl,
+            CommentsMode = chat.CommentsMode,
+            InDiscussion = member?.InDiscussion ?? false
         };
     }
 
@@ -681,7 +740,12 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             deleted ? null : message.Ciphertext,
             message.MlsEpoch,
             message.SenderDeviceId,
-            mlsGroupId);
+            mlsGroupId)
+        {
+            ThreadRootId = message.ThreadRootId,
+            CommentsClosed = message.CommentsClosed,
+            ReplyToMessageId = deleted ? null : message.ReplyToId,
+        };
     }
 
     public async Task<List<MessageDto>> BuildMessageDtosAsync(IReadOnlyList<GroupMessage> messages, CancellationToken ct = default)
@@ -719,8 +783,14 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         SendMessageRequest request,
         CancellationToken ct = default)
     {
+        // Комментарий закрытого канала: права проверяем отдельно (подписчик, ветка/беседа включены, пост не закрыт).
+        var isComment = request.ThreadRootId.HasValue;
+        if (isComment)
+            await EnsureCanCommentAsync(groupId, senderId, request.ThreadRootId!.Value, ct);
+
         // Membership is checked inside the MLS context query: one round trip before the insert.
-        var group = await mls.RequireMessageContextAsync(senderId, null, groupId, request.DeviceId, request.Epoch, request.Ciphertext, ct, requireGroupMember: true);
+        var group = await mls.RequireMessageContextAsync(senderId, null, groupId, request.DeviceId, request.Epoch, request.Ciphertext, ct,
+            requireGroupMember: true, isChannelComment: isComment);
 
         var ids = (request.FileIds ?? Array.Empty<Guid>()).Where(x => x != Guid.Empty).Distinct().Take(10).ToList();
         var files = ids.Count == 0 ? new List<ChatFile>() : await db.ChatFiles.Where(f => ids.Contains(f.Id)).ToListAsync(ct);
@@ -746,6 +816,7 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             SenderDeviceId = request.DeviceId,
             SentAt = now,
             Kind = DirectMessageKind.User,
+            ThreadRootId = request.ThreadRootId,
         };
         db.GroupMessages.Add(message);
 
@@ -767,6 +838,8 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
             db.Entry(chatStub).State = EntityState.Detached; // never let later reads in this request see the stub
         // One SaveChanges is atomic; the reply is built from what we wrote (no re-read on the hot path).
         var dto = ToMessageDto(message, files.Select(ToAttachmentDto).ToList(), group.Id);
+        if (isComment)
+            dto = (await WithAuthorsAsync(groupId, new List<MessageDto> { dto }, ct))[0];
         return (groupId, message, ev, dto);
     }
 
@@ -780,7 +853,9 @@ public sealed class GroupChatService(AppDbContext db, DirectChatService directCh
         if (message.DeletedAt.HasValue) throw new InvalidOperationException("Deleted message cannot be edited.");
         if (!await IsMemberAsync(message.GroupChatId, senderId, ct)) throw new UnauthorizedAccessException("Access denied.");
 
-        var group = await mls.RequireMessageContextAsync(senderId, null, message.GroupChatId, request.DeviceId, request.Epoch, request.Ciphertext, ct);
+        // Свой комментарий подписчик правит сам (писать посты канала он не может).
+        var group = await mls.RequireMessageContextAsync(senderId, null, message.GroupChatId, request.DeviceId, request.Epoch, request.Ciphertext, ct,
+            isChannelComment: message.ThreadRootId.HasValue);
         message.Ciphertext = request.Ciphertext;
         message.MlsEpoch = request.Epoch;
         message.SenderDeviceId = request.DeviceId;

@@ -668,7 +668,7 @@ public sealed class MlsDeliveryService(AppDbContext db, AuthStateCache? authCach
     /// </summary>
     public async Task<MlsGroupState> RequireMessageContextAsync(
         Guid senderId, Guid? dialogId, Guid? groupChatId, Guid deviceId, long epoch, byte[]? ciphertext, CancellationToken ct,
-        Guid? directPeerId = null, bool requireGroupMember = false)
+        Guid? directPeerId = null, bool requireGroupMember = false, bool isChannelComment = false)
     {
         if (ciphertext is not { Length: > 0 and <= MaxMessageBytes })
             throw MlsDeliveryException.Invalid("Сообщение должно быть зашифровано (MLS).");
@@ -688,8 +688,9 @@ public sealed class MlsDeliveryService(AppDbContext db, AuthStateCache? authCach
                     ((f.RequesterId == senderId && f.AddresseeId == peerId) || (f.RequesterId == peerId && f.AddresseeId == senderId))),
                 PeerVerified = !hasPeer || db.Users.Any(u => u.Id == peerId && u.EmailConfirmed),
                 IsMember = !requireGroupMember || db.GroupChatMembers.Any(m => m.GroupChatId == groupChatId && m.UserId == senderId),
+                // Комментарии подписчиков проверяет GroupChatService.EnsureCanCommentAsync (ветка, беседа, выключено ли).
                 // Канал: пишут только владелец, админы и модераторы (подписчики читают).
-                CanPost = !groupChatId.HasValue || !db.GroupChats.Any(c => c.Id == groupChatId && c.Kind == GroupChatKind.Channel
+                CanPost = isChannelComment || !groupChatId.HasValue || !db.GroupChats.Any(c => c.Id == groupChatId && c.Kind == GroupChatKind.Channel
                     && c.OwnerId != senderId
                     && !db.GroupChatMembers.Any(m => m.GroupChatId == groupChatId && m.UserId == senderId && m.Role >= GroupChatRole.Moderator)),
                 IsPublicChannel = groupChatId.HasValue && db.GroupChats.Any(c => c.Id == groupChatId && c.Kind == GroupChatKind.Channel && c.IsPublic),

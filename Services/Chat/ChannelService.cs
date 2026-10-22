@@ -43,6 +43,8 @@ public sealed class ChannelService(AppDbContext db, GroupChatService groups)
         if (chat.Kind != GroupChatKind.Channel)
             throw new KeyNotFoundException("Канал не найден.");
         chat.SignPosts = request.SignPosts;
+        if (request.CommentsMode is { } mode)
+            chat.CommentsMode = mode & ChannelCommentsMode.Both;
         await db.SaveChangesAsync(ct);
         return chat;
     }
@@ -60,7 +62,7 @@ public sealed class ChannelService(AppDbContext db, GroupChatService groups)
         if (member is null && await IsBannedAsync(channelId, me, ct))
             return null;
 
-        var q = db.GroupMessages.AsNoTracking().Where(m => m.GroupChatId == channelId);
+        var q = db.GroupMessages.AsNoTracking().Where(m => m.GroupChatId == channelId && m.ThreadRootId == null);
         if (!chat.IsPublic)
         {
             var joinedAt = DirectChatService.EnsureUtc(member!.JoinedAt);
@@ -197,7 +199,8 @@ public sealed class ChannelService(AppDbContext db, GroupChatService groups)
         if (!chat.IsPublic) throw new InvalidOperationException("Посты закрытого канала правятся через MLS.");
         if (message.SenderId != me) throw new UnauthorizedAccessException("Править пост может только его автор.");
         if (message.DeletedAt.HasValue || message.Kind != DirectMessageKind.User) throw new InvalidOperationException("Этот пост нельзя изменить.");
-        if (!GroupChatService.CanPost(chat, await FindMemberAsync(chat.Id, me, ct)))
+        // Свой комментарий правит автор-подписчик; пост — только тот, кто может писать в канал.
+        if (message.ThreadRootId is null && !GroupChatService.CanPost(chat, await FindMemberAsync(chat.Id, me, ct)))
             throw new UnauthorizedAccessException("Писать в канал могут только админы и модераторы.");
 
         var text = (request.Text ?? string.Empty).Trim();
@@ -263,6 +266,145 @@ public sealed class ChannelService(AppDbContext db, GroupChatService groups)
                 .GroupBy(v => v.MessageId)
                 .Select(g => new { g.Key, Count = g.Count() })
                 .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+
+    // ---------- Комментарии: ветки под постами и беседа канала ----------
+
+    public const int MaxCommentLength = 4000;
+
+    /// <summary>
+    /// Ветка: <paramref name="rootId"/> — пост (комментарии под ним) или сам канал (беседа). Видна тем же, кому лента:
+    /// открытый канал — всем, закрытый — подписчикам с момента вступления. У закрытого сообщения — MLS-шифротекст.
+    /// </summary>
+    public async Task<ChannelThreadDto?> GetThreadAsync(Guid channelId, Guid me, Guid rootId, DateTime? before, Guid? beforeId, int take, CancellationToken ct)
+    {
+        var chat = await RequireChannelAsync(channelId, ct);
+        var member = await db.GroupChatMembers.AsNoTracking().FirstOrDefaultAsync(m => m.GroupChatId == channelId && m.UserId == me, ct);
+        if (member is null && (!chat.IsPublic || await IsBannedAsync(channelId, me, ct)))
+            return null;
+
+        MessageDto? root = null;
+        if (rootId != channelId)
+        {
+            var rootRow = await db.GroupMessages.AsNoTracking()
+                .FirstOrDefaultAsync(m => m.Id == rootId && m.GroupChatId == channelId && m.ThreadRootId == null, ct)
+                ?? throw new KeyNotFoundException("Пост не найден.");
+            root = (await groups.BuildMessageDtosAsync(new[] { rootRow }, ct))[0];
+        }
+
+        var q = db.GroupMessages.AsNoTracking().Where(m => m.GroupChatId == channelId && m.ThreadRootId == rootId);
+        if (!chat.IsPublic)
+        {
+            var joinedAt = DirectChatService.EnsureUtc(member!.JoinedAt);
+            q = q.Where(m => m.SentAt >= joinedAt);
+        }
+        if (before.HasValue)
+        {
+            var bt = DirectChatService.EnsureUtc(before.Value);
+            q = beforeId.HasValue
+                ? q.Where(m => m.SentAt < bt || (m.SentAt == bt && m.Id.CompareTo(beforeId.Value) < 0))
+                : q.Where(m => m.SentAt < bt);
+        }
+        var rows = await q.OrderByDescending(m => m.SentAt).ThenByDescending(m => m.Id).Take(Math.Clamp(take, 1, 100)).ToListAsync(ct);
+        rows.Reverse();
+        var messages = await groups.WithAuthorsAsync(channelId, await groups.BuildMessageDtosAsync(rows, ct), ct);
+
+        var canWrite = false;
+        if (member is not null)
+        {
+            try { await groups.EnsureCanCommentAsync(channelId, me, rootId, ct); canWrite = true; }
+            catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException or KeyNotFoundException) { canWrite = false; }
+        }
+        return new ChannelThreadDto(root, messages, canWrite);
+    }
+
+    /// <summary>Комментарий открытого канала: публичный, как и посты (открытый текст, обычные вложения).</summary>
+    public async Task<(GroupMessage Message, MessageDto Dto)> CreatePublicCommentAsync(Guid channelId, Guid me, Guid rootId, PublicCommentRequest request, CancellationToken ct)
+    {
+        var (chat, _) = await groups.EnsureCanCommentAsync(channelId, me, rootId, ct);
+        if (!chat.IsPublic)
+            throw new InvalidOperationException("Комментарии закрытого канала шифруются (MLS) — отправка открытым текстом запрещена.");
+
+        var text = (request.Text ?? string.Empty).Trim();
+        if (text.Length > MaxCommentLength)
+            throw new InvalidOperationException($"Комментарий — не больше {MaxCommentLength} символов.");
+        var ids = (request.FileIds ?? Array.Empty<Guid>()).Where(x => x != Guid.Empty).Distinct().ToList();
+        if (ids.Count > MaxPostFiles)
+            throw new InvalidOperationException($"Не больше {MaxPostFiles} вложений.");
+        if (text.Length == 0 && ids.Count == 0)
+            throw new InvalidOperationException("Комментарий пустой.");
+        if (request.ReplyToMessageId is { } replyTo
+            && !await db.GroupMessages.AnyAsync(m => m.Id == replyTo && m.GroupChatId == channelId && (m.ThreadRootId == rootId || m.Id == rootId), ct))
+            throw new InvalidOperationException("Сообщение для ответа не найдено в этой ветке.");
+
+        var files = ids.Count == 0 ? new List<ChatFile>() : await db.ChatFiles.Where(f => ids.Contains(f.Id)).ToListAsync(ct);
+        if (files.Count != ids.Count)
+            throw new InvalidOperationException("Вложение не найдено — загрузите его заново.");
+        foreach (var f in files)
+        {
+            if (f.UploaderId != me) throw new InvalidOperationException("Можно прикрепить только свои файлы.");
+            if (f.IsAttached) throw new InvalidOperationException("Файл уже прикреплён к другому сообщению.");
+            if (f.ScanStatus == FileScanStatus.ClientEncrypted)
+                throw new InvalidOperationException("Вложения открытого канала публичные — их не шифруют.");
+            if (f.BlockedAt.HasValue || f.DeletedAt.HasValue) throw new InvalidOperationException("Файл заблокирован или удалён.");
+        }
+
+        var now = DateTime.UtcNow;
+        var message = new GroupMessage
+        {
+            GroupChatId = channelId, SenderId = me, Text = text, SentAt = now, Kind = DirectMessageKind.User,
+            ThreadRootId = rootId, ReplyToId = request.ReplyToMessageId,
+        };
+        db.GroupMessages.Add(message);
+        foreach (var f in files)
+        {
+            db.GroupMessageAttachments.Add(new GroupMessageAttachment { MessageId = message.Id, FileId = f.Id, CreatedAt = now });
+            f.IsAttached = true;
+            f.AttachedAt = now;
+        }
+        await db.SaveChangesAsync(ct);
+        var dto = groups.ToMessageDto(message, files.Select(groups.ToAttachmentDto).ToList());
+        return (message, (await groups.WithAuthorsAsync(channelId, new List<MessageDto> { dto }, ct))[0]);
+    }
+
+    /// <summary>Включить или выключить комментарии под конкретным постом (админы и модераторы).</summary>
+    public async Task<GroupMessage> SetPostCommentsAsync(Guid postId, Guid me, bool enabled, CancellationToken ct)
+    {
+        var post = await db.GroupMessages.FirstOrDefaultAsync(m => m.Id == postId, ct) ?? throw new KeyNotFoundException("Пост не найден.");
+        var chat = await RequireChannelAsync(post.GroupChatId, ct);
+        if (post.ThreadRootId.HasValue || post.DeletedAt.HasValue)
+            throw new InvalidOperationException("Комментарии включаются только у постов.");
+        if (!GroupChatService.CanModerate(chat, await FindMemberAsync(chat.Id, me, ct)))
+            throw new UnauthorizedAccessException("Комментарии к постам включают админы и модераторы.");
+        post.CommentsClosed = !enabled;
+        await db.SaveChangesAsync(ct);
+        return post;
+    }
+
+    /// <summary>Вступить в беседу канала или выйти из неё (подписка на канал остаётся).</summary>
+    public async Task SetDiscussionMembershipAsync(Guid channelId, Guid me, bool joined, CancellationToken ct)
+    {
+        var chat = await RequireChannelAsync(channelId, ct);
+        if (joined && !chat.CommentsMode.HasFlag(ChannelCommentsMode.Discussion))
+            throw new InvalidOperationException("Беседа в этом канале выключена.");
+        var member = await FindMemberAsync(channelId, me, ct) ?? throw new UnauthorizedAccessException("Сначала подпишитесь на канал.");
+        member.InDiscussion = joined;
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>Сколько комментариев под постами (для «💬 N» под каждым).</summary>
+    public async Task<IReadOnlyDictionary<Guid, int>> CountCommentsAsync(Guid channelId, Guid me, IReadOnlyList<Guid> postIds, CancellationToken ct)
+    {
+        var chat = await RequireChannelAsync(channelId, ct);
+        var ids = postIds.Distinct().Take(200).ToList();
+        if (ids.Count == 0) return new Dictionary<Guid, int>();
+        var canRead = chat.IsPublic || await db.GroupChatMembers.AnyAsync(m => m.GroupChatId == channelId && m.UserId == me, ct);
+        if (!canRead) throw new UnauthorizedAccessException("Нет доступа к каналу.");
+        return await db.GroupMessages.AsNoTracking()
+            .Where(m => m.GroupChatId == channelId && m.ThreadRootId != null && ids.Contains(m.ThreadRootId.Value) && m.DeletedAt == null)
+            .GroupBy(m => m.ThreadRootId!.Value)
+            .Select(g => new { g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+    }
 
     // ---------- Баны ----------
 

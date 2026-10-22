@@ -124,6 +124,52 @@ public sealed class ChannelsController(
         return result;
     });
 
+    // ---------- Комментарии: ветки под постами и беседа канала ----------
+
+    /// <summary>Ветка: rootId — пост (комментарии) или сам канал (беседа).</summary>
+    [HttpGet("{id:guid}/threads/{rootId:guid}")]
+    public Task<ActionResult<ChannelThreadDto>> Thread(Guid id, Guid rootId, [FromQuery] DateTime? before, [FromQuery] Guid? beforeId, [FromQuery] int take = 50, CancellationToken ct = default) => Run(async () =>
+        await channels.GetThreadAsync(id, MeId, rootId, before, beforeId, take, ct) ?? throw new UnauthorizedAccessException("Канал закрытый — комментарии видят только подписчики."));
+
+    /// <summary>Комментарий открытого канала (открытый текст). У закрытого — api/chat/groups/{id}/messages/send с ThreadRootId (MLS).</summary>
+    [HttpPost("{id:guid}/threads/{rootId:guid}")]
+    [EnableRateLimiting("chat-write")]
+    [RequireVerifiedEmail]
+    public Task<ActionResult<MessageDto>> Comment(Guid id, Guid rootId, [FromBody] PublicCommentRequest body, CancellationToken ct) => Run(async () =>
+    {
+        var (_, dto) = await channels.CreatePublicCommentAsync(id, MeId, rootId, body, ct);
+        await SendToMembersAsync(id, "GroupChatMessageCreated", new GroupChatRealtimeMessageDto(id, dto));
+        return dto;
+    });
+
+    /// <summary>Включить или выключить комментарии под постом.</summary>
+    [HttpPost("posts/{postId:guid}/comments")]
+    public Task<ActionResult<MessageDto>> SetPostComments(Guid postId, [FromBody] SetPostCommentsRequest body, CancellationToken ct) => Run(async () =>
+    {
+        var post = await channels.SetPostCommentsAsync(postId, MeId, body.Enabled, ct);
+        var dto = (await groups.BuildMessageDtosAsync(new[] { post }, ct))[0];
+        await SendToMembersAsync(post.GroupChatId, "GroupChatMessageUpdated", new GroupChatMessageUpdatedDto(post.GroupChatId, dto));
+        return dto;
+    });
+
+    [HttpPost("{id:guid}/discussion/join")]
+    public Task<ActionResult<ChannelDetailsDto>> JoinDiscussion(Guid id, CancellationToken ct) => Run(async () =>
+    {
+        await channels.SetDiscussionMembershipAsync(id, MeId, true, ct);
+        return (await channels.GetDetailsAsync(id, MeId, ct))!;
+    });
+
+    [HttpPost("{id:guid}/discussion/leave")]
+    public Task<ActionResult<ChannelDetailsDto>> LeaveDiscussion(Guid id, CancellationToken ct) => Run(async () =>
+    {
+        await channels.SetDiscussionMembershipAsync(id, MeId, false, ct);
+        return (await channels.GetDetailsAsync(id, MeId, ct))!;
+    });
+
+    [HttpPost("{id:guid}/comment-counts")]
+    public Task<ActionResult<IReadOnlyDictionary<Guid, int>>> CommentCounts(Guid id, [FromBody] CommentCountsRequest body, CancellationToken ct) => Run(async () =>
+        await channels.CountCommentsAsync(id, MeId, body.MessageIds ?? Array.Empty<Guid>(), ct));
+
     // ---------- Баны (каналы и группы) ----------
 
     [HttpGet("{id:guid}/bans")]

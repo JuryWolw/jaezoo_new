@@ -34,6 +34,9 @@ public class GroupChat
     /// <summary>Канал: подпись автора под постом (иначе пост — от имени канала).</summary>
     public bool SignPosts { get; set; }
 
+    /// <summary>Канал: какие комментарии включены (ветки под постами, беседа).</summary>
+    public ChannelCommentsMode CommentsMode { get; set; } = ChannelCommentsMode.Threads;
+
     /// <summary>Канал: закреплённый пост.</summary>
     public Guid? PinnedMessageId { get; set; }
 

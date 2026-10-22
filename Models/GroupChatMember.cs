@@ -15,4 +15,7 @@ public class GroupChatMember
     public DateTime LastReadAt { get; set; } = DateTime.MinValue;
 
     public Guid LastReadMessageId { get; set; } = Guid.Empty;
+
+    /// <summary>Канал: подписчик вступил в беседу канала (писать в неё могут только вступившие).</summary>
+    public bool InDiscussion { get; set; }
 }

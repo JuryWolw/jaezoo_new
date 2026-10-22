@@ -156,7 +156,20 @@ public record MessageDto(
     long MlsEpoch = 0,
     Guid? SenderDeviceId = null,
     Guid? MlsGroupId = null
-);
+)
+{
+    /// <summary>Канал: null — пост; id поста — комментарий под ним; id канала — сообщение беседы.</summary>
+    public Guid? ThreadRootId { get; init; }
+    /// <summary>Пост канала: комментарии под ним выключены.</summary>
+    public bool CommentsClosed { get; init; }
+    /// <summary>Ответ (открытые комментарии; в MLS-сообщениях ответ внутри шифротекста).</summary>
+    public Guid? ReplyToMessageId { get; init; }
+    /// <summary>Комментарии и беседа: автор (имя, аватарка, роль в канале — «Админ», «Модератор»).</summary>
+    public string? AuthorName { get; init; }
+    public string? AuthorAvatarUrl { get; init; }
+    public GroupChatRole? AuthorRole { get; init; }
+    public bool AuthorIsOwner { get; init; }
+}
 
 public record UnreadDialogDto(Guid FriendId, int UnreadCount, Guid? FirstUnreadId, DateTime? FirstUnreadAt)
 {
@@ -169,7 +182,11 @@ public record GroupChatMessageReadDto(Guid GroupId, Guid ReaderId, Guid LastRead
 public record MarkReadRequest(Guid LastReadMessageId);
 
 /// <summary>New user message: MLS ciphertext built on <paramref name="Epoch"/> by device <paramref name="DeviceId"/>.</summary>
-public record SendMessageRequest(byte[] Ciphertext, long Epoch, Guid DeviceId, IReadOnlyList<Guid>? FileIds = null);
+public record SendMessageRequest(byte[] Ciphertext, long Epoch, Guid DeviceId, IReadOnlyList<Guid>? FileIds = null)
+{
+    /// <summary>Канал: комментарий под постом (id поста) или в беседе (id канала).</summary>
+    public Guid? ThreadRootId { get; init; }
+}
 public record EditMessageRequest(byte[] Ciphertext, long Epoch, Guid DeviceId);
 public record SendSystemMessageRequest(string SystemKey, string? Text);
 
@@ -263,6 +280,10 @@ public record GroupChatSummaryDto(
     public bool CanModerate { get; init; }
     /// <summary>Шапка группы или канала (null — нет).</summary>
     public string? BannerUrl { get; init; }
+    /// <summary>Канал: включённые виды комментариев.</summary>
+    public ChannelCommentsMode CommentsMode { get; init; }
+    /// <summary>Канал: пользователь вступил в беседу канала.</summary>
+    public bool InDiscussion { get; init; }
 }
 
 public record GroupChatDetailsDto(GroupChatSummaryDto Chat, IReadOnlyList<GroupChatMemberDto> Members);
@@ -567,10 +588,19 @@ public record FileCloneResult(Guid SourceId, Guid FileId);
 // ---------- Каналы ----------
 
 public record CreateChannelRequest(string Title, string? Description = null, bool IsPublic = true, bool SignPosts = false);
-public record UpdateChannelRequest(string Title, string? Description = null, bool SignPosts = false);
+public record UpdateChannelRequest(string Title, string? Description = null, bool SignPosts = false, ChannelCommentsMode? CommentsMode = null);
 
 /// <summary>Пост открытого канала: открытый текст (публичный контент) и незашифрованные вложения.</summary>
 public record PublicPostRequest(string? Text, IReadOnlyList<Guid>? FileIds = null);
+
+/// <summary>Комментарий открытого канала (публичный, как и посты): текст, вложения, ответ.</summary>
+public record PublicCommentRequest(string? Text, IReadOnlyList<Guid>? FileIds = null, Guid? ReplyToMessageId = null);
+
+/// <summary>Ветка: корень (пост; у беседы — null) и сообщения по порядку.</summary>
+public record ChannelThreadDto(MessageDto? Root, IReadOnlyList<MessageDto> Messages, bool CanWrite);
+
+public record SetPostCommentsRequest(bool Enabled);
+public record CommentCountsRequest(IReadOnlyList<Guid> MessageIds);
 public record EditPublicPostRequest(string Text);
 
 public record PinPostRequest(Guid? MessageId);

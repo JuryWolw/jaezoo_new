@@ -27,6 +27,18 @@ public class GroupMessage
     [MaxLength(64)]
     public string? SystemKey { get; set; }
 
+    /// <summary>
+    /// Канал: null — пост ленты; id поста — комментарий под ним; id самого канала — сообщение беседы канала.
+    /// Сервер видит, к чему относится комментарий (иначе не отличить его от попытки опубликовать пост), но не текст.
+    /// </summary>
+    public Guid? ThreadRootId { get; set; }
+
+    /// <summary>Пост канала: комментарии под ним выключены.</summary>
+    public bool CommentsClosed { get; set; }
+
+    /// <summary>Ответ — только у открытых комментариев открытого канала (в MLS ответ лежит внутри шифротекста).</summary>
+    public Guid? ReplyToId { get; set; }
+
     public DateTime? EditedAt { get; set; }
 
     public DateTime? DeletedAt { get; set; }

@@ -1095,7 +1095,8 @@ public class ChatController(
             if (access is null)
                 return NotFound(new { error = "Group chat not found." });
 
-            var q = db.GroupMessages.AsNoTracking().Where(m => m.GroupChatId == groupId);
+            // Лента — только посты/сообщения; комментарии и беседа канала читаются своими ветками.
+            var q = db.GroupMessages.AsNoTracking().Where(m => m.GroupChatId == groupId && m.ThreadRootId == null);
             {
                 var joinedAt = DirectChatService.EnsureUtc(access.Member.JoinedAt);
                 q = q.Where(m => m.SentAt >= joinedAt);
@@ -1171,6 +1172,11 @@ public class ChatController(
         catch (MlsDeliveryException ex)
         {
             return StatusCode(ex.StatusCode, new { code = ex.Code, error = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            // Комментарий: не подписчик, не вступил в беседу.
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = ex.Message });
         }
         catch (Exception ex)
         {

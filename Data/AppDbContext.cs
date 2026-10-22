@@ -640,6 +640,12 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<GroupMessage>()
             .HasIndex(m => new { m.GroupChatId, m.DeletedAt, m.SentAt, m.Id });
 
+        // Ветки комментариев и беседа канала: выборка по корню.
+        b.Entity<GroupMessage>()
+            .HasIndex(m => new { m.GroupChatId, m.ThreadRootId, m.SentAt });
+
+        b.Entity<GroupChat>().Property(g => g.CommentsMode).HasConversion<int>();
+
         b.Entity<GroupMessage>()
             .HasOne<GroupChat>()
             .WithMany()

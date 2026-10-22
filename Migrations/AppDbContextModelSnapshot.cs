@@ -553,6 +553,9 @@ namespace JaeZoo.Server.Migrations
                         .HasMaxLength(512)
                         .HasColumnType("character varying(512)");
 
+                    b.Property<int>("CommentsMode")
+                        .HasColumnType("integer");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -713,6 +716,9 @@ namespace JaeZoo.Server.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<bool>("InDiscussion")
+                        .HasColumnType("boolean");
+
                     b.Property<Guid>("GroupChatId")
                         .HasColumnType("uuid");
 
@@ -745,6 +751,15 @@ namespace JaeZoo.Server.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("CommentsClosed")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid?>("ReplyToId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ThreadRootId")
                         .HasColumnType("uuid");
 
                     b.Property<byte[]>("Ciphertext")
@@ -790,6 +805,8 @@ namespace JaeZoo.Server.Migrations
                     b.HasIndex("GroupChatId", "SentAt", "Id");
 
                     b.HasIndex("GroupChatId", "DeletedAt", "SentAt", "Id");
+
+                    b.HasIndex("GroupChatId", "ThreadRootId", "SentAt");
 
                     b.ToTable("GroupMessages");
                 });
