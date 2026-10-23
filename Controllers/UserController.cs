@@ -160,6 +160,23 @@ namespace JaeZoo.Server.Controllers
             return Ok(ToProfileDto(me) with { Badges = await LoadBadgesAsync(me.Id, ct) });
         }
 
+        public sealed record BadgesBatchRequest(List<Guid>? Ids);
+
+        /// <summary>Плашки сразу многих пользователей (список друзей, участники чата) — одним запросом.
+        /// В ответе только те, у кого плашки есть.</summary>
+        [HttpPost("badges")]
+        public async Task<ActionResult<Dictionary<Guid, List<UserBadgeDto>>>> GetBadges([FromBody] BadgesBatchRequest body, CancellationToken ct)
+        {
+            var ids = (body.Ids ?? new()).Where(id => id != Guid.Empty).Distinct().Take(500).ToList();
+            if (ids.Count == 0) return new Dictionary<Guid, List<UserBadgeDto>>();
+            var rows = await (from ub in _db.UserBadges.AsNoTracking()
+                              join b in _db.Badges.AsNoTracking() on ub.BadgeId equals b.Id
+                              where ids.Contains(ub.UserId)
+                              orderby b.SortOrder, b.Title
+                              select new { ub.UserId, Badge = new UserBadgeDto(b.Id, b.Title, b.ColorHex, b.Icon) }).ToListAsync(ct);
+            return rows.GroupBy(r => r.UserId).ToDictionary(g => g.Key, g => g.Select(r => r.Badge).ToList());
+        }
+
         [HttpGet("{id:guid}")]
         [AllowAnonymous]
         public async Task<ActionResult<PublicUserDto>> GetPublic(Guid id, CancellationToken ct)
