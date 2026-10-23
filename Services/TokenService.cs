@@ -25,13 +25,12 @@ public class TokenService(IOptions<JwtOptions> opts)
         {
             new Claim(JwtRegisteredClaimNames.Sub, u.Id.ToString()),
             new Claim(ClaimTypes.NameIdentifier, u.Id.ToString()),     // <= важно для Clients.User(...)
-            new Claim(JwtRegisteredClaimNames.UniqueName, UserIdentityService.GetLogin(u)),
             new Claim("public_id", u.PublicId ?? string.Empty),
             new Claim("display_name", UserIdentityService.GetPublicName(u)),
             new Claim("email_confirmed", u.EmailConfirmed ? "true" : "false"),
             new Claim("token_version", u.TokenVersion.ToString()),
-            new Claim("security_stamp", u.SecurityStamp ?? string.Empty),
-            new Claim(JwtRegisteredClaimNames.Email, UserIdentityService.GetEmail(u))
+            new Claim("security_stamp", u.SecurityStamp ?? string.Empty)
+            // Логина и почты в токене нет: JWT — просто base64, его прочитает любой, у кого он оказался.
         };
 
         if (sessionId.HasValue)

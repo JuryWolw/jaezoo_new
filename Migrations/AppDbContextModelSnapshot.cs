@@ -1871,6 +1871,9 @@ namespace JaeZoo.Server.Migrations
                     b.Property<bool>("TwoFactorEnabled")
                         .HasColumnType("boolean");
 
+                    b.Property<long?>("TwoFactorLastUsedStep")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTime?>("TwoFactorEnabledAt")
                         .HasColumnType("timestamp with time zone");
 

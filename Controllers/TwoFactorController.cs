@@ -16,7 +16,8 @@ namespace JaeZoo.Server.Controllers;
 [Route("api/auth/2fa")]
 public sealed class TwoFactorController(
     AppDbContext db,
-    SecurityAuditService securityAudit) : ControllerBase
+    SecurityAuditService securityAudit,
+    LoginThrottle throttle) : ControllerBase
 {
     private readonly PasswordHasher<User> _hasher = new();
 
@@ -68,8 +69,9 @@ public sealed class TwoFactorController(
             return BadRequest("Сначала начните привязку приложения-аутентификатора.");
 
         var secret = IdentityDataProtector.UnprotectSecret(user.TwoFactorPendingSecretEncrypted);
-        if (!TotpService.VerifyTotp(secret, request.Code))
+        if (!TotpService.TryVerifyTotp(secret, request.Code, null, out var firstStep))
             return BadRequest("Неверный код из приложения-аутентификатора.");
+        user.TwoFactorLastUsedStep = firstStep;
 
         var now = DateTime.UtcNow;
         user.TwoFactorSecretEncrypted = user.TwoFactorPendingSecretEncrypted;
@@ -96,17 +98,27 @@ public sealed class TwoFactorController(
         if (!user.TwoFactorEnabled)
             return NoContent();
 
+        if (throttle.RetryAfter(LoginThrottle.TwoFactorKey(user.Id)) is { } wait)
+            return StatusCode(StatusCodes.Status429TooManyRequests, $"Слишком много неудачных попыток. Попробуйте через {Math.Max(1, (int)Math.Ceiling(wait.TotalMinutes))} мин.");
+
         if (_hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password ?? string.Empty) == PasswordVerificationResult.Failed)
+        {
+            throttle.RegisterFailure(LoginThrottle.TwoFactorKey(user.Id), LoginThrottle.TwoFactorLimit);
             return Unauthorized("Неверный пароль.");
+        }
 
         if (!VerifyAuthenticatorCode(user, request.Code))
+        {
+            throttle.RegisterFailure(LoginThrottle.TwoFactorKey(user.Id), LoginThrottle.TwoFactorLimit);
             return BadRequest("Неверный код из приложения-аутентификатора.");
+        }
 
         user.TwoFactorEnabled = false;
         user.TwoFactorSecretEncrypted = null;
         user.TwoFactorPendingSecretEncrypted = null;
         user.TwoFactorPendingSecretExpiresAt = null;
         user.TwoFactorDisabledAt = DateTime.UtcNow;
+        user.TwoFactorLastUsedStep = null;
         user.UpdatedAt = DateTime.UtcNow;
 
         var codes = await db.TwoFactorRecoveryCodes.Where(c => c.UserId == uid).ToListAsync(ct);
@@ -126,11 +138,20 @@ public sealed class TwoFactorController(
         if (!user.TwoFactorEnabled)
             return BadRequest("Сначала включите двухфакторную защиту.");
 
+        if (throttle.RetryAfter(LoginThrottle.TwoFactorKey(user.Id)) is { } wait)
+            return StatusCode(StatusCodes.Status429TooManyRequests, $"Слишком много неудачных попыток. Попробуйте через {Math.Max(1, (int)Math.Ceiling(wait.TotalMinutes))} мин.");
+
         if (_hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password ?? string.Empty) == PasswordVerificationResult.Failed)
+        {
+            throttle.RegisterFailure(LoginThrottle.TwoFactorKey(user.Id), LoginThrottle.TwoFactorLimit);
             return Unauthorized("Неверный пароль.");
+        }
 
         if (!VerifyAuthenticatorCode(user, request.Code))
+        {
+            throttle.RegisterFailure(LoginThrottle.TwoFactorKey(user.Id), LoginThrottle.TwoFactorLimit);
             return BadRequest("Неверный код из приложения-аутентификатора.");
+        }
 
         var recoveryCodes = await ReplaceRecoveryCodesAsync(uid, ct);
         user.UpdatedAt = DateTime.UtcNow;
@@ -171,7 +192,11 @@ public sealed class TwoFactorController(
             return false;
 
         var secret = IdentityDataProtector.UnprotectSecret(user.TwoFactorSecretEncrypted);
-        return TotpService.VerifyTotp(secret, normalized);
+        // Защита от повтора: принятый шаг запоминается (вызывающий сохраняет пользователя).
+        if (!TotpService.TryVerifyTotp(secret, normalized, user.TwoFactorLastUsedStep, out var step))
+            return false;
+        user.TwoFactorLastUsedStep = step;
+        return true;
     }
 
     private Guid GetCurrentUserId()

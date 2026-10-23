@@ -28,17 +28,12 @@ public static class UserSessionService
         return s.Length <= max ? s : s[..max];
     }
 
+    /// <summary>
+    /// Адрес клиента. Берётся из соединения: ForwardedHeaders уже подставил настоящий адрес от доверенного прокси
+    /// (Caddy). Первое значение X-Forwarded-For читать нельзя — его пишет сам клиент, прокси лишь дописывает в конец.
+    /// </summary>
     public static string GetRemoteIp(HttpContext http)
-    {
-        var forwarded = http.Request.Headers["X-Forwarded-For"].FirstOrDefault();
-        if (!string.IsNullOrWhiteSpace(forwarded))
-        {
-            var first = forwarded.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
-            if (!string.IsNullOrWhiteSpace(first)) return CleanHeader(first, 64);
-        }
-
-        return CleanHeader(http.Connection.RemoteIpAddress?.ToString(), 64);
-    }
+        => CleanHeader(http.Connection.RemoteIpAddress?.ToString(), 64);
 
     public static bool IsActive(UserSession s, DateTime now) =>
         s.RevokedAt == null && s.ExpiresAt > now;

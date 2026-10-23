@@ -53,10 +53,7 @@ public sealed class AdminAuditService(AppDbContext db, ILogger<AdminAuditService
 
     private static string GetClientIp(HttpContext httpContext)
     {
-        var forwarded = httpContext.Request.Headers["X-Forwarded-For"].ToString();
-        if (!string.IsNullOrWhiteSpace(forwarded))
-            return forwarded.Split(',')[0].Trim();
-
+        // Настоящий адрес уже подставлен ForwardedHeaders от доверенного прокси; X-Forwarded-For пишет сам клиент.
         return httpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
     }
 

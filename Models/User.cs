@@ -108,6 +108,8 @@ namespace JaeZoo.Server.Models
         public DateTime? TwoFactorPendingSecretExpiresAt { get; set; }
         public DateTime? TwoFactorEnabledAt { get; set; }
         public DateTime? TwoFactorDisabledAt { get; set; }
+        /// <summary>Шаг TOTP последнего принятого кода — повтор того же или более старого кода отклоняется.</summary>
+        public long? TwoFactorLastUsedStep { get; set; }
 
         [MaxLength(64)]
         public string? CustomStatus { get; set; } // произвольная подпись («Работаю», «AFK»)

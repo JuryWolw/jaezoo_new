@@ -79,17 +79,9 @@ builder.Services
 
         o.Events = new JwtBearerEvents
         {
-            OnMessageReceived = context =>
-            {
-                var accessToken = context.Request.Query["access_token"];
-                var path = context.HttpContext.Request.Path;
-                if (!string.IsNullOrEmpty(accessToken) &&
-                    (path.StartsWithSegments("/hubs/chat") || path.StartsWithSegments("/hubs/calls")))
-                {
-                    context.Token = accessToken;
-                }
-                return Task.CompletedTask;
-            },
+            // Токен принимается только из заголовка Authorization. Из строки запроса (?access_token=) — нет: адреса
+            // попадают в журналы прокси и браузера. Настольный клиент SignalR и так шлёт заголовок (тест
+            // SignalRTokenTransportTests); веб-клиента нет.
             OnTokenValidated = async context =>
             {
                 var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
@@ -201,6 +193,7 @@ builder.Services.AddScoped<DirectChatService>();
 builder.Services.AddScoped<SystemChatService>();
 builder.Services.AddScoped<JaeZoo.Server.Services.News.NewsService>();
 builder.Services.AddScoped<JaeZoo.Server.Services.SiteContentService>();
+builder.Services.AddSingleton<JaeZoo.Server.Services.Security.LoginThrottle>();
 builder.Services.AddScoped<GroupChatService>();
 builder.Services.AddScoped<ChannelService>();
 builder.Services.AddScoped<JaeZoo.Server.Services.History.HistoryService>();
@@ -259,6 +252,8 @@ builder.Services.AddResponseCompression();
 builder.Services.AddResponseCaching();
 
 // ---------- Rate limiting ----------
+// В тестах все запросы приходят «с одного адреса» — лимит входа там шире, чтобы проверять блокировку по аккаунту.
+var authPermitLimit = builder.Environment.IsEnvironment("Testing") ? 200 : 10;
 builder.Services.AddRateLimiter(options =>
 {
     // Общий лимит: по пользователю (вошедшие), по IP — только для анонимных запросов.
@@ -297,7 +292,7 @@ builder.Services.AddRateLimiter(options =>
             partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
             factory: _ => new FixedWindowRateLimiterOptions
             {
-                PermitLimit = 10,
+                PermitLimit = authPermitLimit,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0
             }));
@@ -528,8 +523,13 @@ var fwd = new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
 };
-fwd.KnownNetworks.Clear();
-fwd.KnownProxies.Clear();
+// X-Forwarded-* принимаются только от доверенного прокси. По умолчанию это сам сервер (Caddy на 127.0.0.1 перед API);
+// раньше списки очищались, и подставленный клиентом X-Forwarded-For принимался за настоящий адрес.
+foreach (var proxy in (builder.Configuration["ForwardedHeaders:KnownProxies"] ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+{
+    if (System.Net.IPAddress.TryParse(proxy, out var proxyAddress))
+        fwd.KnownProxies.Add(proxyAddress);
+}
 app.UseForwardedHeaders(fwd);
 
 if (app.Environment.IsProduction())

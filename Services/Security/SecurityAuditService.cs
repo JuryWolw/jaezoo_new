@@ -78,10 +78,7 @@ public sealed class SecurityAuditService(AppDbContext db, ILogger<SecurityAuditS
 
     private static string GetClientIp(HttpContext httpContext)
     {
-        var forwarded = httpContext.Request.Headers["X-Forwarded-For"].ToString();
-        if (!string.IsNullOrWhiteSpace(forwarded))
-            return forwarded.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? string.Empty;
-
+        // Настоящий адрес уже подставлен ForwardedHeaders от доверенного прокси; X-Forwarded-For пишет сам клиент.
         return httpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
     }
 

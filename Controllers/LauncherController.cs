@@ -76,6 +76,10 @@ public sealed class LauncherController : ControllerBase
             version = manifest.Version,
             entryExe = manifest.EntryExe,
             minLauncherVersion = manifest.MinLauncherVersion,
+            packageSize = manifest.PackageSize,
+            packageSha256 = manifest.PackageSha256,
+            signature = manifest.Signature,
+            signatureAlgorithm = manifest.SignatureAlgorithm,
             files
         };
     }

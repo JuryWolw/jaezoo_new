@@ -25,9 +25,21 @@ public class AuthController(
     JaeZoo.Server.Services.Chat.SystemChatService systemChat,
     SmartCaptchaService captcha,
     SecurityAuditService securityAudit,
+    LoginThrottle throttle,
     ILogger<AuthController> log) : ControllerBase
 {
     private readonly PasswordHasher<User> _hasher = new();
+
+    // Неизвестный логин проверяется против этого хэша: ответ занимает столько же, сколько с настоящим аккаунтом,
+    // и по времени нельзя узнать, существует ли аккаунт.
+    private static readonly string TimingDummyHash = new PasswordHasher<User>().HashPassword(new User(), "jaezoo-timing-equalizer");
+
+    private ObjectResult TooManyAttempts(TimeSpan wait)
+    {
+        Response.Headers.RetryAfter = ((int)Math.Ceiling(wait.TotalSeconds)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var minutes = Math.Max(1, (int)Math.Ceiling(wait.TotalMinutes));
+        return StatusCode(StatusCodes.Status429TooManyRequests, $"Слишком много неудачных попыток. Попробуйте через {minutes} мин.");
+    }
 
     public sealed record LoginAvailabilityRequest(string? Login);
 
@@ -167,12 +179,23 @@ public class AuthController(
             ? IdentityDataProtector.HashEmail(loginOrEmail)
             : IdentityDataProtector.HashLogin(loginOrEmail);
 
+        var accountKey = LoginThrottle.AccountKey(lookupHash);
+        var addressKey = LoginThrottle.AddressKey(UserSessionService.GetRemoteIp(HttpContext));
+        if (throttle.RetryAfterAny(accountKey, addressKey) is { } wait)
+        {
+            await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginThrottled", "Identity", SecurityAuditService.HashTarget(loginOrEmail), "Too many failed attempts.", ct);
+            return TooManyAttempts(wait);
+        }
+
         var user = await db.Users.FirstOrDefaultAsync(u =>
             u.LoginHash == lookupHash ||
             u.EmailHash == lookupHash, ct);
 
         if (user is null)
         {
+            _hasher.VerifyHashedPassword(new User(), TimingDummyHash, password);
+            throttle.RegisterFailure(accountKey, LoginThrottle.AccountLimit);
+            throttle.RegisterFailure(addressKey, LoginThrottle.AddressLimit);
             await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginFailed", "Identity", SecurityAuditService.HashTarget(loginOrEmail), "Unknown login/email or wrong password.", ct);
             return Unauthorized("Неверный логин/почта или пароль.");
         }
@@ -188,15 +211,19 @@ public class AuthController(
         var result = _hasher.VerifyHashedPassword(user, user.PasswordHash, password);
         if (result is PasswordVerificationResult.Failed)
         {
+            throttle.RegisterFailure(accountKey, LoginThrottle.AccountLimit);
+            throttle.RegisterFailure(addressKey, LoginThrottle.AddressLimit);
             await securityAudit.TryWriteAsync(User, HttpContext, "Security.LoginFailed", "User", user.Id.ToString(), $"Wrong password. publicId={user.PublicId}", ct);
             return Unauthorized("Неверный логин/почта или пароль.");
         }
 
-        if (result == PasswordVerificationResult.SuccessRehashNeeded)
-            IdentityDataProtector.SetLegacyLoginPlaceholder(user);
-        IdentityDataProtector.SetLegacyEmailPlaceholder(user);
+        throttle.Reset(accountKey);
 
-        user.PasswordHash = _hasher.HashPassword(user, password);
+        // Пароль перехэшируется только когда этого требует устаревший формат хэша. Открытые логин/почта заменяются
+        // заглушками внутри SetLogin/SetEmail ниже (раньше заглушка почты ставилась при каждом входе — из-за
+        // пропущенных скобок у if).
+        if (result == PasswordVerificationResult.SuccessRehashNeeded)
+            user.PasswordHash = _hasher.HashPassword(user, password);
 
         if (string.IsNullOrWhiteSpace(user.LoginHash))
             IdentityDataProtector.SetLogin(user, UserIdentityService.GetLogin(user));
@@ -320,6 +347,10 @@ public class AuthController(
         if (!user.TwoFactorEnabled || string.IsNullOrWhiteSpace(user.TwoFactorSecretEncrypted) || user.IsDisabled)
             return Unauthorized("Двухфакторная защита недоступна.");
 
+        var twoFactorKey = LoginThrottle.TwoFactorKey(user.Id);
+        if (throttle.RetryAfter(twoFactorKey) is { } wait2fa)
+            return TooManyAttempts(wait2fa);
+
         var normalizedOtp = TotpService.NormalizeCode(code);
         var verified = false;
         var usedRecoveryCode = false;
@@ -327,7 +358,11 @@ public class AuthController(
         if (normalizedOtp.Length == 6 && normalizedOtp.All(char.IsDigit))
         {
             var secret = IdentityDataProtector.UnprotectSecret(user.TwoFactorSecretEncrypted);
-            verified = TotpService.VerifyTotp(secret, normalizedOtp);
+            if (TotpService.TryVerifyTotp(secret, normalizedOtp, user.TwoFactorLastUsedStep, out var acceptedStep))
+            {
+                verified = true;
+                user.TwoFactorLastUsedStep = acceptedStep;
+            }
         }
 
         if (!verified)
@@ -359,10 +394,12 @@ public class AuthController(
 
         if (!verified)
         {
+            throttle.RegisterFailure(twoFactorKey, LoginThrottle.TwoFactorLimit);
             await securityAudit.TryWriteAsync(User, HttpContext, "Security.Login2FAFailed", "User", user.Id.ToString(), $"Wrong 2FA/recovery/email code. publicId={user.PublicId}", ct);
             return Unauthorized("Неверный код из приложения-аутентификатора, recovery-код или код с почты.");
         }
 
+        throttle.Reset(twoFactorKey);
         challenge.UsedAt = now;
         user.UpdatedAt = now;
 
@@ -476,8 +513,14 @@ public class AuthController(
     }
 
 
+    /// <summary>Ссылка из письма открывает только страницу с кнопкой — состояние по GET не меняется.</summary>
     [AllowAnonymous]
     [HttpGet("login-alerts/{token}/not-me")]
+    public IActionResult ConfirmLoginAsSuspicious([FromRoute] string token)
+        => Content(LoginNotificationService.BuildConfirmHtml(token ?? string.Empty), "text/html; charset=utf-8");
+
+    [AllowAnonymous]
+    [HttpPost("login-alerts/{token}/not-me")]
     public async Task<IActionResult> MarkLoginAsSuspicious([FromRoute] string token, CancellationToken ct)
     {
         var result = await loginNotifications.HandleNotMeAsync(token, HttpContext, ct);

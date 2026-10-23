@@ -92,14 +92,7 @@ public sealed class SmartCaptchaService
 
     private static string GetClientIp(HttpContext context)
     {
-        var forwarded = context.Request.Headers["X-Forwarded-For"].FirstOrDefault();
-        if (!string.IsNullOrWhiteSpace(forwarded))
-        {
-            var first = forwarded.Split(',')[0].Trim();
-            if (!string.IsNullOrWhiteSpace(first))
-                return first;
-        }
-
+        // Настоящий адрес уже подставлен ForwardedHeaders от доверенного прокси; X-Forwarded-For пишет сам клиент.
         return context.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
     }
 

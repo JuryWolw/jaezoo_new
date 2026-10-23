@@ -33,6 +33,33 @@ public static class TotpService
         return false;
     }
 
+    /// <summary>
+    /// Проверка кода с защитой от повтора (RFC 6238 §5.2): код принимается, только если его шаг новее последнего
+    /// использованного. Иначе подсмотренный или перехваченный код можно ввести ещё раз, пока он не истёк (~30–90 с).
+    /// </summary>
+    public static bool TryVerifyTotp(string base32Secret, string? code, long? lastUsedStep, out long acceptedStep, DateTime? utcNow = null, int allowedDriftSteps = 1)
+    {
+        acceptedStep = 0;
+        var normalized = NormalizeCode(code);
+        if (normalized.Length != 6 || !normalized.All(char.IsDigit))
+            return false;
+
+        var counter = GetCounter(utcNow ?? DateTime.UtcNow);
+        for (var offset = -allowedDriftSteps; offset <= allowedDriftSteps; offset++)
+        {
+            var step = counter + offset;
+            if (lastUsedStep is { } used && step <= used)
+                continue;
+            if (FixedTimeEquals(ComputeTotp(base32Secret, step), normalized))
+            {
+                acceptedStep = step;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public static string ComputeTotp(string base32Secret, long counter)
     {
         var key = FromBase32(base32Secret);

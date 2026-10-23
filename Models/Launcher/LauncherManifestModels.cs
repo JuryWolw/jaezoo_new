@@ -15,6 +15,12 @@ public sealed class LauncherManifest
 
     /// <summary>Список изменений релиза (ReleaseTool). Сервер публикует из него новость «Обновление x.y.z».</summary>
     public string? ReleaseNotes { get; set; }
+    // Подпись выпуска (ReleaseTool). Сервер передаёт её лаунчеру как есть — подделать её он не может.
+    public long? PackageSize { get; set; }
+    public string? PackageSha256 { get; set; }
+    public string? Signature { get; set; }
+    public string? SignatureAlgorithm { get; set; }
+
     public List<LauncherManifestFile> Files { get; set; } = new();
 }
 

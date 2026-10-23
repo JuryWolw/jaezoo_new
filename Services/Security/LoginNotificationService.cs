@@ -142,6 +142,36 @@ public sealed class LoginNotificationService(
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
+    /// <summary>
+    /// Страница по ссылке из письма: только кнопка подтверждения (POST). Само действие по GET не выполняется —
+    /// иначе сессии завершал бы любой, кто «открыл» ссылку: почтовый сканер, превью в мессенджере, предзагрузка браузера.
+    /// </summary>
+    public static string BuildConfirmHtml(string token)
+    {
+        var action = WebUtility.HtmlEncode($"/api/auth/login-alerts/{Uri.EscapeDataString(token)}/not-me");
+        return $"""
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Это были не вы?</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+</head>
+<body style="margin:0;background:#10131c;color:#eef2ff;font-family:Arial,sans-serif;">
+  <main style="max-width:680px;margin:54px auto;padding:28px;border-radius:22px;background:#171b28;border:1px solid rgba(255,255,255,.08);box-shadow:0 24px 70px rgba(0,0,0,.35);">
+    <div style="font-size:13px;color:#8aa0ff;text-transform:uppercase;letter-spacing:.12em;margin-bottom:10px;">JaeZoo Security</div>
+    <h1 style="font-size:28px;margin:0 0 14px;">Это были не вы?</h1>
+    <p style="font-size:16px;line-height:1.6;color:#cfd6ea;margin:0 0 22px;">Мы завершим все активные сессии аккаунта. После этого войдите в JaeZoo заново и смените пароль.</p>
+    <form method="post" action="{action}">
+      <button type="submit" style="font-size:16px;padding:12px 22px;border:0;border-radius:12px;background:#e30613;color:#fff;cursor:pointer;">Завершить все сессии</button>
+    </form>
+  </main>
+</body>
+</html>
+""";
+    }
+
     public static string BuildResultHtml(LoginAlertHandleResult result)
     {
         var title = result switch
