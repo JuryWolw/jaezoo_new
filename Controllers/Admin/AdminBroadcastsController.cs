@@ -146,6 +146,12 @@ public sealed class AdminBroadcastsController(
 
         await db.SaveChangesAsync(ct);
 
+        // Запись в аудит — до отправки и без отмены: раньше она шла последней и пропадала, если отправка
+        // падала или запрос обрывался, — рассылка уходила, а в журнале её не было.
+        var where = string.Join(" + ", new[] { request.ToNotifications ? "уведомления" : null, request.ToSystemChat ? "системный чат" : null }.Where(x => x != null));
+        await audit.WriteAsync(User, HttpContext, "BroadcastSent", "Broadcast", broadcast.Id.ToString(),
+            $"Рассылка «{(title.Length > 0 ? title : text.Length > 60 ? text[..60] + "…" : text)}» → {where}; аудитория: {(target is not null ? $"{target.PublicId} / {broadcast.TargetName}" : request.Audience == AdminBroadcast.AudienceAll ? "все" : "персонал")}; получателей: {recipients.Count}; офлайн: {broadcast.DeliverOffline}; картинок: {fileIds.Count}", CancellationToken.None);
+
         if (request.ToNotifications)
         {
             var payload = new BroadcastNotificationDto(broadcast.Id, broadcast.Title, broadcast.Text, broadcast.CreatedAt);
@@ -160,10 +166,6 @@ public sealed class AdminBroadcastsController(
             var chatText = string.IsNullOrWhiteSpace(title) ? text : string.IsNullOrWhiteSpace(text) ? title : $"{title}\n\n{text}";
             _ = Task.Run(() => DeliverToSystemChatAsync(scopeFactory, logger, recipients, chatText, fileIds));
         }
-
-        var where = string.Join(" + ", new[] { request.ToNotifications ? "уведомления" : null, request.ToSystemChat ? "системный чат" : null }.Where(x => x != null));
-        await audit.WriteAsync(User, HttpContext, "BroadcastSent", "Broadcast", broadcast.Id.ToString(),
-            $"Рассылка «{(title.Length > 0 ? title : text.Length > 60 ? text[..60] + "…" : text)}» → {where}; аудитория: {(target is not null ? $"{target.PublicId} / {broadcast.TargetName}" : request.Audience == AdminBroadcast.AudienceAll ? "все" : "персонал")}; получателей: {recipients.Count}; офлайн: {broadcast.DeliverOffline}; картинок: {fileIds.Count}", ct);
 
         return ToDto(broadcast);
     }

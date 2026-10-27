@@ -10,4 +10,7 @@ public interface IAdsService
     Task<AdminAdsManifestResponse> SaveManifestAsync(SaveAdsManifestRequest request, CancellationToken cancellationToken = default);
     Task<UploadAdImageResponse> UploadImageAsync(IFormFile file, CancellationToken cancellationToken = default);
     Task DeleteImageAsync(string imageKey, CancellationToken cancellationToken = default);
+
+    /// <summary>Временная ссылка на картинку рекламы (для предпросмотра заявки); пусто — ключ не из папки рекламы.</summary>
+    string GetImageUrl(string? imageKey);
 }

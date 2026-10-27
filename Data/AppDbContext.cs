@@ -29,6 +29,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GroupBanner> GroupBanners => Set<GroupBanner>();
     public DbSet<SiteContent> SiteContents => Set<SiteContent>();
     public DbSet<Badge> Badges => Set<Badge>();
+    public DbSet<JaeZoo.Server.Models.Ads.AdChangeRequest> AdChangeRequests => Set<JaeZoo.Server.Models.Ads.AdChangeRequest>();
     public DbSet<UserBadge> UserBadges => Set<UserBadge>();
     public DbSet<GroupVoiceSession> GroupVoiceSessions => Set<GroupVoiceSession>();
     public DbSet<GroupVoiceParticipant> GroupVoiceParticipants => Set<GroupVoiceParticipant>();
@@ -679,6 +680,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<UserBadge>().HasIndex(x => x.BadgeId);
         b.Entity<UserBadge>().HasOne<User>().WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<UserBadge>().HasOne<Badge>().WithMany().HasForeignKey(x => x.BadgeId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<JaeZoo.Server.Models.Ads.AdChangeRequest>().HasIndex(x => new { x.Status, x.CreatedAt });
         b.Entity<GroupBanner>()
             .HasOne<GroupChat>()
             .WithMany()

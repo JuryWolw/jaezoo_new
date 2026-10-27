@@ -161,12 +161,15 @@ builder.Services
 
 builder.Services.AddAuthorization(options =>
 {
-    options.AddPolicy(AuthPolicies.OwnerOnly, policy => policy.RequireRole(AuthPolicies.OwnerRoles));
-    options.AddPolicy(AuthPolicies.AdminAccess, policy => policy.RequireRole(AuthPolicies.AdminRoles));
-    options.AddPolicy(AuthPolicies.ManageAds, policy => policy.RequireRole(AuthPolicies.AdsManagerRoles));
-    options.AddPolicy(AuthPolicies.ViewAdminAudit, policy => policy.RequireRole(AuthPolicies.AuditViewerRoles));
-    options.AddPolicy(AuthPolicies.AdminPanelAccess, policy => policy.RequireRole(AuthPolicies.AdminPanelRoles));
-    options.AddPolicy(AuthPolicies.ModerationAccess, policy => policy.RequireRole(AuthPolicies.ModerationRoles));
+    // Админские политики — только для токенов входа персонала (StaffClaims): роль в обычном токене клиента не в счёт.
+    options.AddPolicy(AuthPolicies.OwnerOnly, policy => policy.RequireRole(AuthPolicies.OwnerRoles).RequireClaim(StaffClaims.App, StaffClaims.AdminApp));
+    options.AddPolicy(AuthPolicies.AdminAccess, policy => policy.RequireRole(AuthPolicies.AdminRoles).RequireClaim(StaffClaims.App, StaffClaims.AdminApp));
+    options.AddPolicy(AuthPolicies.ManageAds, policy => policy.RequireRole(AuthPolicies.AdsManagerRoles).RequireClaim(StaffClaims.App, StaffClaims.AdminApp, StaffClaims.AdsApp));
+    // Публикация рекламы без проверки — только владелец и администраторы.
+    options.AddPolicy(AuthPolicies.PublishAds, policy => policy.RequireRole(AuthPolicies.AdminRoles).RequireClaim(StaffClaims.App, StaffClaims.AdminApp, StaffClaims.AdsApp));
+    options.AddPolicy(AuthPolicies.ViewAdminAudit, policy => policy.RequireRole(AuthPolicies.AuditViewerRoles).RequireClaim(StaffClaims.App, StaffClaims.AdminApp));
+    options.AddPolicy(AuthPolicies.AdminPanelAccess, policy => policy.RequireRole(AuthPolicies.AdminPanelRoles).RequireClaim(StaffClaims.App, StaffClaims.AdminApp));
+    options.AddPolicy(AuthPolicies.ModerationAccess, policy => policy.RequireRole(AuthPolicies.ModerationRoles).RequireClaim(StaffClaims.App, StaffClaims.AdminApp));
 });
 
 
@@ -194,6 +197,7 @@ builder.Services.AddScoped<SystemChatService>();
 builder.Services.AddScoped<JaeZoo.Server.Services.News.NewsService>();
 builder.Services.AddScoped<JaeZoo.Server.Services.SiteContentService>();
 builder.Services.AddSingleton<JaeZoo.Server.Services.Security.LoginThrottle>();
+builder.Services.AddSingleton<JaeZoo.Server.Services.Security.StaffLoginChallengeStore>();
 builder.Services.AddScoped<GroupChatService>();
 builder.Services.AddScoped<ChannelService>();
 builder.Services.AddScoped<JaeZoo.Server.Services.History.HistoryService>();

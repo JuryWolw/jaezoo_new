@@ -305,6 +305,8 @@ public sealed class AdsService : IAdsService
         return manifest;
     }
 
+    public string GetImageUrl(string? imageKey) => string.IsNullOrWhiteSpace(imageKey) ? string.Empty : CreateSignedUrl(imageKey);
+
     private string CreateSignedUrl(string key)
     {
         key = NormalizeImageKey(key);

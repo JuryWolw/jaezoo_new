@@ -51,6 +51,18 @@ public sealed class AdminAuditService(AppDbContext db, ILogger<AdminAuditService
             entry.Summary);
     }
 
+    /// <summary>Запись от имени конкретного пользователя — когда токена ещё нет (вход персонала).</summary>
+    public Task WriteForUserAsync(User user, HttpContext httpContext, string action, string targetType, string targetId, string summary, CancellationToken ct = default)
+    {
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(new[]
+        {
+            new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+            new Claim("public_id", user.PublicId ?? string.Empty),
+            new Claim("display_name", JaeZoo.Server.Services.UserIdentityService.GetPublicName(user)),
+        }));
+        return WriteAsync(principal, httpContext, action, targetType, targetId, summary, ct);
+    }
+
     private static string GetClientIp(HttpContext httpContext)
     {
         // Настоящий адрес уже подставлен ForwardedHeaders от доверенного прокси; X-Forwarded-For пишет сам клиент.
@@ -77,6 +89,9 @@ public sealed record AdminAuditLogDto(
     string IpAddress,
     string UserAgent)
 {
+    /// <summary>Имя и ID пользователя-цели (если цель — пользователь).</summary>
+    public string? TargetName { get; init; }
+
     public static AdminAuditLogDto From(AdminAuditLog log) => new(
         log.Id,
         log.CreatedAt,

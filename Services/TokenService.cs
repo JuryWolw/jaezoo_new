@@ -19,7 +19,9 @@ public class TokenService(IOptions<JwtOptions> opts)
 {
     private readonly JwtOptions _o = opts.Value;
 
-    public string Create(User u, IEnumerable<GlobalRole>? roles = null, Guid? sessionId = null, DateTime? expiresUtc = null)
+    /// <param name="staffApp">Только для входа персонала (StaffAuthController): «admin» или «ads». Админские политики
+    /// требуют эту отметку, поэтому обычный токен клиента — даже с ролью администратора — админку не открывает.</param>
+    public string Create(User u, IEnumerable<GlobalRole>? roles = null, Guid? sessionId = null, DateTime? expiresUtc = null, string? staffApp = null)
     {
         var claims = new List<Claim>
         {
@@ -38,6 +40,9 @@ public class TokenService(IOptions<JwtOptions> opts)
 
         foreach (var role in (roles ?? Enumerable.Empty<GlobalRole>()).Distinct())
             claims.Add(new Claim(ClaimTypes.Role, role.ToString()));
+
+        if (staffApp is JaeZoo.Server.Security.StaffClaims.AdminApp or JaeZoo.Server.Security.StaffClaims.AdsApp)
+            claims.Add(new Claim(JaeZoo.Server.Security.StaffClaims.App, staffApp));
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_o.Key));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
