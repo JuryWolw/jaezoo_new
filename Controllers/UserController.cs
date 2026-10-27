@@ -184,7 +184,7 @@ namespace JaeZoo.Server.Controllers
                               join b in _db.Badges.AsNoTracking() on ub.BadgeId equals b.Id
                               where ids.Contains(ub.UserId)
                               orderby b.SortOrder, b.Title
-                              select new { ub.UserId, Badge = new UserBadgeDto(b.Id, b.Title, b.ColorHex, b.Icon) }).ToListAsync(ct);
+                              select new { ub.UserId, Badge = new UserBadgeDto(b.Id, b.Title, b.ColorHex, b.Icon, b.TextColorHex) }).ToListAsync(ct);
             return rows.GroupBy(r => r.UserId).ToDictionary(g => g.Key, g => g.Select(r => r.Badge).ToList());
         }
 
@@ -662,7 +662,7 @@ namespace JaeZoo.Server.Controllers
                    join b in _db.Badges.AsNoTracking() on ub.BadgeId equals b.Id
                    where ub.UserId == userId
                    orderby b.SortOrder, b.Title
-                   select new UserBadgeDto(b.Id, b.Title, b.ColorHex, b.Icon)).ToListAsync(ct);
+                   select new UserBadgeDto(b.Id, b.Title, b.ColorHex, b.Icon, b.TextColorHex)).ToListAsync(ct);
 
         private PublicUserDto ToPublicDto(User u) =>
             new PublicUserDto(

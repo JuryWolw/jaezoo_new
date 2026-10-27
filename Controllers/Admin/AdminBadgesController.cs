@@ -12,8 +12,8 @@ using Microsoft.EntityFrameworkCore;
 
 namespace JaeZoo.Server.Controllers.Admin;
 
-public sealed record SaveBadgeRequest(string? Title, string? ColorHex, string? Icon, string? Description, int SortOrder);
-public sealed record AdminBadgeDto(Guid Id, string Title, string ColorHex, string? Icon, string? Description, int SortOrder, int HoldersCount);
+public sealed record SaveBadgeRequest(string? Title, string? ColorHex, string? Icon, string? Description, int SortOrder, string? TextColorHex = null);
+public sealed record AdminBadgeDto(Guid Id, string Title, string ColorHex, string? Icon, string? Description, int SortOrder, int HoldersCount, string? TextColorHex = null);
 public sealed record BadgeHolderDto(Guid UserId, string Name, string PublicId, DateTime GrantedAt);
 public sealed record BadgeGrantRequest(Guid UserId);
 
@@ -143,8 +143,18 @@ public sealed partial class AdminBadgesController(AppDbContext db, AdminAuditSer
         if (icon is { Length: > 8 }) return "Значок — один символ или эмодзи.";
         var description = string.IsNullOrWhiteSpace(request.Description) ? null : request.Description.Trim();
         if (description is { Length: > 200 }) return "Описание — не больше 200 символов.";
+        // Цвет текста: если не передан — у существующей плашки остаётся прежний (старые плашки не меняются).
+        string? textColor = badge.TextColorHex;
+        if (request.TextColorHex != null)
+        {
+            var t = request.TextColorHex.Trim();
+            if (t.Length == 0) textColor = null;
+            else if (!ColorRegex().IsMatch(t)) return "Цвет текста — в виде #RRGGBB.";
+            else textColor = t.ToUpperInvariant();
+        }
         badge.Title = title;
         badge.ColorHex = color.ToUpperInvariant();
+        badge.TextColorHex = textColor;
         badge.Icon = icon;
         badge.Description = description;
         badge.SortOrder = Math.Clamp(request.SortOrder, -1000, 1000);
@@ -157,5 +167,5 @@ public sealed partial class AdminBadgesController(AppDbContext db, AdminAuditSer
         return Guid.TryParse(sub, out var id) ? id : null;
     }
 
-    private static AdminBadgeDto ToDto(Badge b, int holders) => new(b.Id, b.Title, b.ColorHex, b.Icon, b.Description, b.SortOrder, holders);
+    private static AdminBadgeDto ToDto(Badge b, int holders) => new(b.Id, b.Title, b.ColorHex, b.Icon, b.Description, b.SortOrder, holders, b.TextColorHex);
 }

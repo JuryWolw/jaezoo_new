@@ -10,9 +10,13 @@ public class Badge
     [MaxLength(40)]
     public string Title { get; set; } = string.Empty;
 
-    /// <summary>Цвет плашки, #RRGGBB.</summary>
+    /// <summary>Цвет плашки, #RRGGBB. Без <see cref="TextColorHex"/> — «старый» вид: текст светлее этого цвета на нём же, приглушённом; с ним — это цвет фона.</summary>
     [MaxLength(9)]
     public string ColorHex { get; set; } = "#E30613";
+
+    /// <summary>Цвет текста, #RRGGBB (10.2026). null — плашка, созданная раньше: вид не меняется.</summary>
+    [MaxLength(9)]
+    public string? TextColorHex { get; set; }
 
     /// <summary>Значок слева от подписи: символ Segoe MDL2 или эмодзи; null — без значка.</summary>
     [MaxLength(8)]

@@ -586,6 +586,10 @@ namespace JaeZoo.Server.Migrations
                     b.Property<int>("SortOrder")
                         .HasColumnType("integer");
 
+                    b.Property<string>("TextColorHex")
+                        .HasMaxLength(9)
+                        .HasColumnType("character varying(9)");
+
                     b.Property<string>("Title")
                         .IsRequired()
                         .HasMaxLength(40)

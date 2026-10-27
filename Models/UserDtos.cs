@@ -51,7 +51,8 @@ namespace JaeZoo.Server.Models
     }
 
     /// <summary>Плашка у ника: подпись, цвет (#RRGGBB), значок (символ Segoe MDL2 или эмодзи, может не быть).</summary>
-    public record UserBadgeDto(Guid Id, string Title, string ColorHex, string? Icon);
+    /// <param name="TextColorHex">Цвет текста; null — старая плашка (текст светлее ColorHex, фон — ColorHex приглушённый).</param>
+    public record UserBadgeDto(Guid Id, string Title, string ColorHex, string? Icon, string? TextColorHex = null);
 
     public record UserAvatarDto(
         Guid Id,
