@@ -59,7 +59,18 @@ namespace JaeZoo.Server.Controllers
                 .Distinct()
                 .ToListAsync(ct);
 
-            return friendIds.Select(x => x.ToString())
+            // Участники общих групп и каналов тоже видят ник и аватар (лента, список участников, комментарии):
+            // без них изменения доходили только до друзей.
+            var myGroups = _db.GroupChatMembers.AsNoTracking().Where(m => m.UserId == userId).Select(m => m.GroupChatId);
+            var coMemberIds = await _db.GroupChatMembers
+                .AsNoTracking()
+                .Where(m => myGroups.Contains(m.GroupChatId) && m.UserId != userId)
+                .Select(m => m.UserId)
+                .Distinct()
+                .Take(5000)
+                .ToListAsync(ct);
+
+            return friendIds.Concat(coMemberIds).Select(x => x.ToString())
                 .Append(userId.ToString())
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();

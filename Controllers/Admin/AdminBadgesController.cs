@@ -1,5 +1,7 @@
 using System.Text.RegularExpressions;
 using JaeZoo.Server.Data;
+using JaeZoo.Server.Hubs;
+using Microsoft.AspNetCore.SignalR;
 using JaeZoo.Server.Models;
 using JaeZoo.Server.Security;
 using JaeZoo.Server.Services;
@@ -19,8 +21,30 @@ public sealed record BadgeGrantRequest(Guid UserId);
 [ApiController]
 [Authorize(Policy = AuthPolicies.AdminAccess)]
 [Route("api/admin/badges")]
-public sealed partial class AdminBadgesController(AppDbContext db, AdminAuditService audit) : ControllerBase
+public sealed partial class AdminBadgesController(AppDbContext db, AdminAuditService audit, IHubContext<ChatHub> hub, ILogger<AdminBadgesController> log) : ControllerBase
 {
+    /// <summary>
+    /// Плашки публичны (видны в профиле), поэтому событие уходит всем подключённым: клиент сбрасывает кеш этих
+    /// пользователей и перезапрашивает плашки одним пакетом — обновление в списках, ленте и профиле сразу.
+    /// all = true — изменилась сама плашка у большого числа людей: сбросить весь кеш.
+    /// </summary>
+    private async Task NotifyBadgesChangedAsync(IReadOnlyCollection<Guid> userIds, CancellationToken ct)
+    {
+        if (userIds.Count == 0) return;
+        try
+        {
+            var all = userIds.Count > 500;
+            await hub.Clients.All.SendAsync("UserBadgesChanged", new { userIds = all ? Array.Empty<Guid>() : userIds.ToArray(), all }, ct);
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Failed to push badge changes.");
+        }
+    }
+
+    private Task<List<Guid>> HoldersOfAsync(Guid badgeId, CancellationToken ct)
+        => db.UserBadges.AsNoTracking().Where(b => b.BadgeId == badgeId).Select(b => b.UserId).ToListAsync(ct);
+
     [GeneratedRegex("^#[0-9A-Fa-f]{6}$")]
     private static partial Regex ColorRegex();
 
@@ -51,7 +75,9 @@ public sealed partial class AdminBadgesController(AppDbContext db, AdminAuditSer
         if (Apply(badge, request) is { } error) return BadRequest(new { error });
         await db.SaveChangesAsync(ct);
         await audit.WriteAsync(User, HttpContext, "BadgeEdited", "Badge", badge.Id.ToString(), $"Плашка «{badge.Title}» изменена", ct);
-        return ToDto(badge, await db.UserBadges.CountAsync(b => b.BadgeId == id, ct));
+        var holders = await HoldersOfAsync(id, ct);
+        await NotifyBadgesChangedAsync(holders, ct);
+        return ToDto(badge, holders.Count);
     }
 
     [HttpDelete("{id:guid}")]
@@ -59,10 +85,12 @@ public sealed partial class AdminBadgesController(AppDbContext db, AdminAuditSer
     {
         var badge = await db.Badges.FirstOrDefaultAsync(b => b.Id == id, ct);
         if (badge is null) return NotFound();
+        var holders = await HoldersOfAsync(id, ct);
         await db.UserBadges.Where(b => b.BadgeId == id).ExecuteDeleteAsync(ct);
         db.Badges.Remove(badge);
         await db.SaveChangesAsync(ct);
         await audit.WriteAsync(User, HttpContext, "BadgeDeleted", "Badge", id.ToString(), $"Плашка «{badge.Title}» удалена у всех", ct);
+        await NotifyBadgesChangedAsync(holders, ct);
         return NoContent();
     }
 
@@ -87,6 +115,7 @@ public sealed partial class AdminBadgesController(AppDbContext db, AdminAuditSer
         db.UserBadges.Add(new UserBadge { BadgeId = id, UserId = request.UserId, GrantedById = ActorId(), GrantedAt = DateTime.UtcNow });
         await db.SaveChangesAsync(ct);
         await audit.WriteAsync(User, HttpContext, "BadgeGranted", "User", request.UserId.ToString(), $"Выдана плашка «{badge.Title}»", ct);
+        await NotifyBadgesChangedAsync(new[] { request.UserId }, ct);
         return NoContent();
     }
 
@@ -97,7 +126,10 @@ public sealed partial class AdminBadgesController(AppDbContext db, AdminAuditSer
         if (badge is null) return NotFound(new { error = "Плашка не найдена." });
         var removed = await db.UserBadges.Where(b => b.BadgeId == id && b.UserId == request.UserId).ExecuteDeleteAsync(ct);
         if (removed > 0)
+        {
             await audit.WriteAsync(User, HttpContext, "BadgeRevoked", "User", request.UserId.ToString(), $"Снята плашка «{badge.Title}»", ct);
+            await NotifyBadgesChangedAsync(new[] { request.UserId }, ct);
+        }
         return NoContent();
     }
 

@@ -77,13 +77,28 @@ public sealed class NewsService(AppDbContext db, IHubContext<ChatHub> hub, IServ
         var post = new NewsPost
         {
             Category = NewsPost.CategoryUpdate,
-            Title = $"Обновление {version}",
+            Title = $"Обновление {DisplayVersion(version)}",
             Body = notes.Length > 20000 ? notes[..20000] : notes,
             Version = version,
             CreatedByName = "ReleaseTool"
         };
         logger.LogInformation("News: release post for client {Version}.", version);
         return await PublishAsync(post, sendToSystemChat: false, ct);
+    }
+
+    /// <summary>Версия для людей: 0.7.1-pre.1 → «0.7.1 Pre-release», 0.7.1-pre.2 → «0.7.1 Pre-release 2», 0.7.1-rc.1 → «0.7.1 RC 1».
+    /// Так же показывают ReleaseTool и лаунчер (JaeZoo/Shared/ReleaseVersion.cs).</summary>
+    public static string DisplayVersion(string version)
+    {
+        var text = (version ?? string.Empty).Trim();
+        var m = System.Text.RegularExpressions.Regex.Match(text, @"\A(?<core>[0-9]+(?:\.[0-9]+){1,3})-(?<label>pre|rc)(?:\.(?<n>[0-9]+))?\z",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        if (!m.Success) return text;
+        var core = m.Groups["core"].Value;
+        var n = m.Groups["n"].Success ? m.Groups["n"].Value : null;
+        return m.Groups["label"].Value.ToLowerInvariant() == "rc"
+            ? $"{core} RC {n ?? "1"}"
+            : n is null or "1" ? $"{core} Pre-release" : $"{core} Pre-release {n}";
     }
 
     internal static string SystemChatText(NewsPost post)
