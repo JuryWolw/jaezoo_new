@@ -32,7 +32,7 @@ public class UsersPresenceController : ControllerBase
         public bool ShowOnline { get; set; } = true;
         public LastSeenVisibility LastSeenVisibility { get; set; } = LastSeenVisibility.Approximate;
         public bool ShowActivity { get; set; } = true;
-        public int CallStatusVisibility { get; set; } = 1;
+        public int CallStatusVisibility { get; set; } = 2;
     }
 
     // GET api/users/presence-visibility
